@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from . import PLUGIN_ID, PLUGIN_VERSION, PROTOCOL_VERSION
 from .probe import probe_environment
@@ -51,7 +51,7 @@ def _project_params(value: Any) -> dict[str, Any]:
     }
 
 
-def handle_request(value: Any) -> dict[str, object]:
+def handle_request(value: Any, progress: Callable[[str], None] | None = None) -> dict[str, object]:
     """Validate and dispatch one plugin protocol request."""
     if not isinstance(value, dict):
         return _failure("", "INVALID_REQUEST", "request must be an object")
@@ -82,7 +82,7 @@ def handle_request(value: Any) -> dict[str, object]:
             }[method]
             if method in {"fan_check", "fan_solve"}:
                 params["fan_speed_ratio"] = value["params"].get("fanSpeedRatio", 1.1)
-            return _success(request_id, run_project_operation(**params))
+            return _success(request_id, run_project_operation(**params, progress=progress))
         except Exception as exc:
             return _failure(request_id, type(exc).__name__.upper(), str(exc)[:500])
     return _failure(request_id, "METHOD_NOT_FOUND", f"unsupported method: {method}")
@@ -95,7 +95,14 @@ def main() -> int:
             continue
         try:
             request = json.loads(raw_line)
-            response = handle_request(request)
+            request_id = request.get("id", "") if isinstance(request, dict) else ""
+            response = handle_request(
+                request,
+                progress=lambda stage: print(
+                    json.dumps({"id": request_id, "event": "progress", "stage": stage}, ensure_ascii=False),
+                    flush=True,
+                ),
+            )
         except json.JSONDecodeError:
             response = _failure("", "INVALID_JSON", "request is not valid JSON")
         except Exception as exc:  # plugin boundary must return a stable protocol error

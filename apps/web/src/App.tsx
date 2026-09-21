@@ -22,6 +22,7 @@ import {
   DocumentData20Regular,
   Home20Regular,
   Settings20Regular,
+  ArrowClockwise20Regular,
   WeatherSunny20Regular,
   WeatherMoon20Regular,
 } from '@fluentui/react-icons'
@@ -154,12 +155,13 @@ export function App() {
             <div className={styles.headerTitle}>{navItems.find(item => item.page === page)?.label}</div>
             <div className={styles.headerActions}>
               <Badge appearance="outline" color={probe?.status === 'READY' ? 'success' : 'informative'}>{probe ? `Icepak ${probe.status}` : '正在探测'}</Badge>
+              <Button appearance="subtle" icon={<ArrowClockwise20Regular />} aria-label="刷新" onClick={() => void refresh()} />
               <Button appearance="subtle" icon={dark ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />} aria-label="切换主题" onClick={() => setDark(value => !value)} />
             </div>
           </header>
           <div className={styles.content}>
             {page === 'overview' && <Overview styles={styles} tasks={tasks} activeCount={activeTasks.length} completedCount={completedTasks.length} probe={probe} loading={loading} error={error} onCreated={refresh} />}
-            {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} />}
+            {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
             {page === 'skills' && <Placeholder styles={styles} icon={<BrainCircuit20Regular />} title="技能库正在迁移" body="下一阶段接入 DSH 后，成功任务会沉淀为待审核的散热 Skill 草稿。" />}
             {page === 'nodes' && <Placeholder styles={styles} icon={<DesktopPulse20Regular />} title="当前只有本机节点" body="节点发现、设备配对和任务租约会在单机求解闭环稳定后启用。" />}
             {page === 'settings' && <IcepakSettings styles={styles} probe={probe} />}
@@ -185,39 +187,61 @@ function Overview({ styles, tasks, activeCount, completedCount, probe, loading, 
       <div className={styles.panel}><h2 className={styles.panelTitle}><DocumentData20Regular />已完成</h2><div className={styles.metric}>{completedCount}</div><div className={styles.metricLabel}>个任务已形成完整结果</div></div>
     </section>
     <section className={styles.workGrid}>
-      <TaskPanel styles={styles} tasks={tasks} loading={loading} error={error} />
+      <TaskPanel styles={styles} tasks={tasks} loading={loading} error={error} onChanged={onCreated} />
       <CreateTaskPanel styles={styles} onCreated={onCreated} />
     </section>
   </>
 }
 
-function TaskPanel({ styles, tasks, loading, error }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; loading: boolean; error: string }) {
-  return <div className={styles.panel}><h2 className={styles.panelTitle}>最近任务</h2>{loading ? <div className={styles.empty}><Spinner label="正在读取本地任务" /></div> : error ? <p className={styles.error}>{error}</p> : tasks.length === 0 ? <div className={styles.empty}><div><DocumentData20Regular fontSize={28} /><p>还没有任务。可以先创建一个需求草稿。</p></div></div> : <TaskTable styles={styles} tasks={tasks.slice(0, 8)} />}</div>
+function TaskPanel({ styles, tasks, loading, error, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; loading: boolean; error: string; onChanged(): Promise<void> }) {
+  return <div className={styles.panel}><h2 className={styles.panelTitle}>最近任务</h2>{loading ? <div className={styles.empty}><Spinner label="正在读取本地任务" /></div> : error ? <p className={styles.error}>{error}</p> : tasks.length === 0 ? <div className={styles.empty}><div><DocumentData20Regular fontSize={28} /><p>还没有任务。可以先创建一个需求草稿。</p></div></div> : <TaskTable styles={styles} tasks={tasks.slice(0, 8)} onChanged={onChanged} />}</div>
 }
 
-function TaskList({ styles, tasks, loading }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; loading: boolean }) {
-  return <><div className={styles.intro}><div><h1 className={styles.title}>任务</h1><p className={styles.subtitle}>执行状态、热判定和审批状态分别记录，避免把求解完成误认为热设计达标。</p></div></div><div className={styles.panel}>{loading ? <Spinner label="正在加载任务" /> : tasks.length ? <TaskTable styles={styles} tasks={tasks} /> : <div className={styles.empty}>当前没有任务。</div>}</div></>
+function TaskList({ styles, tasks, loading, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; loading: boolean; onChanged(): Promise<void> }) {
+  return <><div className={styles.intro}><div><h1 className={styles.title}>任务</h1><p className={styles.subtitle}>执行状态、热判定和审批状态分别记录，避免把求解完成误认为热设计达标。</p></div></div><div className={styles.panel}>{loading ? <Spinner label="正在加载任务" /> : tasks.length ? <TaskTable styles={styles} tasks={tasks} onChanged={onChanged} /> : <div className={styles.empty}>当前没有任务。</div>}</div></>
 }
 
-function TaskTable({ styles, tasks }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[] }) {
-  return <div style={{ overflowX: 'auto' }}><table className={styles.table}><thead className={styles.tableHead}><tr><th className={styles.tableCell}>任务</th><th className={styles.tableCell}>执行状态</th><th className={styles.tableCell}>热判定</th><th className={styles.tableCell}>版本</th></tr></thead><tbody>{tasks.map(task => <tr key={task.id}><td className={styles.tableCell}><strong>{task.title}</strong><div className={styles.details}>{task.description || '尚未填写补充说明'}</div></td><td className={styles.tableCell}><Badge appearance="outline">{task.executionStatus}</Badge></td><td className={styles.tableCell}>{task.thermalVerdict}</td><td className={styles.tableCell}>{task.version}</td></tr>)}</tbody></table></div>
+function TaskTable({ styles, tasks, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; onChanged(): Promise<void> }) {
+  return <div style={{ overflowX: 'auto' }}><table className={styles.table}><thead className={styles.tableHead}><tr><th className={styles.tableCell}>任务</th><th className={styles.tableCell}>执行状态</th><th className={styles.tableCell}>热判定</th><th className={styles.tableCell}>操作</th></tr></thead><tbody>{tasks.map(task => <tr key={task.id}><td className={styles.tableCell}><strong>{task.title}</strong><div className={styles.details}>{task.description || '尚未填写补充说明'}</div></td><td className={styles.tableCell}><Badge appearance="outline">{task.executionStatus}</Badge></td><td className={styles.tableCell}>{task.thermalVerdict}</td><td className={styles.tableCell}><TaskAction styles={styles} task={task} onChanged={onChanged} /></td></tr>)}</tbody></table></div>
+}
+
+function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof useStyles>; task: TaskRecord; onChanged(): Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
+  async function act(kind: 'confirm' | 'baseline') {
+    setBusy(true); setError('')
+    try {
+      const response = kind === 'confirm'
+        ? await fetch(`/api/tasks/${task.id}/transitions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'READY', expectedVersion: task.version, reason: '用户确认需求与工程路径' }) })
+        : await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
+      const body = await response.json() as { error?: { message?: string } }
+      if (!response.ok) throw new Error(body.error?.message ?? '操作未完成')
+      await onChanged()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '操作未完成') }
+    finally { setBusy(false) }
+  }
+  if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'READY') return <div><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '启动 Baseline'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
+  return <span className={styles.details}>{task.executionStatus === 'RUNNING' ? '后台求解中' : '无可用操作'}</span>
 }
 
 function CreateTaskPanel({ styles, onCreated }: { styles: ReturnType<typeof useStyles>; onCreated(): Promise<void> }) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [projectPath, setProjectPath] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   async function submit(event: FormEvent) {
     event.preventDefault(); setError(''); setSaving(true)
     try {
-      const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, description, ownerNodeId: 'local-node', requirementSnapshot: {} }) })
+      const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, description, ownerNodeId: 'local-node', requirementSnapshot: { projectPath, aedtVersion: '2024.2', cores: 4 } }) })
       if (!response.ok) { const body = await response.json() as { error?: { message?: string } }; throw new Error(body.error?.message ?? '任务未创建') }
-      setTitle(''); setDescription(''); await onCreated()
+      setTitle(''); setDescription(''); setProjectPath(''); await onCreated()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '任务未创建') }
     finally { setSaving(false) }
   }
-  return <div className={styles.panel}><h2 className={styles.panelTitle}><Add20Regular />新建需求草稿</h2><form className={styles.form} onSubmit={submit}><Field label="任务名称" required><Input value={title} onChange={(_, data) => setTitle(data.value)} /></Field><Field label="需求描述" hint="当前先保存草稿，真实求解前仍需确认参数和模型。"><Textarea resize="vertical" value={description} onChange={(_, data) => setDescription(data.value)} /></Field>{error && <div className={styles.error}>{error}</div>}<Button type="submit" appearance="primary" disabled={!title.trim() || saving}>{saving ? '正在保存' : '保存草稿'}</Button></form></div>
+  return <div className={styles.panel}><h2 className={styles.panelTitle}><Add20Regular />新建需求草稿</h2><form className={styles.form} onSubmit={submit}><Field label="任务名称" required><Input value={title} onChange={(_, data) => setTitle(data.value)} /></Field><Field label="Windows 工程路径" hint="保存后仍需人工确认，Core 会在求解前创建内容快照。"><Input value={projectPath} onChange={(_, data) => setProjectPath(data.value)} placeholder="C:\\ThermalModels\\Project1.aedt" /></Field><Field label="需求描述"><Textarea resize="vertical" value={description} onChange={(_, data) => setDescription(data.value)} /></Field>{error && <div className={styles.error}>{error}</div>}<Button type="submit" appearance="primary" disabled={!title.trim() || saving}>{saving ? '正在保存' : '保存草稿'}</Button></form></div>
 }
 
 function IcepakSettings({ styles, probe }: { styles: ReturnType<typeof useStyles>; probe: IcepakEnvironmentProbe | null }) {

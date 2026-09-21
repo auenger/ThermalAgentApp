@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { access, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
-import { basename, join, relative, resolve } from 'node:path'
+import { access, copyFile, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ArtifactRecord } from '@thermal-agent/contracts'
@@ -47,6 +47,14 @@ export class ArtifactStore {
   resolveArtifact(sha256: string): string {
     if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('artifact sha256 is invalid')
     return join(this.root, 'sha256', sha256.slice(0, 2), sha256)
+  }
+
+  async materialize(sha256: string, destination: string): Promise<string> {
+    const source = this.resolveArtifact(sha256)
+    const target = resolve(destination)
+    await mkdir(dirname(target), { recursive: true })
+    await copyFile(source, target)
+    return target
   }
 
   private async commitTempFile(tempPath: string, sha256: string, originalName: string, mediaType: string): Promise<ArtifactRecord> {

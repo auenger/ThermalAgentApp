@@ -28,8 +28,9 @@
 - [x] 从旧项目迁移 Baseline PyAEDT 求解代码路径（待 Windows 真实回归）。
 - [x] 从旧项目迁移温度 Monitor、原生残差和收敛证据采集（待 Windows 真实回归）。
 - [x] 从旧项目迁移风扇动作、写后回读及候选求解代码路径（待任务协调器接入）。
-- [ ] 求解子进程 heartbeat、取消和恢复。
-- [ ] Artifact 与 Task/Run/Attempt 关联。
+- [x] 本地求解 Attempt heartbeat、用户取消和 Core 重启中断识别。
+- [ ] Windows 进程树强制终止与可恢复重试。
+- [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [ ] PDF 报告迁移。
 - [ ] Windows 安装包和真实 AEDT 验收。
 
@@ -83,5 +84,6 @@ pnpm dev:core
 - Baseline/风扇候选求解、摄氏温度标准化及逐 Monitor 对比。
 - 原生残差、Monitor 稳定性、反向流和求解正常结束证据解析。
 - Core 为 Icepak 操作分配运行目录并通过插件端口调用。
+- Baseline 后台执行、输入快照、进度 heartbeat、取消和结果回收。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

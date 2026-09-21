@@ -140,6 +140,13 @@ export interface ArtifactRecord {
   createdAt: string
 }
 
+export interface AttemptArtifactRecord {
+  attemptId: string
+  sha256: string
+  role: 'INPUT_PROJECT' | 'SOLVED_PROJECT' | 'SOLVER_RESULT' | 'CONVERGENCE_EVIDENCE' | 'REPORT' | 'LOG'
+  createdAt: string
+}
+
 export interface IcepakEnvironmentProbe {
   pluginId: string
   pluginVersion: string

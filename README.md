@@ -16,6 +16,7 @@
 - Electron 与浏览器共用的 Fluent UI 工程工作台。
 - Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
+- Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
 
 当前还没有完成求解任务的后台进程管理与恢复、DSH 接入、Windows 真实 AEDT 回归验收、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
 
@@ -39,7 +40,7 @@ THERMAL_AGENT_PORT
 
 局域网绑定不会默认开启。后续实现设备配对和认证之后，才允许显式绑定非 loopback 地址。
 
-在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。插件会先复制工作副本，源工程不会被保存或修改。
+在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。也可以新建带工程路径的任务，确认需求后启动后台 Baseline。Core 会先生成内容寻址快照，源工程不会被保存或修改。
 
 ## 目录
 

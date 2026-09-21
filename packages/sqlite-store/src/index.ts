@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type {
   AttemptRecord,
+  AttemptArtifactRecord,
   AttemptStatus,
   ArtifactRecord,
   CreateRunInput,
@@ -140,6 +141,14 @@ export class LocalDatabase {
 
       CREATE INDEX IF NOT EXISTS attempts_status_heartbeat_idx
         ON attempts(status, heartbeat_at ASC);
+
+      CREATE TABLE IF NOT EXISTS attempt_artifacts (
+        attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+        sha256 TEXT NOT NULL REFERENCES artifacts(sha256),
+        role TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(attempt_id, sha256, role)
+      );
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (1, datetime('now'));
@@ -337,6 +346,13 @@ export class LocalDatabase {
     return rows.map(decodeAttempt)
   }
 
+  listActiveAttempts(): AttemptRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM attempts WHERE status IN ('STARTING', 'RUNNING') ORDER BY created_at ASC
+    `).all() as SqliteRow[]
+    return rows.map(decodeAttempt)
+  }
+
   transitionAttempt(
     id: string,
     toStatus: AttemptStatus,
@@ -433,6 +449,27 @@ export class LocalDatabase {
       relativePath: String(row.relative_path),
       createdAt: String(row.created_at),
     }
+  }
+
+  linkAttemptArtifact(record: AttemptArtifactRecord): AttemptArtifactRecord {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO attempt_artifacts(attempt_id, sha256, role, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(record.attemptId, record.sha256, record.role, record.createdAt)
+    return record
+  }
+
+  listAttemptArtifacts(attemptId: string): AttemptArtifactRecord[] {
+    const rows = this.db.prepare(`
+      SELECT attempt_id, sha256, role, created_at
+      FROM attempt_artifacts WHERE attempt_id = ? ORDER BY created_at ASC
+    `).all(attemptId) as SqliteRow[]
+    return rows.map(row => ({
+      attemptId: String(row.attempt_id),
+      sha256: String(row.sha256),
+      role: row.role as AttemptArtifactRecord['role'],
+      createdAt: String(row.created_at),
+    }))
   }
 
   private insertEvent(event: TaskEvent): void {

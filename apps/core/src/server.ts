@@ -8,6 +8,7 @@ import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseTaskTransi
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
+import { IcepakExecutionManager } from './execution-manager.js'
 
 export interface CoreAppOptions {
   home: string
@@ -28,10 +29,11 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const database = new LocalDatabase(join(home, 'data', 'thermal.db'))
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
+  const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   const server = createServer((request, response) => {
-    void route(request, response, database, pluginClient, webRoot, home).catch(error => writeError(response, error))
+    void route(request, response, database, pluginClient, executions, webRoot, home).catch(error => writeError(response, error))
   })
 
   return {
@@ -43,6 +45,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
         if (!server.listening) { resolveClose(); return }
         server.close(error => error ? reject(error) : resolveClose())
       })
+      await executions.close()
       database.close()
     },
   }
@@ -53,6 +56,7 @@ async function route(
   response: ServerResponse,
   database: LocalDatabase,
   pluginClient: IcepakPluginPort,
+  executions: IcepakExecutionManager,
   webRoot: string,
   home: string,
 ): Promise<void> {
@@ -78,7 +82,10 @@ async function route(
     if (!task) throw new TaskNotFoundError(taskMatch[1])
     const runs = database.listTaskRuns(task.id).map(run => ({
       ...run,
-      attempts: database.listRunAttempts(run.id),
+      attempts: database.listRunAttempts(run.id).map(attempt => ({
+        ...attempt,
+        artifacts: database.listAttemptArtifacts(attempt.id),
+      })),
     }))
     writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id) })
     return
@@ -88,6 +95,19 @@ async function route(
     const input = parseTaskTransitionInput(await readJsonBody(request))
     const task = database.transitionTask(transitionMatch[1], input.status, input.expectedVersion, input.reason)
     writeJson(response, 200, { task })
+    return
+  }
+  const baselineMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/baseline$/iu)
+  if (request.method === 'POST' && baselineMatch) {
+    const input = parseIcepakProjectOperationInput(await readJsonBody(request))
+    const started = await executions.startBaseline(baselineMatch[1], input)
+    writeJson(response, 202, started)
+    return
+  }
+  const cancelAttemptMatch = url.pathname.match(/^\/api\/attempts\/([0-9a-f-]+)\/cancel$/iu)
+  if (request.method === 'POST' && cancelAttemptMatch) {
+    executions.cancel(cancelAttemptMatch[1])
+    writeJson(response, 202, { accepted: true, attemptId: cancelAttemptMatch[1] })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/plugins/icepak/probe') {
@@ -206,7 +226,7 @@ function writeError(response: ServerResponse, error: unknown): void {
     writeJson(response, error.statusCode, { error: { code: error.code, message: error.message } })
     return
   }
-  if (error instanceof Error && /is required|must be|is invalid|exceeds/u.test(error.message)) {
+  if (error instanceof Error && /is required|must be|is invalid|is not active|exceeds/u.test(error.message)) {
     writeJson(response, 400, { error: { code: 'VALIDATION_ERROR', message: error.message } })
     return
   }
