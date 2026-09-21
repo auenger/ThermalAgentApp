@@ -94,7 +94,7 @@ export class DshHost {
     const patch = prepareDshProfile(this.home, this.pluginPath)
     const node = process.env.THERMAL_AGENT_NODE_BIN || process.execPath
     const runAsNode = node === process.execPath && Boolean(process.versions.electron)
-    const child = spawn(node, [cli, 'web', '--patch', patch, '--no-open', '--host', '127.0.0.1', '--port', String(port)], {
+    const child = spawn(node, ['--expose-internals', cli, 'web', '--patch', patch, '--no-open', '--host', '127.0.0.1', '--port', String(port)], {
       cwd: this.workspace,
       env: {
         ...process.env,

@@ -44,7 +44,7 @@
 
 - [x] 固定 DSH `0.1.5-rc.2` 并验证真实 Web Host。
 - [ ] DSH 随 Windows 安装包的离线打包验证（内置 Node 的 DSH 冒烟及 `afterPack` CLI 语法检查已配置，尚无实际安装运行证据）。
-- [x] DSH Host、认证 URL、工作区和原生 Session 持久化接入。
+- [x] DSH Host、认证 URL、工作区和原生 Session 持久化接入；已修复真实 `web` profile HMR 所需的 `--expose-internals` 启动参数，并以真实 Host/token-Cookie 页面和完整 Core 的 `ready` 状态验证。
 - [x] Loopback + Bearer Token 的 Thermal Tools Bridge。
 - [x] 自然语言创建 Task 草稿、读取任务、环境探测和工程检查工具。
 - [x] 人工确认 Gate：DSH 不暴露启动 Baseline 或发布 Skill 的工具。

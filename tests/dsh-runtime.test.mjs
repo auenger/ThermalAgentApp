@@ -74,6 +74,29 @@ setInterval(() => {}, 1000)
   assert.equal(host.getStatus().phase, 'stopped')
 })
 
+test('pinned DSH web Host reaches ready with its live profile', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-live-host-'))
+  const plugin = resolve('plugins/dsh-thermal/dist/index.js')
+  const statuses = []
+  const host = new DshHost(join(root, 'dsh'), join(root, 'workspace'),
+    { url: 'http://127.0.0.1:1', token: 'test-bridge' }, plugin, value => statuses.push(value))
+  t.after(async () => { await host.shutdown(); await rm(root, { recursive: true, force: true }) })
+  await host.start()
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline && !statuses.some(status => status.phase === 'ready' || status.phase === 'failed')) {
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  }
+  const latest = host.getStatus()
+  assert.equal(latest.phase, 'ready', latest.detail ?? 'DSH web did not become ready')
+  assert.equal(new URL(latest.url).hostname, '127.0.0.1')
+  const exchange = await fetch(latest.url, { redirect: 'manual' })
+  assert.equal(exchange.status, 303)
+  const cookie = exchange.headers.get('set-cookie')?.split(';', 1)[0]
+  assert.ok(cookie, 'DSH did not issue its browser session cookie')
+  const response = await fetch(new URL('/', latest.url), { headers: { Cookie: cookie } })
+  assert.equal(response.status, 200)
+})
+
 test('DSH thermal bridge is token-protected and exposes only controlled Core operations', async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-bridge-'))
   const database = new LocalDatabase(join(root, 'thermal.db'))

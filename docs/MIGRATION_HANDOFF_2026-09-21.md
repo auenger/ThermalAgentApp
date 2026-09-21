@@ -21,7 +21,8 @@
 ## 本次交接时的验证记录
 
 - `pnpm typecheck`：通过。
-- `pnpm test`：通过，55 个 Node 测试、18 个 Icepak Python 测试、2 个报告 Python 测试；Web 构建和 DSH 工具冒烟包含在该命令中。Node 测试不依赖 shell 展开 glob；Icepak 测试入口按平台选用 `python`/`python3`，也可由 `THERMAL_ICEPAK_PYTHON` 指定。
+- `pnpm test`：通过，56 个 Node 测试、18 个 Icepak Python 测试、2 个报告 Python 测试；Web 构建和 DSH 工具冒烟包含在该命令中。Node 测试不依赖 shell 展开 glob；Icepak 测试入口按平台选用 `python`/`python3`，也可由 `THERMAL_ICEPAK_PYTHON` 指定。
+- DSH `web` profile 的实时重载需要 Node `--expose-internals`。已修复 Host 启动参数；新增真实 DSH Host 测试，验证进入 `ready`、启动 token 换取 Cookie 后页面 HTTP 200。隔离启动完整 Core 后，`/api/agent/status` 实测进入 `ready`；Electron 的 Node 模式也确认接受该参数。模型连接与实际对话仍需人工回归。
 - 使用隔离临时目录在 macOS 启动 `apps/core/dist/cli.js`：`GET /api/health` 返回 `{"status":"ok","service":"thermal-agent-core","version":"0.1.0"}`；首页 HTTP 200；SQLite 和身份密钥生成成功，Core 正常退出。
 - `pnpm package:win` 在 macOS x86_64 实际尝试：TS/Web 构建成功，Windows x64 平台预检按设计拒绝继续；**没有生成 `.exe`**。还需 Windows x64 构建机及内置 Node/Python 运行时。见 [WINDOWS_PACKAGING.md](./WINDOWS_PACKAGING.md)。
 - 本机未完成 Electron GUI 交互测试、真实 AEDT 求解、许可证验证、Windows 安装/升级/卸载或 LAN 双机测试。
@@ -51,6 +52,8 @@ pnpm dev:desktop
 ```
 
 `pnpm dev:desktop` 会先构建，再启动 Electron；等待工作台出现。开发态桌面数据位于 Electron `userData/runtime`，**不等于**独立 Core 的项目根目录 `.thermal-agent/`，不要用另一套数据目录判断“数据丢失”。关闭窗口后 App 按设计留在托盘；通过托盘“退出应用”才真正停止。不要同时启动多个占用同一数据目录的 Core。若只需浏览器诊断，可在项目根目录的另一个终端运行 `pnpm dev:core`，然后打开 `http://127.0.0.1:43110/`；此方式使用项目根目录 `.thermal-agent/`，不验证 Electron 托盘和桌面生命周期。
+
+如果此前 Agent 页显示 `--expose-internals is required for HMR service`，先通过托盘**退出整个应用**、停止旧的 `pnpm dev:desktop` 进程，再从当前源码重新运行 `pnpm dev:desktop`。只点“重启运行时”不会使已运行的旧 Core 加载新的 Host 代码。重新进入 Agent 页，预期状态由 `STARTING` 变为 `READY`；DSH 页面先用启动 token 换取本机 Cookie，模型对话还需要有效的模型配置。
 
 ## 手动回归顺序与通过标准
 
