@@ -355,7 +355,7 @@ export class LocalDatabase {
       if (expectedVersion !== undefined && current.version !== expectedVersion) {
         throw new VersionConflictError(expectedVersion, current.version)
       }
-      if (current.approvalStatus !== 'NONE') throw new TaskApprovalConflictError('task already has an approval decision')
+      if (current.approvalStatus === 'PENDING') throw new TaskApprovalConflictError('task already has a pending approval')
       assertTaskTransition(current.executionStatus, 'WAITING_FOR_APPROVAL')
       const now = new Date().toISOString()
       const version = current.version + 1
@@ -408,6 +408,43 @@ export class LocalDatabase {
         fromStatus: current.executionStatus, toStatus: nextStatus,
         reason: reason?.trim().slice(0, 500) || null,
         payload: { thermalVerdict: current.thermalVerdict, approvalStatus: decision, previousVersion: current.version, version },
+        createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return this.getTask(id) as TaskRecord
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  approveCandidateAction(id: string, expectedVersion?: number, reason?: string): TaskRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as SqliteRow | undefined
+      if (!row) throw new TaskNotFoundError(id)
+      const current = decodeTask(row)
+      if (expectedVersion !== undefined && current.version !== expectedVersion) {
+        throw new VersionConflictError(expectedVersion, current.version)
+      }
+      if (current.executionStatus !== 'WAITING_FOR_APPROVAL' || current.approvalStatus !== 'PENDING') {
+        throw new TaskApprovalConflictError('task is not waiting for candidate approval')
+      }
+      if (current.thermalVerdict !== 'FAIL') {
+        throw new TaskApprovalConflictError('a fan candidate can only continue a converged FAIL baseline')
+      }
+      assertTaskTransition(current.executionStatus, 'QUEUED')
+      const now = new Date().toISOString()
+      const version = current.version + 1
+      this.db.prepare(`
+        UPDATE tasks SET execution_status = 'QUEUED', approval_status = 'APPROVED',
+          version = ?, updated_at = ? WHERE id = ? AND version = ?
+      `).run(version, now, id, current.version)
+      this.insertEvent({
+        id: randomUUID(), taskId: id, eventType: 'task.candidate_approved',
+        fromStatus: current.executionStatus, toStatus: 'QUEUED',
+        reason: reason?.trim().slice(0, 500) || null,
+        payload: { previousVerdict: current.thermalVerdict, approvalStatus: 'APPROVED', previousVersion: current.version, version },
         createdAt: now,
       })
       this.db.exec('COMMIT')

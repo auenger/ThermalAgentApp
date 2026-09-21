@@ -18,11 +18,12 @@
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
 - 基于校验、收敛、最高温度目标的确定性热判定，以及独立的人工结果审批 Gate。
+- 由用户批准的单次风扇候选求解：复用 Baseline 已求解工程和指标，完成逐 Monitor 对比后再次复核。
 - 固定 DSH `0.1.5-rc.2` 的本地 Agent Host、持久会话工作区和散热专用 preset。
 - Token 保护的 Thermal Tools Bridge，以及任务、Icepak 探测和工程检查工具。
 - 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
 
-当前还没有完成 Windows 真实 AEDT 回归验收、候选求解协调、Skill 运行/修复闭环、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
+当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 运行/修复闭环、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
 
 ## 本地运行
 

@@ -274,13 +274,15 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline' | 'skill' | 'approve' | 'reject') {
+  async function act(kind: 'confirm' | 'baseline' | 'candidate' | 'skill' | 'approve' | 'reject') {
     setBusy(true); setError('')
     try {
       const response = kind === 'confirm'
         ? await fetch(`/api/tasks/${task.id}/transitions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'READY', expectedVersion: task.version, reason: '用户确认需求与工程路径' }) })
         : kind === 'baseline'
           ? await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
+          : kind === 'candidate'
+            ? await fetch(`/api/tasks/${task.id}/runs/candidate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: task.version, fanSpeedRatio: 1.1, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4, minImprovementC: 0.5 }) })
           : kind === 'skill'
             ? await fetch(`/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
             : await fetch(`/api/tasks/${task.id}/approval`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: kind === 'approve' ? 'APPROVED' : 'REJECTED', expectedVersion: task.version, reason: kind === 'approve' ? '用户复核并接受求解证据' : '用户拒绝当前结果并升级人工处理' }) })
@@ -292,7 +294,7 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   }
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'READY') return <div><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '启动 Baseline'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
-  if (task.executionStatus === 'WAITING_FOR_APPROVAL') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button><Button size="small" disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'WAITING_FOR_APPROVAL') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button>{task.thermalVerdict === 'FAIL' && <Button size="small" disabled={busy} onClick={() => void act('candidate')}>批准风扇 +10%</Button>}<Button size="small" disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'COMPLETED') return <div><Button size="small" disabled={busy} onClick={() => void act('skill')}>{busy ? '提取中' : '沉淀 Skill 草稿'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
   return <span className={styles.details}>{task.executionStatus === 'RUNNING' ? '后台求解中' : '无可用操作'}</span>
 }
@@ -358,18 +360,21 @@ function CreateTaskPanel({ styles, onCreated }: { styles: ReturnType<typeof useS
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [projectPath, setProjectPath] = useState('')
+  const [targetTmaxC, setTargetTmaxC] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   async function submit(event: FormEvent) {
     event.preventDefault(); setError(''); setSaving(true)
     try {
-      const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, description, ownerNodeId: 'local-node', requirementSnapshot: { projectPath, aedtVersion: '2024.2', cores: 4 } }) })
+      const parsedTarget = targetTmaxC.trim() ? Number(targetTmaxC) : undefined
+      if (parsedTarget !== undefined && !Number.isFinite(parsedTarget)) throw new Error('最高温度目标必须是数字')
+      const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, description, ownerNodeId: 'local-node', requirementSnapshot: { projectPath, aedtVersion: '2024.2', cores: 4, ...(parsedTarget === undefined ? {} : { targetTmaxC: parsedTarget }) } }) })
       if (!response.ok) { const body = await response.json() as { error?: { message?: string } }; throw new Error(body.error?.message ?? '任务未创建') }
-      setTitle(''); setDescription(''); setProjectPath(''); await onCreated()
+      setTitle(''); setDescription(''); setProjectPath(''); setTargetTmaxC(''); await onCreated()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '任务未创建') }
     finally { setSaving(false) }
   }
-  return <div className={styles.panel}><h2 className={styles.panelTitle}><Add20Regular />新建需求草稿</h2><form className={styles.form} onSubmit={submit}><Field label="任务名称" required><Input value={title} onChange={(_, data) => setTitle(data.value)} /></Field><Field label="Windows 工程路径" hint="保存后仍需人工确认，Core 会在求解前创建内容快照。"><Input value={projectPath} onChange={(_, data) => setProjectPath(data.value)} placeholder="C:\\ThermalModels\\Project1.aedt" /></Field><Field label="需求描述"><Textarea resize="vertical" value={description} onChange={(_, data) => setDescription(data.value)} /></Field>{error && <div className={styles.error}>{error}</div>}<Button type="submit" appearance="primary" disabled={!title.trim() || saving}>{saving ? '正在保存' : '保存草稿'}</Button></form></div>
+  return <div className={styles.panel}><h2 className={styles.panelTitle}><Add20Regular />新建需求草稿</h2><form className={styles.form} onSubmit={submit}><Field label="任务名称" required><Input value={title} onChange={(_, data) => setTitle(data.value)} /></Field><Field label="Windows 工程路径" hint="保存后仍需人工确认，Core 会在求解前创建内容快照。"><Input value={projectPath} onChange={(_, data) => setProjectPath(data.value)} placeholder="C:\\ThermalModels\\Project1.aedt" /></Field><Field label="最高温度目标（°C）" hint="留空时热判定保持 PENDING，系统不会猜测目标。"><Input type="number" value={targetTmaxC} onChange={(_, data) => setTargetTmaxC(data.value)} /></Field><Field label="需求描述"><Textarea resize="vertical" value={description} onChange={(_, data) => setDescription(data.value)} /></Field>{error && <div className={styles.error}>{error}</div>}<Button type="submit" appearance="primary" disabled={!title.trim() || saving}>{saving ? '正在保存' : '保存草稿'}</Button></form></div>
 }
 
 function IcepakSettings({ styles, probe }: { styles: ReturnType<typeof useStyles>; probe: IcepakEnvironmentProbe | null }) {

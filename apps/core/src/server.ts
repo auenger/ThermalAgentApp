@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
+import { parseCreateTaskInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
@@ -165,6 +165,13 @@ async function route(
   if (request.method === 'POST' && baselineMatch) {
     const input = parseIcepakProjectOperationInput(await readJsonBody(request))
     const started = await executions.startBaseline(baselineMatch[1], input)
+    writeJson(response, 202, started)
+    return
+  }
+  const candidateMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/candidate$/iu)
+  if (request.method === 'POST' && candidateMatch) {
+    const input = parseIcepakCandidateInput(await readJsonBody(request))
+    const started = await executions.startCandidate(candidateMatch[1], input)
     writeJson(response, 202, started)
     return
   }

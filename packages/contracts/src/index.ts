@@ -238,6 +238,16 @@ export interface IcepakProjectOperationInput {
   minImprovementC?: number
 }
 
+export interface IcepakCandidateInput {
+  expectedVersion?: number
+  version?: string
+  setup?: string
+  cores?: number
+  fanSpeedRatio: number
+  flowConvergenceCriterion?: number
+  minImprovementC?: number
+}
+
 export interface IcepakProjectOperationResult {
   status: 'ok'
   mode: 'inspect' | 'fan-check' | 'solve' | 'fan-solve'
@@ -386,6 +396,37 @@ export function parseIcepakProjectOperationInput(value: unknown): IcepakProjectO
     flowConvergenceCriterion: value.flowConvergenceCriterion === undefined ? undefined : Number(value.flowConvergenceCriterion),
     baselineMetrics: value.baselineMetrics as Record<string, unknown> | undefined,
     minImprovementC: value.minImprovementC === undefined ? undefined : Number(value.minImprovementC),
+  }
+}
+
+export function parseIcepakCandidateInput(value: unknown): IcepakCandidateInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  const fanSpeedRatio = Number(value.fanSpeedRatio)
+  if (!Number.isFinite(fanSpeedRatio) || fanSpeedRatio <= 1 || fanSpeedRatio > 1.5) {
+    throw new Error('fanSpeedRatio must be greater than 1.0 and at most 1.5')
+  }
+  if (value.cores !== undefined && (!Number.isInteger(value.cores) || Number(value.cores) < 1)) {
+    throw new Error('cores must be a positive integer')
+  }
+  if (value.expectedVersion !== undefined && (!Number.isInteger(value.expectedVersion) || Number(value.expectedVersion) < 1)) {
+    throw new Error('expectedVersion must be a positive integer')
+  }
+  const flowConvergenceCriterion = value.flowConvergenceCriterion === undefined ? undefined : Number(value.flowConvergenceCriterion)
+  if (flowConvergenceCriterion !== undefined && (!Number.isFinite(flowConvergenceCriterion) || flowConvergenceCriterion <= 0)) {
+    throw new Error('flowConvergenceCriterion must be positive')
+  }
+  const minImprovementC = value.minImprovementC === undefined ? undefined : Number(value.minImprovementC)
+  if (minImprovementC !== undefined && (!Number.isFinite(minImprovementC) || minImprovementC < 0)) {
+    throw new Error('minImprovementC must not be negative')
+  }
+  return {
+    fanSpeedRatio,
+    expectedVersion: value.expectedVersion === undefined ? undefined : Number(value.expectedVersion),
+    version: typeof value.version === 'string' && value.version.trim() ? value.version.trim().slice(0, 50) : undefined,
+    setup: typeof value.setup === 'string' && value.setup.trim() ? value.setup.trim().slice(0, 200) : undefined,
+    cores: value.cores === undefined ? undefined : Number(value.cores),
+    flowConvergenceCriterion,
+    minImprovementC,
   }
 }
 
