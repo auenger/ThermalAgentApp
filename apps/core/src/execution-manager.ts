@@ -322,7 +322,9 @@ export class IcepakExecutionManager {
   }
 
   private recoverInterruptedAttempts(): void {
+    const localNodeId = this.database.getLocalIdentity()?.nodeId
     for (const attempt of this.database.listActiveAttempts()) {
+      if (attempt.executorNodeId !== localNodeId) continue
       this.database.transitionAttempt(attempt.id, 'INTERRUPTED', {
         progressStage: 'interrupted',
         errorCode: 'CORE_RESTARTED',

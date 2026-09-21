@@ -222,6 +222,9 @@ export interface RemoteJobRecord {
   inputOriginalName: string
   parameters: Record<string, unknown>
   status: 'OFFERED' | 'TRANSFERRING' | 'INPUT_READY' | 'RUNNING' | 'SYNCING_RESULTS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  solvedSha256: string | null
+  resultSha256: string | null
+  convergenceSha256: string | null
   errorCode: string | null
   errorMessage: string | null
   createdAt: string

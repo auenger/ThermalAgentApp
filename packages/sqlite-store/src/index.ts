@@ -260,6 +260,9 @@ export class LocalDatabase {
         input_original_name TEXT NOT NULL,
         parameters_json TEXT NOT NULL,
         status TEXT NOT NULL,
+        solved_sha256 TEXT,
+        result_sha256 TEXT,
+        convergence_sha256 TEXT,
         error_code TEXT,
         error_message TEXT,
         created_at TEXT NOT NULL,
@@ -365,6 +368,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (7, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (8, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -372,6 +378,9 @@ export class LocalDatabase {
     this.ensureColumn('skills', 'last_run_at', 'TEXT')
     this.ensureColumn('remote_jobs', 'error_code', 'TEXT')
     this.ensureColumn('remote_jobs', 'error_message', 'TEXT')
+    this.ensureColumn('remote_jobs', 'solved_sha256', 'TEXT')
+    this.ensureColumn('remote_jobs', 'result_sha256', 'TEXT')
+    this.ensureColumn('remote_jobs', 'convergence_sha256', 'TEXT')
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -564,7 +573,7 @@ export class LocalDatabase {
     return (this.db.prepare('SELECT * FROM remote_jobs ORDER BY created_at DESC').all() as SqliteRow[]).map(decodeRemoteJob)
   }
 
-  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'errorCode' | 'errorMessage' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
+  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'solvedSha256' | 'resultSha256' | 'convergenceSha256' | 'errorCode' | 'errorMessage' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const existing = this.getRemoteJob(input.attemptId)
@@ -582,6 +591,7 @@ export class LocalDatabase {
         if (input.epoch > existing.epoch) {
           this.db.prepare(`
             UPDATE remote_jobs SET lease_id = ?, epoch = ?, status = 'OFFERED',
+              solved_sha256 = NULL, result_sha256 = NULL, convergence_sha256 = NULL,
               error_code = NULL, error_message = NULL, updated_at = ? WHERE attempt_id = ?
           `).run(input.leaseId, input.epoch, new Date().toISOString(), input.attemptId)
         }
@@ -635,10 +645,25 @@ export class LocalDatabase {
     return this.getRemoteJob(attemptId) as RemoteJobRecord
   }
 
+  stageRemoteJobResults(attemptId: string, leaseId: string, epoch: number,
+    solvedSha256: string, resultSha256: string, convergenceSha256: string | null): RemoteJobRecord {
+    if (!this.getArtifact(solvedSha256) || !this.getArtifact(resultSha256) ||
+      (convergenceSha256 && !this.getArtifact(convergenceSha256))) {
+      throw new PeerConflictError('remote result artifacts are not stored locally')
+    }
+    const updated = this.db.prepare(`
+      UPDATE remote_jobs SET status = 'SYNCING_RESULTS', solved_sha256 = ?, result_sha256 = ?,
+        convergence_sha256 = ?, error_code = NULL, error_message = NULL, updated_at = ?
+      WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status = 'RUNNING'
+    `).run(solvedSha256, resultSha256, convergenceSha256, new Date().toISOString(), attemptId, leaseId, epoch)
+    if (Number(updated.changes) !== 1) throw new PeerConflictError('remote job was changed before result staging')
+    return this.getRemoteJob(attemptId) as RemoteJobRecord
+  }
+
   recordRemoteJobError(attemptId: string, leaseId: string, epoch: number, code: string, message: string): void {
     const updated = this.db.prepare(`
       UPDATE remote_jobs SET error_code = ?, error_message = ?, updated_at = ?
-      WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status IN ('OFFERED', 'TRANSFERRING')
+      WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status IN ('OFFERED', 'TRANSFERRING', 'INPUT_READY', 'SYNCING_RESULTS')
     `).run(code.slice(0, 100), message.slice(0, 2_000), new Date().toISOString(), attemptId, leaseId, epoch)
     if (Number(updated.changes) !== 1) throw new PeerConflictError('remote job was changed or its lease is stale')
   }
@@ -745,6 +770,20 @@ export class LocalDatabase {
         .run(status, now.toISOString(), reason, id)
       if (task && task.executorNodeId === lease.executorNodeId && ['LEASED', 'TRANSFERRING', 'RUNNING', 'SYNCING_RESULTS'].includes(task.executionStatus)) {
         const nextStatus: ExecutionStatus = ['RUNNING', 'SYNCING_RESULTS'].includes(task.executionStatus) ? 'ESCALATED' : 'QUEUED'
+        if (nextStatus === 'ESCALATED') {
+          const run = this.listTaskRuns(task.id).at(-1)
+          const attempt = run ? this.listRunAttempts(run.id).at(-1) : null
+          if (run && attempt?.executorNodeId === lease.executorNodeId &&
+            ['QUEUED', 'STARTING', 'RUNNING'].includes(attempt.status)) {
+            const attemptStatus: AttemptStatus = attempt.status === 'QUEUED' ? 'CANCELLED' : 'INTERRUPTED'
+            this.db.prepare(`UPDATE attempts SET status = ?, progress_stage = 'lease_lost',
+              error_code = ?, error_message = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
+              .run(attemptStatus, status === 'REVOKED' ? 'PEER_REVOKED' : 'LEASE_EXPIRED', reason,
+                now.toISOString(), now.toISOString(), attempt.id)
+            this.db.prepare(`UPDATE runs SET status = 'FAILED', selected_attempt_id = NULL, updated_at = ? WHERE id = ?`)
+              .run(now.toISOString(), run.id)
+          }
+        }
         this.db.prepare(`
           UPDATE tasks SET execution_status = ?, executor_node_id = NULL, version = ?, updated_at = ?
           WHERE id = ? AND version = ?
@@ -1270,6 +1309,107 @@ export class LocalDatabase {
     }
   }
 
+  startLeasedRemoteBaseline(ownerNodeId: string, executorNodeId: string, taskId: string,
+    attemptId: string, leaseId: string, epoch: number): { task: TaskRecord; attempt: AttemptRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const { task, attempt, run } = this.assertLeasedRemoteAttempt(ownerNodeId, executorNodeId, taskId, attemptId, leaseId, epoch)
+      if (task.executionStatus === 'RUNNING' && attempt.status === 'RUNNING') {
+        this.db.exec('COMMIT')
+        return { task, attempt }
+      }
+      if (task.executionStatus !== 'LEASED' || attempt.status !== 'QUEUED' || run.kind !== 'BASELINE') {
+        throw new PeerConflictError('remote baseline cannot be started from the current state')
+      }
+      const now = new Date().toISOString()
+      this.db.prepare(`UPDATE attempts SET status = 'RUNNING', progress_stage = 'remote_plugin_running',
+        started_at = ?, heartbeat_at = ?, updated_at = ? WHERE id = ?`).run(now, now, now, attemptId)
+      this.db.prepare(`UPDATE runs SET status = 'RUNNING', updated_at = ? WHERE id = ?`).run(now, run.id)
+      this.db.prepare(`UPDATE tasks SET execution_status = 'RUNNING', version = ?, updated_at = ? WHERE id = ?`)
+        .run(task.version + 1, now, taskId)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'run.remote_baseline_started',
+        fromStatus: 'LEASED', toStatus: 'RUNNING', reason: null,
+        payload: { runId: run.id, attemptId, leaseId, epoch, executorNodeId }, createdAt: now })
+      this.db.exec('COMMIT')
+      return { task: this.getTask(taskId) as TaskRecord, attempt: this.getAttempt(attemptId) as AttemptRecord }
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  completeLeasedRemoteBaseline(ownerNodeId: string, executorNodeId: string, taskId: string,
+    attemptId: string, leaseId: string, epoch: number, solvedSha256: string,
+    resultSha256: string, verdict: ThermalVerdict): { task: TaskRecord; attempt: AttemptRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const { task, attempt, run } = this.assertLeasedRemoteAttempt(ownerNodeId, executorNodeId, taskId, attemptId, leaseId, epoch)
+      if (task.executionStatus !== 'RUNNING' || attempt.status !== 'RUNNING' || run.kind !== 'BASELINE') {
+        throw new PeerConflictError('remote baseline is not running')
+      }
+      const links = this.listAttemptArtifacts(attemptId)
+      if (!links.some(item => item.role === 'INPUT_PROJECT' && item.sha256 === attempt.inputArtifactSha256) ||
+        !links.some(item => item.role === 'SOLVED_PROJECT' && item.sha256 === solvedSha256) ||
+        !links.some(item => item.role === 'SOLVER_RESULT' && item.sha256 === resultSha256) ||
+        !this.getArtifact(solvedSha256) || !this.getArtifact(resultSha256)) {
+        throw new PeerConflictError('remote baseline is missing required result evidence')
+      }
+      const now = new Date().toISOString()
+      this.db.prepare(`UPDATE attempts SET status = 'SUCCEEDED', progress_stage = 'result_collected',
+        output_artifact_sha256 = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
+        .run(solvedSha256, now, now, attemptId)
+      this.db.prepare(`UPDATE runs SET status = 'COMPLETED', selected_attempt_id = ?, updated_at = ? WHERE id = ?`)
+        .run(attemptId, now, run.id)
+      this.db.prepare(`UPDATE tasks SET execution_status = 'WAITING_FOR_APPROVAL', thermal_verdict = ?,
+        approval_status = 'PENDING', version = ?, updated_at = ? WHERE id = ?`)
+        .run(verdict, task.version + 1, now, taskId)
+      this.db.prepare(`UPDATE leases SET status = 'RELEASED', released_at = ? WHERE id = ? AND status = 'ACTIVE'`)
+        .run(now, leaseId)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'run.remote_baseline_completed',
+        fromStatus: 'RUNNING', toStatus: 'WAITING_FOR_APPROVAL', reason: '远程求解结果已校验，等待人工复核',
+        payload: { runId: run.id, attemptId, leaseId, epoch, solvedSha256, resultSha256, verdict }, createdAt: now })
+      this.db.exec('COMMIT')
+      return { task: this.getTask(taskId) as TaskRecord, attempt: this.getAttempt(attemptId) as AttemptRecord }
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  failLeasedRemoteBaseline(ownerNodeId: string, executorNodeId: string, taskId: string,
+    attemptId: string, leaseId: string, epoch: number, code: string, message: string): { task: TaskRecord; attempt: AttemptRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const { task, attempt, run } = this.assertLeasedRemoteAttempt(ownerNodeId, executorNodeId, taskId, attemptId, leaseId, epoch)
+      if (task.executionStatus !== 'RUNNING' || attempt.status !== 'RUNNING' || run.kind !== 'BASELINE') {
+        throw new PeerConflictError('remote baseline is not running')
+      }
+      const now = new Date().toISOString()
+      this.db.prepare(`UPDATE attempts SET status = 'FAILED', progress_stage = 'remote_failed',
+        error_code = ?, error_message = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
+        .run(code.slice(0, 100), message.slice(0, 2_000), now, now, attemptId)
+      this.db.prepare(`UPDATE runs SET status = 'FAILED', updated_at = ? WHERE id = ?`).run(now, run.id)
+      this.db.prepare(`UPDATE tasks SET execution_status = 'FAILED', version = ?, updated_at = ? WHERE id = ?`)
+        .run(task.version + 1, now, taskId)
+      this.db.prepare(`UPDATE leases SET status = 'RELEASED', released_at = ? WHERE id = ? AND status = 'ACTIVE'`)
+        .run(now, leaseId)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'run.remote_baseline_failed',
+        fromStatus: 'RUNNING', toStatus: 'FAILED', reason: message.slice(0, 500),
+        payload: { runId: run.id, attemptId, leaseId, epoch, code, executorNodeId }, createdAt: now })
+      this.db.exec('COMMIT')
+      return { task: this.getTask(taskId) as TaskRecord, attempt: this.getAttempt(attemptId) as AttemptRecord }
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  private assertLeasedRemoteAttempt(ownerNodeId: string, executorNodeId: string, taskId: string,
+    attemptId: string, leaseId: string, epoch: number): { task: TaskRecord; attempt: AttemptRecord; run: RunRecord } {
+    const task = this.getTask(taskId)
+    const attempt = this.getAttempt(attemptId)
+    const run = attempt ? this.getRun(attempt.runId) : null
+    if (!task || task.ownerNodeId !== ownerNodeId || !run || run.taskId !== taskId ||
+      attempt?.executorNodeId !== executorNodeId ||
+      this.listTaskRuns(taskId).at(-1)?.id !== run.id ||
+      this.listRunAttempts(run.id).at(-1)?.id !== attemptId ||
+      !this.isCurrentLease(leaseId, taskId, executorNodeId, epoch)) {
+      throw new LeaseConflictError('remote baseline attempt is not authorized by the current lease')
+    }
+    return { task, attempt, run }
+  }
+
   listAttemptArtifacts(attemptId: string): AttemptArtifactRecord[] {
     const rows = this.db.prepare(`
       SELECT attempt_id, sha256, role, created_at
@@ -1624,6 +1764,9 @@ function decodeRemoteJob(row: SqliteRow): RemoteJobRecord {
     inputSha256: String(row.input_sha256), inputSizeBytes: Number(row.input_size_bytes),
     inputOriginalName: String(row.input_original_name), parameters: parseObject(row.parameters_json),
     status: row.status as RemoteJobRecord['status'],
+    solvedSha256: row.solved_sha256 === null || row.solved_sha256 === undefined ? null : String(row.solved_sha256),
+    resultSha256: row.result_sha256 === null || row.result_sha256 === undefined ? null : String(row.result_sha256),
+    convergenceSha256: row.convergence_sha256 === null || row.convergence_sha256 === undefined ? null : String(row.convergence_sha256),
     errorCode: row.error_code === null || row.error_code === undefined ? null : String(row.error_code),
     errorMessage: row.error_message === null || row.error_message === undefined ? null : String(row.error_message),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),

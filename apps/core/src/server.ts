@@ -24,6 +24,8 @@ import { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'
 import { PeerTaskInbox, PeerTaskError } from './peer-task-inbox.js'
 import { PeerTaskDispatcher, PeerDispatchError } from './peer-task-dispatcher.js'
 import { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'
+import { PeerRemoteRunControl, PeerRemoteRunError } from './peer-remote-run-control.js'
+import { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -33,6 +35,7 @@ export interface CoreAppOptions {
   startAgentRuntime?: boolean
   reportClient?: ReportPort
   discoveryOptions?: PeerDiscoveryOptions
+  startRemoteSolve?: boolean
 }
 
 export interface CoreApp {
@@ -95,7 +98,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerSecure = new PeerSecureChannel(nodeIdentity, database)
   const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
   const peerLeases = new PeerLeaseControl(nodeIdentity.nodeId, database)
-  const remoteInput = new PeerRemoteInputProcessor(database, discovery, peerSecure, peerArtifacts)
+  const remoteRuns = new PeerRemoteRunControl(nodeIdentity.nodeId, database, artifacts)
+  const remoteSolve = new PeerRemoteSolveProcessor(home, database, artifacts, pluginClient, discovery, peerSecure, peerArtifacts)
+  const remoteInput = new PeerRemoteInputProcessor(database, discovery, peerSecure, peerArtifacts, () => remoteSolve.wake())
   const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient, () => remoteInput.wake(true))
   const peerDispatcher = new PeerTaskDispatcher(nodeIdentity.nodeId, database, artifacts, peerSecure)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
@@ -104,12 +109,13 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const eventStream = new CoreEventStream(database)
   const reports = new ReportManager(home, database, artifacts, options.reportClient ?? new ReportClient())
   remoteInput.start()
+  if (options.startRemoteSolve !== false) remoteSolve.start()
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, peerTasks, peerDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -122,6 +128,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     async close() {
       clearInterval(leaseSweep)
       await remoteInput.close()
+      await remoteSolve.close()
       await discovery.stop()
       await lanPublisher.stop()
       peerSecure.close()
@@ -155,6 +162,7 @@ async function route(
   peerSecure: PeerSecureChannel,
   peerArtifacts: PeerArtifactTransfer,
   peerLeases: PeerLeaseControl,
+  remoteRuns: PeerRemoteRunControl,
   peerTasks: PeerTaskInbox,
   peerDispatcher: PeerTaskDispatcher,
   webRoot: string,
@@ -188,6 +196,12 @@ async function route(
       reply = await peerArtifacts.receiveResultChunk(decrypted.peerNodeId, message)
     } else if (isObject(message) && message.operation === 'lease.renew') {
       reply = peerLeases.renewForExecutor(decrypted.peerNodeId, message)
+    } else if (isObject(message) && message.operation === 'task.baseline.start') {
+      reply = remoteRuns.start(decrypted.peerNodeId, message)
+    } else if (isObject(message) && message.operation === 'task.baseline.complete') {
+      reply = await remoteRuns.complete(decrypted.peerNodeId, message)
+    } else if (isObject(message) && message.operation === 'task.baseline.fail') {
+      reply = remoteRuns.fail(decrypted.peerNodeId, message)
     } else if (isObject(message) && message.operation === 'task.baseline.offer') {
       reply = await peerTasks.receive(decrypted.peerNodeId, message)
     } else {
@@ -645,6 +659,11 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof PeerLeaseError) {
     writeJson(response, error.code === 'LEASE_NOT_AUTHORIZED' ? 403 : 400,
+      { error: { code: error.code, message: error.message } })
+    return
+  }
+  if (error instanceof PeerRemoteRunError) {
+    writeJson(response, error.code === 'RUN_NOT_AUTHORIZED' ? 403 : 409,
       { error: { code: error.code, message: error.message } })
     return
   }

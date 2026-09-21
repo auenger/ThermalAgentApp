@@ -20,6 +20,7 @@ export class PeerRemoteInputProcessor {
     private readonly discovery: PeerDiscovery,
     private readonly channel: PeerSecureChannel,
     private readonly artifacts: PeerArtifactTransfer,
+    private readonly onReady?: () => void,
   ) {}
 
   start(): void {
@@ -94,6 +95,7 @@ export class PeerRemoteInputProcessor {
       if (controller.signal.aborted) throw renewalError ?? new PeerArtifactError('TRANSFER_CANCELLED', 'input transfer was stopped')
       if (artifact.sha256 !== job.inputSha256) throw new PeerArtifactError('HASH_MISMATCH', 'stored input SHA does not match the offer')
       this.database.transitionRemoteJob(job.attemptId, job.leaseId, job.epoch, 'TRANSFERRING', 'INPUT_READY')
+      this.onReady?.()
       this.retryAfter.delete(job.attemptId)
     } catch (error) {
       const cause = renewalError ?? (error instanceof Error ? error : new Error('remote input transfer failed'))

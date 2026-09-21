@@ -36,9 +36,9 @@ test('Owner snapshots and dispatches one remote Baseline; rejected offer retries
   const discoveryPort = randomInt(45_000, 48_000)
   const executorDiscoveryPort = randomInt(48_001, 52_000)
   const executorHome = join(home, 'executor')
-  const owner = createCoreApp({ home: join(home, 'owner'), startAgentRuntime: false, pluginClient: plugin,
+  const owner = createCoreApp({ home: join(home, 'owner'), startAgentRuntime: false, startRemoteSolve: false, pluginClient: plugin,
     discoveryOptions: { port: discoveryPort, group: '127.0.0.1', bindAddress: '127.0.0.1', multicast: false } })
-  let executor = createCoreApp({ home: executorHome, startAgentRuntime: false, pluginClient: plugin,
+  let executor = createCoreApp({ home: executorHome, startAgentRuntime: false, startRemoteSolve: false, pluginClient: plugin,
     discoveryOptions: { port: executorDiscoveryPort, group: '127.0.0.1', bindAddress: '127.0.0.1', multicast: false } })
   const udp = createSocket('udp4')
   t.after(async () => { udp.close(); await executor.close(); await owner.close(); await rm(home, { recursive: true, force: true }) })
@@ -119,7 +119,7 @@ test('Owner snapshots and dispatches one remote Baseline; rejected offer retries
   assert.equal(executor.database.listRemoteJobs().length, 1)
 
   await executor.close()
-  executor = createCoreApp({ home: executorHome, startAgentRuntime: false, pluginClient: plugin,
+  executor = createCoreApp({ home: executorHome, startAgentRuntime: false, startRemoteSolve: false, pluginClient: plugin,
     discoveryOptions: { port: executorDiscoveryPort, group: '127.0.0.1', bindAddress: '127.0.0.1', multicast: false } })
   assert.equal(executor.nodeIdentity.nodeId, first.attempt.executorNodeId)
   assert.equal(executor.database.getRemoteJob(first.attempt.id)?.status, 'OFFERED')
