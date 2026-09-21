@@ -14,3 +14,4 @@ export type { ReportPort, ReportRenderInput, ReportRenderResult } from './report
 export { NodeIdentity, nodeIdFor } from './node-identity.js'
 export type { NodeIdentityPublic } from './node-identity.js'
 export { PeerDiscovery, createPeerBeacon, parsePeerBeacon } from './peer-discovery.js'
+export { PeerAuth, PeerAuthError } from './peer-auth.js'

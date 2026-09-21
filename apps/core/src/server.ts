@@ -17,6 +17,7 @@ import { ReportClient, type ReportPort } from './report-client.js'
 import { ReportConflictError, ReportManager } from './report-manager.js'
 import { NodeIdentity } from './node-identity.js'
 import { PeerDiscovery, type PeerDiscoveryOptions } from './peer-discovery.js'
+import { PeerAuth, PeerAuthError } from './peer-auth.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -84,6 +85,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     }
   }
   const discovery = new PeerDiscovery(nodeIdentity, database, capabilityHeartbeat, options.discoveryOptions)
+  const peerAuth = new PeerAuth(nodeIdentity, database)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -94,7 +96,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -134,6 +136,7 @@ async function route(
   eventStream: CoreEventStream,
   lanPublisher: LanPublisher,
   discovery: PeerDiscovery,
+  peerAuth: PeerAuth,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -141,6 +144,10 @@ async function route(
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/api/health') {
     writeJson(response, 200, { status: 'ok', service: 'thermal-agent-core', version: '0.1.0' })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/peer/v1/challenge') {
+    writeJson(response, 200, { response: peerAuth.acceptChallenge(await readJsonBody(request, 8_192)) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/nodes/local') {
@@ -174,6 +181,15 @@ async function route(
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer trust can only be managed from the local App')
     assertLocalWriteOrigin(request)
     writeJson(response, 200, { peer: database.revokePeer(revokePeerMatch[1]) })
+    return
+  }
+  const verifyPeerMatch = url.pathname.match(/^\/api\/nodes\/peers\/(node-[a-f0-9]{32})\/verify$/iu)
+  if (request.method === 'POST' && verifyPeerMatch) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer identity verification is local-only')
+    assertLocalWriteOrigin(request)
+    const peer = discovery.status().discovered.find(item => item.identity.nodeId === verifyPeerMatch[1])
+    if (!peer) throw new RequestError(409, 'PEER_NOT_DISCOVERED', 'peer is not currently discovered')
+    writeJson(response, 200, { verification: await peerAuth.verifyDiscovered(peer) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/events') {
@@ -481,13 +497,13 @@ async function serveWeb(response: ServerResponse, webRoot: string, pathname: str
   response.end(data)
 }
 
-async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+async function readJsonBody(request: IncomingMessage, maxBytes = 1_000_000): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
-    if (size > 1_000_000) throw new RequestError(413, 'BODY_TOO_LARGE', 'request body exceeds 1 MB')
+    if (size > maxBytes) throw new RequestError(413, 'BODY_TOO_LARGE', 'request body exceeds the allowed size')
     chunks.push(buffer)
   }
   if (chunks.length === 0) return {}
@@ -520,6 +536,10 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PeerAuthError) {
+    writeJson(response, 401, { error: { code: error.code, message: error.message } })
+    return
+  }
   if (error instanceof TaskNotFoundError) {
     writeJson(response, 404, { error: { code: 'TASK_NOT_FOUND', message: error.message } })
     return

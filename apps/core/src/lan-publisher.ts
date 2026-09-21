@@ -17,6 +17,7 @@ export class LanPublisher {
   private pairingExpiresAt = 0
   private readonly sessions = new Map<string, number>()
   private readonly failures = new Map<string, { count: number; resetAt: number }>()
+  private readonly peerAttempts = new Map<string, { count: number; resetAt: number }>()
   private port?: number
 
   constructor(private readonly application: RequestListener) {}
@@ -44,6 +45,7 @@ export class LanPublisher {
     this.pairingCode = ''
     this.pairingExpiresAt = 0
     this.sessions.clear()
+    this.peerAttempts.clear()
     if (!server?.listening) return
     await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()))
   }
@@ -66,6 +68,24 @@ export class LanPublisher {
     const url = new URL(request.url ?? '/', 'http://lan.local')
     if (request.method === 'POST' && url.pathname === '/api/lan/pair') {
       await this.pair(request, response)
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/peer/v1/challenge') {
+      const remote = request.socket.remoteAddress ?? 'unknown'
+      const now = Date.now()
+      if (this.peerAttempts.size > 1_024) {
+        for (const [address, attempt] of this.peerAttempts) if (attempt.resetAt <= now) this.peerAttempts.delete(address)
+        if (this.peerAttempts.size > 1_024) this.peerAttempts.delete(this.peerAttempts.keys().next().value as string)
+      }
+      const prior = this.peerAttempts.get(remote)
+      const current = prior && prior.resetAt > now ? prior : { count: 0, resetAt: now + 60_000 }
+      current.count += 1
+      this.peerAttempts.set(remote, current)
+      if (current.count > 120) {
+        writeJson(response, 429, { error: { code: 'PEER_RATE_LIMITED', message: 'too many peer challenges' } })
+        return
+      }
+      this.application(request, response)
       return
     }
     if (!url.pathname.startsWith('/api/')) {

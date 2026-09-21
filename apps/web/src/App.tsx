@@ -594,6 +594,7 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
   const [nodeId, setNodeId] = useState('')
   const [publicKey, setPublicKey] = useState('')
   const [busy, setBusy] = useState(false)
+  const [verifiedPeers, setVerifiedPeers] = useState<Record<string, string>>({})
   const [error, setError] = useState('')
   const refresh = useCallback(async () => {
     try {
@@ -639,8 +640,20 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
       const response = await fetch(`/api/nodes/peers/${peer.nodeId}/revoke`, { method: 'POST' })
       const body = await response.json() as { error?: { message?: string } }
       if (!response.ok) throw new Error(body.error?.message ?? '节点撤销失败')
+      setVerifiedPeers(current => { const next = { ...current }; delete next[peer.nodeId]; return next })
       await refresh()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '节点撤销失败') }
+    finally { setBusy(false) }
+  }
+
+  async function verifyPeer(peerId: string) {
+    setBusy(true); setError('')
+    try {
+      const response = await fetch(`/api/nodes/peers/${peerId}/verify`, { method: 'POST' })
+      const body = await response.json() as { verification?: { nodeId: string; verifiedAt: string }; error?: { message?: string } }
+      if (!response.ok || !body.verification) throw new Error(body.error?.message ?? '节点身份验证失败')
+      setVerifiedPeers(current => ({ ...current, [peerId]: body.verification!.verifiedAt }))
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '节点身份验证失败') }
     finally { setBusy(false) }
   }
 
@@ -648,9 +661,9 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
     <div className={styles.intro}><div><h1 className={styles.title}>计算节点</h1><p className={styles.subtitle}>每台 App 有独立且持久的 Ed25519 身份。开启局域网发布后可签名发现附近节点；加密传输和跨机求解尚未启用。</p></div></div>
     <section className={styles.settingsGrid}>
       <div className={styles.panel}><h2 className={styles.panelTitle}><DesktopPulse20Regular />本机身份</h2>{local ? <div className={styles.resultGrid} style={{ gridTemplateColumns: '1fr' }}><ResultItem styles={styles} label="Node ID / 指纹" value={local.nodeId} /><ResultItem styles={styles} label="公钥（可在另一台 App 手动登记）" value={local.publicKey} /></div> : <Spinner label="正在读取本机身份" />}</div>
-      <div className={styles.panel}><h2 className={styles.panelTitle}>可信节点登记</h2>{isLanClient ? <p className={styles.placeholder}>节点信任只能在运行 App 的本机电脑上管理。</p> : <><p className={styles.details}>请通过可信的线下方式核对对方 Node ID 与公钥。登记后仍不会自动分配任务；远程执行须待加密传输和双向验证完成。</p><form className={styles.form} onSubmit={pair}><Field label="设备名称" required><Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} /></Field><Field label="对方 Node ID" required><Input value={nodeId} onChange={(_, data) => setNodeId(data.value)} /></Field><Field label="对方公钥" required><Input value={publicKey} onChange={(_, data) => setPublicKey(data.value)} /></Field><Button type="submit" appearance="primary" disabled={busy || !displayName.trim() || !nodeId.trim() || !publicKey.trim()}>登记可信节点</Button></form></>}</div>
+      <div className={styles.panel}><h2 className={styles.panelTitle}>可信节点登记</h2>{isLanClient ? <p className={styles.placeholder}>节点信任只能在运行 App 的本机电脑上管理。</p> : <><p className={styles.details}>请通过可信的线下方式核对对方 Node ID 与公钥。登记后可验证对方当前是否持有私钥，但不会自动分配任务；远程执行仍需加密传输。</p><form className={styles.form} onSubmit={pair}><Field label="设备名称" required><Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} /></Field><Field label="对方 Node ID" required><Input value={nodeId} onChange={(_, data) => setNodeId(data.value)} /></Field><Field label="对方公钥" required><Input value={publicKey} onChange={(_, data) => setPublicKey(data.value)} /></Field><Button type="submit" appearance="primary" disabled={busy || !displayName.trim() || !nodeId.trim() || !publicKey.trim()}>登记可信节点</Button></form></>}</div>
     </section>
-    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>局域网发现</h2><p className={styles.details}>{discovery?.enabled ? `已开启 · UDP ${discovery.group}:${discovery.udpPort}` : '未开启；请先在设置中开启局域网发布'}{discovery?.lastError ? ` · ${discovery.lastError}` : ''}</p>{discovery?.discovered.length ? <div className={styles.skillList}>{discovery.discovered.map(peer => <div key={peer.identity.nodeId} className={styles.statusRow}><div><strong>{peer.identity.nodeId}</strong><div className={styles.details}>{peer.address}:{peer.servicePort} · Icepak {peer.heartbeat.pluginStatus} · 负载 {peer.heartbeat.activeAttempts}/{peer.heartbeat.maxConcurrent} · {peer.heartbeat.aedtVersions.join(', ') || '未知 AEDT 版本'}</div></div><div className={styles.headerActions}><Badge color={peer.trusted ? 'success' : 'warning'}>{peer.trusted ? '可信签名' : '未登记'}</Badge>{!peer.trusted && <Button size="small" onClick={() => { setNodeId(peer.identity.nodeId); setPublicKey(peer.identity.publicKey); setDisplayName(peer.identity.nodeId) }}>填入登记</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有发现其他 App。两台电脑需在同一局域网开启发布，且网络允许 UDP 组播。</p>}</div>}
+    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>局域网发现</h2><p className={styles.details}>{discovery?.enabled ? `已开启 · UDP ${discovery.group}:${discovery.udpPort}` : '未开启；请先在设置中开启局域网发布'}{discovery?.lastError ? ` · ${discovery.lastError}` : ''}</p>{discovery?.discovered.length ? <div className={styles.skillList}>{discovery.discovered.map(peer => <div key={peer.identity.nodeId} className={styles.statusRow}><div><strong>{peer.identity.nodeId}</strong><div className={styles.details}>{peer.address}:{peer.servicePort} · Icepak {peer.heartbeat.pluginStatus} · 负载 {peer.heartbeat.activeAttempts}/{peer.heartbeat.maxConcurrent} · {peer.heartbeat.aedtVersions.join(', ') || '未知 AEDT 版本'}</div>{peer.trusted && verifiedPeers[peer.identity.nodeId] && <div className={styles.details}>最近身份握手：{new Date(verifiedPeers[peer.identity.nodeId]).toLocaleString()}</div>}</div><div className={styles.headerActions}><Badge color={peer.trusted ? 'success' : 'warning'}>{peer.trusted ? '可信签名' : '未登记'}</Badge>{peer.trusted ? <Button size="small" disabled={busy} onClick={() => void verifyPeer(peer.identity.nodeId)}>验证对方身份</Button> : <Button size="small" onClick={() => { setNodeId(peer.identity.nodeId); setPublicKey(peer.identity.publicKey); setDisplayName(peer.identity.nodeId) }}>填入登记</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有发现其他 App。两台电脑需在同一局域网开启发布，且网络允许 UDP 组播。</p>}</div>}
     {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>已登记节点</h2>{peers.length ? <div className={styles.skillList}>{peers.map(peer => <div key={peer.nodeId} className={styles.statusRow}><div><strong>{peer.displayName}</strong><div className={styles.details}>{peer.nodeId} · {peer.pluginStatus} · {peer.lastSeenAt ?? '尚无能力心跳'}</div></div><div className={styles.headerActions}><Badge color={peer.trustStatus === 'TRUSTED' ? 'success' : 'danger'}>{peer.trustStatus}</Badge>{peer.trustStatus === 'TRUSTED' && <Button size="small" disabled={busy} onClick={() => void revoke(peer)}>撤销信任</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有登记其他计算节点。</p>}</div>}
     {error && <p className={styles.error}>{error}</p>}
   </>
