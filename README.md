@@ -14,6 +14,7 @@
 - 基于 SHA-256 的本地 Artifact Store。
 - 内置 Local Core HTTP API。
 - Electron 与浏览器共用的 Fluent UI 工程工作台。
+- Desktop 为每次 App 会话分配独占 loopback 端口，并区分开发目录与 `app.asar`/unpacked 运行资源。
 - Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
@@ -24,6 +25,8 @@
 - 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
 
 当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 运行/修复闭环、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
+
+Windows 离线安装包还需要提供固定 Node `22.22.x` 运行时（供 DSH 使用），并将 PyAEDT 插件、DSH CLI 及其依赖放入 unpacked 资源。Desktop 已按这一目录边界解析路径，但仓库当前不伪装成已产出或验证过 Windows 安装包。
 
 ## 本地运行
 

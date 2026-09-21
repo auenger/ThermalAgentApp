@@ -23,6 +23,7 @@
 - [x] Local Core HTTP API。
 - [x] Core 同源发布 React Web。
 - [x] Electron 桌面启动入口。
+- [x] Desktop 独占 loopback 端口及开发/packaged 资源路径解析。
 - [x] Icepak 插件进程健康检查和保守环境探测。
 - [x] 从旧项目迁移通用 AEDT 工程检查逻辑。
 - [x] 从旧项目迁移 Baseline PyAEDT 求解代码路径（待 Windows 真实回归）。
@@ -93,5 +94,6 @@ pnpm dev:core
 - DSH Agent 实例暴露 13 个工具，其中 5 个为受控散热工具。
 - Thermal Tools Bridge 鉴权、Task 草稿和 Icepak 只读操作。
 - Skill 草稿证据门槛、幂等提取、并发审核和发布文件权限边界。
+- Electron 开发与 `app.asar`/unpacked 资源路径分离。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

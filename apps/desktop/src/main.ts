@@ -1,15 +1,31 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { app, BrowserWindow, nativeTheme } from 'electron'
-import { join, resolve } from 'node:path'
+import { createServer } from 'node:net'
+import { join } from 'node:path'
+import { resolveDesktopRuntimePaths } from './runtime-paths.js'
 
-const coreOrigin = 'http://127.0.0.1:43110'
+let coreOrigin = ''
 let window: BrowserWindow | undefined
 let coreProcess: ChildProcess | undefined
+
+async function availablePort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') { server.close(); reject(new Error('无法分配本地 Core 端口')); return }
+      server.close(() => resolvePort(address.port))
+    })
+  })
+}
 
 async function coreIsReady(): Promise<boolean> {
   try {
     const response = await fetch(`${coreOrigin}/api/health`, { signal: AbortSignal.timeout(500) })
-    return response.ok
+    if (!response.ok) return false
+    const body = await response.json() as { service?: string }
+    return body.service === 'thermal-agent-core'
   } catch {
     return false
   }
@@ -25,14 +41,24 @@ async function waitForCore(timeoutMs = 15_000): Promise<void> {
 }
 
 function startCore(): void {
-  const projectRoot = resolve(app.getAppPath(), '../..')
-  const entry = join(projectRoot, 'apps', 'core', 'dist', 'cli.js')
-  coreProcess = spawn(process.execPath, [entry], {
-    cwd: projectRoot,
+  const paths = resolveDesktopRuntimePaths({
+    appPath: app.getAppPath(), resourcesPath: process.resourcesPath, packaged: app.isPackaged,
+    nodeOverride: process.env.THERMAL_AGENT_NODE_BIN,
+  })
+  const port = new URL(coreOrigin).port
+  coreProcess = spawn(process.execPath, [paths.coreEntry], {
+    cwd: paths.workingDirectory,
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       THERMAL_AGENT_HOME: join(app.getPath('userData'), 'runtime'),
+      THERMAL_AGENT_HOST: '127.0.0.1',
+      THERMAL_AGENT_PORT: port,
+      THERMAL_AGENT_WEB_ROOT: paths.webRoot,
+      THERMAL_ICEPAK_PLUGIN_ROOT: paths.icepakPluginRoot,
+      THERMAL_AGENT_DSH_PLUGIN: paths.dshPlugin,
+      ...(paths.dshCli ? { THERMAL_AGENT_DSH_CLI: paths.dshCli } : {}),
+      ...(paths.nodeBin ? { THERMAL_AGENT_NODE_BIN: paths.nodeBin } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -42,7 +68,8 @@ function startCore(): void {
 }
 
 async function createWindow(): Promise<void> {
-  if (!await coreIsReady()) startCore()
+  coreOrigin = `http://127.0.0.1:${await availablePort()}`
+  startCore()
   await waitForCore()
   window = new BrowserWindow({
     width: 1380,
