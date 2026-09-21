@@ -1,3 +1,5 @@
+import { statfs } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import type { IcepakEnvironmentProbe, RemoteJobRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
@@ -23,6 +25,11 @@ export interface PeerTaskOffer {
 export class PeerTaskError extends Error {
   constructor(readonly code: string, message: string) { super(message) }
 }
+
+// The download, content-addressed import, working copy and solver outputs can
+// coexist. This is a conservative admission estimate, not a disk reservation.
+const DISK_HEADROOM_BYTES = 512n * 1024n * 1024n
+const INPUT_DISK_MULTIPLIER = 4n
 
 export class PeerTaskInbox {
   constructor(
@@ -51,8 +58,16 @@ export class PeerTaskInbox {
       const probe = await (this.readinessProbe?.() ?? this.plugin.probeEnvironment())
       if (probe.platform !== 'win32' || probe.status !== 'READY' || probe.licenseStatus !== 'AVAILABLE' ||
         !probe.capabilities.includes('baseline_solve') ||
-        (typeof offer.parameters.version === 'string' && !probe.aedtVersions.includes(offer.parameters.version))) {
+        typeof offer.parameters.version !== 'string' || !probe.aedtVersions.includes(offer.parameters.version)) {
         throw new PeerTaskError('ICEPAK_NOT_READY', 'Icepak is not ready for this baseline offer')
+      }
+      let capacity
+      try { capacity = await statfs(dirname(this.database.path), { bigint: true }) }
+      catch { throw new PeerTaskError('DISK_CAPACITY_UNKNOWN', 'executor disk capacity cannot be checked') }
+      const available = capacity.bavail * capacity.bsize
+      const required = BigInt(offer.inputSizeBytes) * INPUT_DISK_MULTIPLIER + DISK_HEADROOM_BYTES
+      if (available < required) {
+        throw new PeerTaskError('INSUFFICIENT_DISK', `executor needs at least ${required} free bytes for this input; ${available} available`)
       }
     }
     const job = this.database.acceptRemoteJob({
@@ -96,7 +111,7 @@ function parseOffer(value: unknown): PeerTaskOffer {
 function validParameters(value: Record<string, unknown>): boolean {
   const allowed = new Set(['version', 'design', 'setup', 'cores', 'nonGraphical', 'flowConvergenceCriterion'])
   if (Object.keys(value).some(key => !allowed.has(key))) return false
-  if (value.version !== undefined && (typeof value.version !== 'string' || value.version.length > 40)) return false
+  if (typeof value.version !== 'string' || !/^20\d{2}\.[1-9]$/u.test(value.version)) return false
   if (value.design !== undefined && (typeof value.design !== 'string' || value.design.length > 100)) return false
   if (value.setup !== undefined && (typeof value.setup !== 'string' || value.setup.length > 100)) return false
   if (value.cores !== undefined && (!Number.isInteger(value.cores) || Number(value.cores) < 1 || Number(value.cores) > 64)) return false

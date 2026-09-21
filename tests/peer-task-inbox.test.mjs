@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { randomInt, randomUUID } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, statfs } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { createCoreApp, PeerSecureChannel, PeerTaskInbox } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
@@ -69,6 +69,15 @@ test('trusted Owner can offer a baseline only after Executor locally opts in; in
   await assert.rejects(PeerTaskInbox.send(channel, peer, offer), error => error.code === 'PEER_REJECTED')
   assert.equal(executor.database.listRemoteJobs().length, 0)
   executorReady = true
+  const inbox = new PeerTaskInbox(executor.nodeIdentity.nodeId, executor.database, executorPlugin)
+  await assert.rejects(inbox.receive(owner.nodeIdentity.nodeId, { ...offer, parameters: { cores: 4 } }),
+    error => error.code === 'INVALID_OFFER')
+  const capacity = await statfs(dirname(executor.database.path), { bigint: true })
+  const oversizedInput = Number(capacity.bavail * capacity.bsize / 4n + 1n)
+  assert.ok(Number.isSafeInteger(oversizedInput))
+  await assert.rejects(inbox.receive(owner.nodeIdentity.nodeId, { ...offer, inputSizeBytes: oversizedInput }),
+    error => error.code === 'INSUFFICIENT_DISK')
+  assert.equal(executor.database.listRemoteJobs().length, 0)
   await PeerTaskInbox.send(channel, peer, offer)
   await PeerTaskInbox.send(channel, peer, offer)
   assert.equal(executor.database.listRemoteJobs().length, 1)
