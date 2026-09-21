@@ -7,7 +7,7 @@ import { createCoreApp } from '@thermal-agent/core'
 
 test('Core API creates, persists and transitions a task through one business write path', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-core-'))
-  const app = createCoreApp({ home })
+  const app = createCoreApp({ home, startAgentRuntime: false })
   app.server.listen(0, '127.0.0.1')
   await new Promise(resolve => app.server.once('listening', resolve))
   t.after(async () => {
@@ -53,7 +53,7 @@ test('Core API creates, persists and transitions a task through one business wri
 
 test('Core exposes conservative Icepak environment evidence through the plugin boundary', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-plugin-api-'))
-  const app = createCoreApp({ home })
+  const app = createCoreApp({ home, startAgentRuntime: false })
   app.server.listen(0, '127.0.0.1')
   await new Promise(resolve => app.server.once('listening', resolve))
   t.after(async () => {
@@ -95,7 +95,7 @@ test('Core owns Icepak run directories and delegates project operations only thr
       }
     },
   }
-  const app = createCoreApp({ home, pluginClient })
+  const app = createCoreApp({ home, pluginClient, startAgentRuntime: false })
   app.server.listen(0, '127.0.0.1')
   await new Promise(resolve => app.server.once('listening', resolve))
   t.after(async () => {

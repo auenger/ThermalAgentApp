@@ -17,12 +17,14 @@
 - Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
+- 固定 DSH `0.1.5-rc.2` 的本地 Agent Host、持久会话工作区和散热专用 preset。
+- Token 保护的 Thermal Tools Bridge，以及任务、Icepak 探测和工程检查工具。
 
-当前还没有完成求解任务的后台进程管理与恢复、DSH 接入、Windows 真实 AEDT 回归验收、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
+当前还没有完成 Windows 真实 AEDT 回归验收、候选求解协调、Skill 审核发布、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
 
 ## 本地运行
 
-要求 Node.js 22.13 或更高版本、pnpm 11，以及用于 Icepak 插件开发检查的 Python 3。
+要求 Node.js `^22.19.0` 或 `>=24`、pnpm 11，以及用于 Icepak 插件开发检查的 Python 3。DSH CLI 使用 `import.meta.main`，Node 22.13 会静默跳过入口，因此不能作为运行环境。
 
 ```sh
 pnpm install
@@ -36,11 +38,16 @@ Core 默认只监听 `127.0.0.1:43110`，数据默认保存在当前目录的 `.
 THERMAL_AGENT_HOME
 THERMAL_AGENT_HOST
 THERMAL_AGENT_PORT
+THERMAL_AGENT_DSH_CLI
+THERMAL_AGENT_NODE_BIN
+THERMAL_AGENT_DSH_PLUGIN
 ```
 
 局域网绑定不会默认开启。后续实现设备配对和认证之后，才允许显式绑定非 loopback 地址。
 
 在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。也可以新建带工程路径的任务，确认需求后启动后台 Baseline。Core 会先生成内容寻址快照，源工程不会被保存或修改。
+
+“Agent”页面嵌入本机 DSH 对话。Agent 可以通过自然语言创建 Task 草稿、读取任务证据、探测 Icepak 和检查工程，但工具层不提供直接启动 Baseline 的能力；需求确认和昂贵求解必须回到 App 操作。
 
 ## 目录
 
@@ -53,6 +60,7 @@ packages/domain/           Task 状态机和领域规则
 packages/sqlite-store/     SQLite migration 与 Repository
 packages/artifact-store/   本地内容寻址文件存储
 plugins/icepak-pyaedt/     独立 Python Icepak 插件
+plugins/dsh-thermal/       DSH 散热工具插件
 docs/adr/                  架构决策记录
 tests/                     跨包集成测试
 ```

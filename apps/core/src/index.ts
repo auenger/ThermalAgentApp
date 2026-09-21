@@ -1,3 +1,7 @@
 export { createCoreApp } from './server.js'
 export { IcepakPluginClient } from './icepak-plugin-client.js'
 export { IcepakExecutionManager } from './execution-manager.js'
+export { DshHost, parseDshReadyUrl, resolveDshCli } from './dsh-host.js'
+export { prepareDshProfile } from './dsh-profile.js'
+export { bindDshWorkspace } from './dsh-workspace.js'
+export { ThermalToolsBridge } from './thermal-tools-bridge.js'

@@ -5,6 +5,7 @@
     { "path": "packages/domain" },
     { "path": "packages/sqlite-store" },
     { "path": "packages/artifact-store" },
+    { "path": "plugins/dsh-thermal" },
     { "path": "apps/core" },
     { "path": "apps/desktop" }
   ]

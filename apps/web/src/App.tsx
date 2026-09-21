@@ -37,7 +37,14 @@ const brand: BrandVariants = {
 const lightTheme = createLightTheme(brand)
 const darkTheme = createDarkTheme(brand)
 
-type Page = 'overview' | 'tasks' | 'skills' | 'nodes' | 'settings'
+type Page = 'overview' | 'agent' | 'tasks' | 'skills' | 'nodes' | 'settings'
+
+interface DshStatus {
+  phase: 'unconfigured' | 'starting' | 'ready' | 'stopped' | 'failed'
+  url?: string
+  detail?: string
+  workspacePath?: string
+}
 
 const useStyles = makeStyles({
   app: { minHeight: '100dvh', backgroundColor: tokens.colorNeutralBackground2, color: tokens.colorNeutralForeground1 },
@@ -90,11 +97,13 @@ const useStyles = makeStyles({
   resultGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px', marginTop: '18px' },
   resultItem: { ...shorthands.padding('12px'), borderRadius: '8px', backgroundColor: tokens.colorNeutralBackground2 },
   resultValue: { marginTop: '5px', fontWeight: 650, overflowWrap: 'anywhere' },
+  agentPanel: { height: 'calc(100dvh - 128px)', minHeight: '560px', overflow: 'hidden', ...shorthands.padding('0') },
+  agentFrame: { width: '100%', height: '100%', border: 0, backgroundColor: tokens.colorNeutralBackground1 },
   iconMuted: { color: tokens.colorNeutralForeground3 },
   mobileNav: {
     display: 'none',
     '@media (max-width: 900px)': {
-      position: 'fixed', display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', left: 0, right: 0, bottom: 0,
+      position: 'fixed', display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', left: 0, right: 0, bottom: 0,
       zIndex: 10, backgroundColor: tokens.colorNeutralBackground1, borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
       paddingTop: '6px', paddingRight: '6px', paddingBottom: '6px', paddingLeft: '6px',
     },
@@ -103,6 +112,7 @@ const useStyles = makeStyles({
 
 const navItems: Array<{ page: Page; label: string; icon: JSX.Element }> = [
   { page: 'overview', label: '概览', icon: <Home20Regular /> },
+  { page: 'agent', label: 'Agent', icon: <Bot20Regular /> },
   { page: 'tasks', label: '任务', icon: <DocumentData20Regular /> },
   { page: 'skills', label: '技能', icon: <BrainCircuit20Regular /> },
   { page: 'nodes', label: '节点', icon: <DesktopPulse20Regular /> },
@@ -161,6 +171,7 @@ export function App() {
           </header>
           <div className={styles.content}>
             {page === 'overview' && <Overview styles={styles} tasks={tasks} activeCount={activeTasks.length} completedCount={completedTasks.length} probe={probe} loading={loading} error={error} onCreated={refresh} />}
+            {page === 'agent' && <AgentWorkspace styles={styles} />}
             {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
             {page === 'skills' && <Placeholder styles={styles} icon={<BrainCircuit20Regular />} title="技能库正在迁移" body="下一阶段接入 DSH 后，成功任务会沉淀为待审核的散热 Skill 草稿。" />}
             {page === 'nodes' && <Placeholder styles={styles} icon={<DesktopPulse20Regular />} title="当前只有本机节点" body="节点发现、设备配对和任务租约会在单机求解闭环稳定后启用。" />}
@@ -190,6 +201,53 @@ function Overview({ styles, tasks, activeCount, completedCount, probe, loading, 
       <TaskPanel styles={styles} tasks={tasks} loading={loading} error={error} onChanged={onCreated} />
       <CreateTaskPanel styles={styles} onCreated={onCreated} />
     </section>
+  </>
+}
+
+function AgentWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
+  const [status, setStatus] = useState<DshStatus>({ phase: 'starting' })
+  const [error, setError] = useState('')
+  const [restarting, setRestarting] = useState(false)
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const response = await fetch('/api/agent/status')
+      const body = await response.json() as { agent?: DshStatus; error?: { message?: string } }
+      if (!response.ok || !body.agent) throw new Error(body.error?.message ?? 'DSH 状态读取失败')
+      setStatus(body.agent); setError('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'DSH 状态读取失败')
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshStatus()
+    const timer = window.setInterval(() => void refreshStatus(), 2_000)
+    return () => window.clearInterval(timer)
+  }, [refreshStatus])
+
+  async function restart() {
+    setRestarting(true); setError('')
+    try {
+      const response = await fetch('/api/agent/restart', { method: 'POST' })
+      if (!response.ok) throw new Error('DSH Host 重启失败')
+      await refreshStatus()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'DSH Host 重启失败')
+    } finally { setRestarting(false) }
+  }
+
+  return <>
+    <div className={styles.intro}>
+      <div><h1 className={styles.title}>散热 Agent</h1><p className={styles.subtitle}>DSH 负责自然语言理解、任务整理和工具选择；昂贵求解与 Skill 发布仍由人工确认。</p></div>
+      <div className={styles.headerActions}><Badge color={status.phase === 'ready' ? 'success' : status.phase === 'failed' ? 'danger' : 'informative'}>{status.phase.toUpperCase()}</Badge><Button disabled={restarting} onClick={() => void restart()}>{restarting ? '重启中' : '重启运行时'}</Button></div>
+    </div>
+    {error && <p className={styles.error}>{error}</p>}
+    <div className={`${styles.panel} ${styles.agentPanel}`}>
+      {status.phase === 'ready' && status.url
+        ? <iframe className={styles.agentFrame} src={status.url} title="Thermal Agent DSH 对话" />
+        : <div className={styles.empty}><div><Spinner label={status.detail ?? '正在启动 DSH Host'} /><p className={styles.details}>{status.workspacePath ?? '正在准备本地工作目录'}</p></div></div>}
+    </div>
   </>
 }
 

@@ -9,11 +9,13 @@ import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { IcepakExecutionManager } from './execution-manager.js'
+import { DshRuntime } from './dsh-runtime.js'
 
 export interface CoreAppOptions {
   home: string
   pluginClient?: IcepakPluginPort
   webRoot?: string
+  startAgentRuntime?: boolean
 }
 
 export interface CoreApp {
@@ -30,10 +32,12 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
+  const agentRuntime = new DshRuntime(home, database, pluginClient)
+  if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   const server = createServer((request, response) => {
-    void route(request, response, database, pluginClient, executions, webRoot, home).catch(error => writeError(response, error))
+    void route(request, response, database, pluginClient, executions, agentRuntime, webRoot, home).catch(error => writeError(response, error))
   })
 
   return {
@@ -46,6 +50,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
         server.close(error => error ? reject(error) : resolveClose())
       })
       await executions.close()
+      await agentRuntime.close()
       database.close()
     },
   }
@@ -57,12 +62,22 @@ async function route(
   database: LocalDatabase,
   pluginClient: IcepakPluginPort,
   executions: IcepakExecutionManager,
+  agentRuntime: DshRuntime,
   webRoot: string,
   home: string,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/api/health') {
     writeJson(response, 200, { status: 'ok', service: 'thermal-agent-core', version: '0.1.0' })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/agent/status') {
+    writeJson(response, 200, { agent: agentRuntime.getStatus() })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/agent/restart') {
+    await agentRuntime.restart()
+    writeJson(response, 202, { agent: agentRuntime.getStatus() })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/tasks') {
@@ -170,7 +185,7 @@ async function serveWeb(response: ServerResponse, webRoot: string, pathname: str
     'Content-Length': String(data.length),
     'Cache-Control': extname(target) === '.html' ? 'no-store' : 'public, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
-    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'",
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src http://127.0.0.1:*",
   })
   response.end(data)
 }

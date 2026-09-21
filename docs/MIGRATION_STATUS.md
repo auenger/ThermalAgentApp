@@ -36,11 +36,12 @@
 
 ## 阶段 2：DSH Agent
 
-- [ ] 固定 DSH 版本并完成打包验证。
-- [ ] DSH Host 与 Session Adapter。
-- [ ] Thermal Tools Bridge。
-- [ ] 自然语言需求收集。
-- [ ] 人工确认 Gate。
+- [x] 固定 DSH `0.1.5-rc.2` 并验证真实 Web Host。
+- [ ] DSH 随 Windows 安装包的离线打包验证。
+- [x] DSH Host、认证 URL、工作区和原生 Session 持久化接入。
+- [x] Loopback + Bearer Token 的 Thermal Tools Bridge。
+- [x] 自然语言创建 Task 草稿、读取任务、环境探测和工程检查工具。
+- [x] 人工确认 Gate：DSH 不暴露启动 Baseline 或发布 Skill 的工具。
 - [ ] Skill 草稿、审核、启用和运行记录。
 
 ## 阶段 3：局域网 Web
@@ -85,5 +86,8 @@ pnpm dev:core
 - 原生残差、Monitor 稳定性、反向流和求解正常结束证据解析。
 - Core 为 Icepak 操作分配运行目录并通过插件端口调用。
 - Baseline 后台执行、输入快照、进度 heartbeat、取消和结果回收。
+- DSH preset 解析、Host 启停/重启和一次性 token 认证页面。
+- DSH Agent 实例暴露 13 个工具，其中 5 个为受控散热工具。
+- Thermal Tools Bridge 鉴权、Task 草稿和 Icepak 只读操作。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

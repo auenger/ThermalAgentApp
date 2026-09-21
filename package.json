@@ -4,20 +4,23 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.13.0"
+    "node": "^22.19.0 || >=24"
   },
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "build": "pnpm build:ts && pnpm --filter @thermal-agent/web build",
     "build:ts": "tsc -b",
     "typecheck": "tsc -b --pretty false && pnpm --filter @thermal-agent/web typecheck",
-    "test": "pnpm build && node --test tests/*.test.mjs && python3 -m unittest discover -s plugins/icepak-pyaedt/tests -v",
+    "test": "pnpm build && node --test tests/*.test.mjs && node scripts/smoke-dsh-agent-tools.mjs && python3 -m unittest discover -s plugins/icepak-pyaedt/tests -v",
     "dev:core": "pnpm build && node --enable-source-maps apps/core/dist/cli.js",
     "dev:web": "pnpm --filter @thermal-agent/web dev",
     "dev:desktop": "pnpm build && electron apps/desktop",
     "smoke:gui": "electron scripts/smoke-electron-gui.mjs"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-app-boot": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-cmdline": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.5-rc.2",
     "@thermal-agent/artifact-store": "workspace:*",
     "@thermal-agent/core": "workspace:*",
     "@thermal-agent/domain": "workspace:*",
