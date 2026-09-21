@@ -1,6 +1,6 @@
 # ADR 0007：按任务租约授权的加密输入传输
 
-- 状态：本机双 App 集成测试通过；未接入自动派单，Windows 双机和外部安全审计待完成
+- 状态：本机双 App 集成测试通过并已接入持久 Offer 输入暂存；无人值守调度、Windows 双机和外部安全审计待完成
 - 日期：2026-09-21
 
 节点互信只证明设备身份，不能授予任意文件读取权限。本阶段在 ADR 0006 的短时加密会话内增加唯一的 `artifact.input.chunk` 操作。Owner 仅在以下条件同时成立时发送 `INPUT_PROJECT` 文件片段：请求节点是 Task 当前租约的 Executor；Task 属于本机 Owner；请求的 Run/Attempt 是最新记录，Attempt 绑定此 Executor 和输入 SHA；Artifact 已显式关联该 Attempt；租约 ID、epoch、期限和信任状态均为当前值。未开放通用 Artifact 读取、目录枚举、Task 快照或结果上传。

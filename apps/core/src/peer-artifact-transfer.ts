@@ -84,7 +84,7 @@ export class PeerArtifactTransfer {
   }
 
   async downloadLeasedInput(
-    owner: DiscoveredPeer, reference: LeasedInputReference, channel: PeerSecureChannel,
+    owner: DiscoveredPeer, reference: LeasedInputReference, channel: PeerSecureChannel, signal?: AbortSignal,
   ): Promise<ArtifactRecord> {
     const input = parseReference({ ...reference, offset: 0 })
     if (this.activeDownloads.has(input.sha256)) throw new PeerArtifactError('TRANSFER_BUSY', 'this artifact is already downloading')
@@ -99,6 +99,7 @@ export class PeerArtifactTransfer {
       if (offset > input.sizeBytes) throw new PeerArtifactError('INVALID_PARTIAL', 'partial artifact exceeds expected size')
       const connection = await channel.connect(owner)
       while (offset < input.sizeBytes) {
+        if (signal?.aborted) throw new PeerArtifactError('TRANSFER_CANCELLED', 'input transfer was stopped before completion')
         const response = await channel.request(owner, connection.sessionId, { operation: 'artifact.input.chunk', ...input, offset })
         const chunk = parseChunk(response)
         if (chunk.sha256 !== input.sha256 || chunk.sizeBytes !== input.sizeBytes || chunk.offset !== offset ||
@@ -109,6 +110,7 @@ export class PeerArtifactTransfer {
         await appendFile(partialPath, chunk.data)
         offset += chunk.data.byteLength
       }
+      if (signal?.aborted) throw new PeerArtifactError('TRANSFER_CANCELLED', 'input transfer was stopped before completion')
       if (offset === input.sizeBytes) {
         const response = await channel.request(owner, connection.sessionId, { operation: 'artifact.input.chunk', ...input, offset })
         const finalChunk = parseChunk(response)
@@ -118,6 +120,7 @@ export class PeerArtifactTransfer {
         }
       }
       if (offset !== input.sizeBytes) throw new PeerArtifactError('INVALID_PARTIAL', 'input artifact transfer is incomplete')
+      if (signal?.aborted) throw new PeerArtifactError('TRANSFER_CANCELLED', 'input transfer was stopped before completion')
       const hash = createHash('sha256')
       for await (const part of createReadStream(partialPath)) hash.update(part)
       if (hash.digest('hex') !== input.sha256) {

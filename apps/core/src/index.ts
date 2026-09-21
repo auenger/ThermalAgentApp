@@ -20,3 +20,4 @@ export { PeerArtifactTransfer, PeerArtifactError, PEER_ARTIFACT_CHUNK_BYTES } fr
 export { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'
 export { PeerTaskInbox, PeerTaskError } from './peer-task-inbox.js'
 export { PeerTaskDispatcher, PeerDispatchError } from './peer-task-dispatcher.js'
+export { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'

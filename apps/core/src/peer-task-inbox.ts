@@ -29,6 +29,7 @@ export class PeerTaskInbox {
     private readonly localNodeId: string,
     private readonly database: LocalDatabase,
     private readonly plugin: IcepakPluginPort,
+    private readonly onAccepted?: () => void,
   ) {}
 
   async receive(peerNodeId: string, value: unknown): Promise<{ operation: 'task.baseline.accepted'; attemptId: string; status: RemoteJobRecord['status'] }> {
@@ -43,7 +44,7 @@ export class PeerTaskInbox {
     }
     const existing = this.database.getRemoteJob(offer.attemptId)
     if (!existing) {
-      if (this.database.listRemoteJobs().some(job => ['OFFERED', 'TRANSFERRING', 'RUNNING', 'SYNCING_RESULTS'].includes(job.status))) {
+      if (this.database.listRemoteJobs().some(job => ['OFFERED', 'TRANSFERRING', 'INPUT_READY', 'RUNNING', 'SYNCING_RESULTS'].includes(job.status))) {
         throw new PeerTaskError('EXECUTOR_BUSY', 'executor already has a remote job')
       }
       const probe = await this.plugin.probeEnvironment()
@@ -60,6 +61,7 @@ export class PeerTaskInbox {
       inputSha256: offer.inputSha256, inputSizeBytes: offer.inputSizeBytes,
       inputOriginalName: offer.inputOriginalName, parameters: offer.parameters,
     })
+    this.onAccepted?.()
     return { operation: 'task.baseline.accepted', attemptId: job.attemptId, status: job.status }
   }
 
@@ -67,7 +69,8 @@ export class PeerTaskInbox {
     const { sessionId } = await ownerChannel.connect(executor)
     const response = await ownerChannel.request(executor, sessionId, offer)
     if (!isObject(response) || response.operation !== 'task.baseline.accepted' ||
-      response.attemptId !== offer.attemptId || response.status !== 'OFFERED') {
+      response.attemptId !== offer.attemptId ||
+      !['OFFERED', 'TRANSFERRING', 'INPUT_READY', 'RUNNING', 'SYNCING_RESULTS', 'COMPLETED'].includes(String(response.status))) {
       throw new PeerTaskError('INVALID_OFFER_RESPONSE', 'executor did not accept the baseline offer')
     }
   }

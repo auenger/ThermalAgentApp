@@ -260,6 +260,8 @@ export class LocalDatabase {
         input_original_name TEXT NOT NULL,
         parameters_json TEXT NOT NULL,
         status TEXT NOT NULL,
+        error_code TEXT,
+        error_message TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(owner_node_id, task_id, epoch)
@@ -360,11 +362,16 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (6, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (7, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'last_run_at', 'TEXT')
+    this.ensureColumn('remote_jobs', 'error_code', 'TEXT')
+    this.ensureColumn('remote_jobs', 'error_message', 'TEXT')
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -557,7 +564,7 @@ export class LocalDatabase {
     return (this.db.prepare('SELECT * FROM remote_jobs ORDER BY created_at DESC').all() as SqliteRow[]).map(decodeRemoteJob)
   }
 
-  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
+  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'errorCode' | 'errorMessage' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const existing = this.getRemoteJob(input.attemptId)
@@ -569,27 +576,30 @@ export class LocalDatabase {
           JSON.stringify(existing.parameters) === JSON.stringify(input.parameters)
         if (!sameWork || input.epoch < existing.epoch ||
           (input.epoch === existing.epoch && input.leaseId !== existing.leaseId) ||
-          (input.epoch > existing.epoch && existing.status !== 'OFFERED')) {
+          (input.epoch > existing.epoch && !['OFFERED', 'TRANSFERRING', 'INPUT_READY'].includes(existing.status))) {
           throw new PeerConflictError('remote job attempt was offered with conflicting details')
         }
         if (input.epoch > existing.epoch) {
-          this.db.prepare('UPDATE remote_jobs SET lease_id = ?, epoch = ?, updated_at = ? WHERE attempt_id = ?')
-            .run(input.leaseId, input.epoch, new Date().toISOString(), input.attemptId)
+          this.db.prepare(`
+            UPDATE remote_jobs SET lease_id = ?, epoch = ?, status = 'OFFERED',
+              error_code = NULL, error_message = NULL, updated_at = ? WHERE attempt_id = ?
+          `).run(input.leaseId, input.epoch, new Date().toISOString(), input.attemptId)
         }
         this.db.exec('COMMIT')
         return this.getRemoteJob(input.attemptId) as RemoteJobRecord
       }
       const busy = this.db.prepare(`
         SELECT attempt_id FROM remote_jobs
-        WHERE status IN ('OFFERED', 'TRANSFERRING', 'RUNNING', 'SYNCING_RESULTS') LIMIT 1
+        WHERE status IN ('OFFERED', 'TRANSFERRING', 'INPUT_READY', 'RUNNING', 'SYNCING_RESULTS') LIMIT 1
       `).get() as SqliteRow | undefined
       if (busy) throw new PeerConflictError('executor already has an active remote job')
       const now = new Date().toISOString()
       this.db.prepare(`
         INSERT INTO remote_jobs(
           attempt_id, task_id, run_id, owner_node_id, executor_node_id, lease_id, epoch,
-          input_sha256, input_size_bytes, input_original_name, parameters_json, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OFFERED', ?, ?)
+          input_sha256, input_size_bytes, input_original_name, parameters_json, status,
+          error_code, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OFFERED', NULL, NULL, ?, ?)
       `).run(input.attemptId, input.taskId, input.runId, input.ownerNodeId, input.executorNodeId,
         input.leaseId, input.epoch, input.inputSha256, input.inputSizeBytes,
         input.inputOriginalName, JSON.stringify(input.parameters), now, now)
@@ -600,6 +610,37 @@ export class LocalDatabase {
       this.db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  transitionRemoteJob(
+    attemptId: string, leaseId: string, epoch: number,
+    from: RemoteJobRecord['status'], to: RemoteJobRecord['status'],
+    error?: { code: string; message: string },
+  ): RemoteJobRecord {
+    const allowed: Record<RemoteJobRecord['status'], readonly RemoteJobRecord['status'][]> = {
+      OFFERED: ['TRANSFERRING', 'FAILED', 'CANCELLED'],
+      TRANSFERRING: ['OFFERED', 'INPUT_READY', 'FAILED', 'CANCELLED'],
+      INPUT_READY: ['RUNNING', 'FAILED', 'CANCELLED'],
+      RUNNING: ['SYNCING_RESULTS', 'FAILED', 'CANCELLED'],
+      SYNCING_RESULTS: ['COMPLETED', 'FAILED', 'CANCELLED'],
+      COMPLETED: [], FAILED: [], CANCELLED: [],
+    }
+    if (!allowed[from].includes(to)) throw new PeerConflictError(`remote job transition ${from} -> ${to} is invalid`)
+    const updated = this.db.prepare(`
+      UPDATE remote_jobs SET status = ?, error_code = ?, error_message = ?, updated_at = ?
+      WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status = ?
+    `).run(to, error?.code?.slice(0, 100) ?? null, error?.message?.slice(0, 2_000) ?? null,
+      new Date().toISOString(), attemptId, leaseId, epoch, from)
+    if (Number(updated.changes) !== 1) throw new PeerConflictError('remote job was changed or its lease is stale')
+    return this.getRemoteJob(attemptId) as RemoteJobRecord
+  }
+
+  recordRemoteJobError(attemptId: string, leaseId: string, epoch: number, code: string, message: string): void {
+    const updated = this.db.prepare(`
+      UPDATE remote_jobs SET error_code = ?, error_message = ?, updated_at = ?
+      WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status IN ('OFFERED', 'TRANSFERRING')
+    `).run(code.slice(0, 100), message.slice(0, 2_000), new Date().toISOString(), attemptId, leaseId, epoch)
+    if (Number(updated.changes) !== 1) throw new PeerConflictError('remote job was changed or its lease is stale')
   }
 
   claimQueuedTaskLease(
@@ -1552,6 +1593,8 @@ function decodeRemoteJob(row: SqliteRow): RemoteJobRecord {
     inputSha256: String(row.input_sha256), inputSizeBytes: Number(row.input_size_bytes),
     inputOriginalName: String(row.input_original_name), parameters: parseObject(row.parameters_json),
     status: row.status as RemoteJobRecord['status'],
+    errorCode: row.error_code === null || row.error_code === undefined ? null : String(row.error_code),
+    errorMessage: row.error_message === null || row.error_message === undefined ? null : String(row.error_message),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   }
 }

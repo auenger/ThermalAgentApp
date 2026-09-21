@@ -23,6 +23,7 @@ import { PeerArtifactError, PeerArtifactTransfer } from './peer-artifact-transfe
 import { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'
 import { PeerTaskInbox, PeerTaskError } from './peer-task-inbox.js'
 import { PeerTaskDispatcher, PeerDispatchError } from './peer-task-dispatcher.js'
+import { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -94,13 +95,15 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerSecure = new PeerSecureChannel(nodeIdentity, database)
   const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
   const peerLeases = new PeerLeaseControl(nodeIdentity.nodeId, database)
-  const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient)
+  const remoteInput = new PeerRemoteInputProcessor(database, discovery, peerSecure, peerArtifacts)
+  const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient, () => remoteInput.wake(true))
   const peerDispatcher = new PeerTaskDispatcher(nodeIdentity.nodeId, database, artifacts, peerSecure)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   const eventStream = new CoreEventStream(database)
   const reports = new ReportManager(home, database, artifacts, options.reportClient ?? new ReportClient())
+  remoteInput.start()
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
@@ -118,6 +121,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     nodeIdentity,
     async close() {
       clearInterval(leaseSweep)
+      await remoteInput.close()
       await discovery.stop()
       await lanPublisher.stop()
       peerSecure.close()

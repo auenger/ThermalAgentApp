@@ -221,7 +221,9 @@ export interface RemoteJobRecord {
   inputSizeBytes: number
   inputOriginalName: string
   parameters: Record<string, unknown>
-  status: 'OFFERED' | 'TRANSFERRING' | 'RUNNING' | 'SYNCING_RESULTS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  status: 'OFFERED' | 'TRANSFERRING' | 'INPUT_READY' | 'RUNNING' | 'SYNCING_RESULTS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  errorCode: string | null
+  errorMessage: string | null
   createdAt: string
   updatedAt: string
 }
