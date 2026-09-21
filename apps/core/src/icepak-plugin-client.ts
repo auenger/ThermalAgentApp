@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
+import { pythonPluginArgs, pythonPluginEnv } from './python-plugin-launch.js'
 import type {
   IcepakEnvironmentProbe,
   IcepakProjectOperationInput,
@@ -72,11 +73,8 @@ export class IcepakPluginClient {
   async call(method: string, params: object = {}, options: PluginCallOptions = {}): Promise<unknown> {
     const id = randomUUID()
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
-    const child = spawn(this.python, ['-m', 'thermal_icepak_plugin'], {
-      env: {
-        ...process.env,
-        PYTHONPATH: [this.pluginRoot, process.env.PYTHONPATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':'),
-      },
+    const child = spawn(this.python, pythonPluginArgs(this.pluginRoot, 'thermal_icepak_plugin'), {
+      env: pythonPluginEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })

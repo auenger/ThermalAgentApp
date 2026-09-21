@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
+import { pythonPluginArgs, pythonPluginEnv } from './python-plugin-launch.js'
 import type { RpcResponse } from '@thermal-agent/contracts'
 
 export interface ReportRenderInput {
@@ -54,11 +55,8 @@ export class ReportClient implements ReportPort {
 
   private async call(method: string, params: object): Promise<unknown> {
     const id = randomUUID()
-    const child = spawn(this.python, ['-m', 'thermal_report_plugin'], {
-      env: {
-        ...process.env,
-        PYTHONPATH: [this.pluginRoot, process.env.PYTHONPATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':'),
-      },
+    const child = spawn(this.python, pythonPluginArgs(this.pluginRoot, 'thermal_report_plugin'), {
+      env: pythonPluginEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })

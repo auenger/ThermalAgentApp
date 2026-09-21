@@ -2,6 +2,36 @@ import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
+export const OFFLINE_PYTHON_PROBE = `
+import importlib
+import json
+import pathlib
+import struct
+import sys
+
+if sys.version_info < (3, 10):
+    raise RuntimeError('Bundled Python 3.10 or newer is required')
+runtime = pathlib.Path(sys.argv[1]).resolve()
+for plugin_root in sys.argv[2:4]:
+    sys.path.insert(0, str(pathlib.Path(plugin_root).resolve()))
+for name in ('ansys.aedt.core', 'reportlab', 'pypdf'):
+    module = importlib.import_module(name)
+    origin = pathlib.Path(module.__file__).resolve()
+    if not origin.is_relative_to(runtime):
+        raise RuntimeError(f'{name} loaded outside bundled Python runtime: {origin}')
+for name in ('thermal_icepak_plugin', 'thermal_report_plugin'):
+    importlib.import_module(name)
+print(json.dumps({'python': sys.version.split()[0], 'runtime': str(runtime), 'platform': sys.platform, 'bits': struct.calcsize('P') * 8}))
+`
+
+export function verifyOfflinePython(python, runtimeRoot, icepakRoot, reportRoot) {
+  const output = execFileSync(python, ['-I', '-c', OFFLINE_PYTHON_PROBE, runtimeRoot, icepakRoot, reportRoot], {
+    encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PYTHONPATH: '' },
+  })
+  return JSON.parse(output.trim().split(/\r?\n/u).at(-1))
+}
+
 export function verifyWindowsRuntime(root = resolve(import.meta.dirname, '..')) {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Windows installer must be assembled on a Windows x64 build machine')
   const paths = {
@@ -25,12 +55,21 @@ export function verifyWindowsRuntime(root = resolve(import.meta.dirname, '..')) 
     throw new Error(`Bundled Node.js ${version} is unsupported; use Node 22.22.x or newer compatible runtime`)
   }
   execFileSync(paths.node, ['--check', paths.dsh], { timeout: 10_000, stdio: 'pipe' })
-  const pythonCode = 'import ansys.aedt.core, reportlab, pypdf, thermal_icepak_plugin, thermal_report_plugin; print("ok")'
-  const pythonPath = [join(root, 'plugins', 'icepak-pyaedt', 'python'), join(root, 'plugins', 'report-reportlab', 'python')].join(';')
-  execFileSync(paths.python, ['-c', pythonCode], {
-    encoding: 'utf8', timeout: 30_000, env: { ...process.env, PYTHONPATH: pythonPath },
+  const dshVersion = execFileSync(paths.node, [paths.dsh, '--version'], {
+    encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim()
+  if (dshVersion !== '0.1.5-rc.2') throw new Error(`Bundled DSH version is unsupported: ${dshVersion}`)
+  execFileSync(paths.node, [join(root, 'scripts', 'smoke-dsh-agent-tools.mjs')], {
+    cwd: root, timeout: 60_000, stdio: 'pipe',
   })
-  return { nodeVersion: version, python: paths.python }
+  const pythonInfo = verifyOfflinePython(paths.python,
+    join(root, 'packaging', 'windows-runtime', 'python'),
+    join(root, 'plugins', 'icepak-pyaedt', 'python'),
+    join(root, 'plugins', 'report-reportlab', 'python'))
+  if (pythonInfo.platform !== 'win32' || pythonInfo.bits !== 64) {
+    throw new Error(`Bundled Python must be Windows x64; found ${pythonInfo.platform} ${pythonInfo.bits}-bit`)
+  }
+  return { nodeVersion: version, dshVersion, python: paths.python, pythonInfo }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {
