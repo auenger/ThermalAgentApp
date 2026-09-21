@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import platform
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,7 +56,7 @@ def probe_environment() -> dict[str, object]:
         "pluginVersion": PLUGIN_VERSION,
         "protocolVersion": PROTOCOL_VERSION,
         "status": status,
-        "platform": platform.platform(),
+        "platform": sys.platform,
         "aedtVersions": versions,
         "selectedVersion": versions[-1] if versions else None,
         "pyaedtAvailable": pyaedt_available,

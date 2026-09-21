@@ -555,6 +555,8 @@ function IcepakSettings({ styles, probe, onProbeUpdated }: { styles: ReturnType<
   const [result, setResult] = useState<IcepakProjectOperationResult | null>(null)
   const [error, setError] = useState('')
   const [probingLaunch, setProbingLaunch] = useState(false)
+  const [startingVerification, setStartingVerification] = useState(false)
+  const [verificationTaskId, setVerificationTaskId] = useState('')
   useEffect(() => { if (probe?.selectedVersion) setVersion(probe.selectedVersion) }, [probe?.selectedVersion])
 
   async function probeLaunch() {
@@ -568,6 +570,21 @@ function IcepakSettings({ styles, probe, onProbeUpdated }: { styles: ReturnType<
       onProbeUpdated(body.probe)
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'Icepak 启动验证失败') }
     finally { setProbingLaunch(false) }
+  }
+
+  async function verifySolver() {
+    if (!window.confirm('这会在工程副本上执行一次真实 Icepak 求解，可能耗时较长并占用许可证。确认创建能力验证任务吗？')) return
+    setStartingVerification(true); setError('')
+    try {
+      const response = await fetch('/api/plugins/icepak/verify-solver', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath, version, authorizeSolve: true }),
+      })
+      const body = await response.json() as { task?: TaskRecord; error?: { message?: string } }
+      if (!response.ok || !body.task) throw new Error(body.error?.message ?? '真实求解验证未能启动')
+      setVerificationTaskId(body.task.id)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '真实求解验证未能启动') }
+    finally { setStartingVerification(false) }
   }
 
   async function run(operation: 'inspect' | 'fan-check') {
@@ -603,6 +620,12 @@ function IcepakSettings({ styles, probe, onProbeUpdated }: { styles: ReturnType<
           <Field label="AEDT 版本"><Input value={version} onChange={(_, data) => setVersion(data.value)} /></Field>
           <Button disabled={probingLaunch || running !== null} onClick={() => void probeLaunch()}>{probingLaunch ? '正在启动并释放 Icepak' : '验证 Icepak 可启动'}</Button>
           <p className={styles.details}>启动验证会短暂开启独立 AEDT 会话；成功仅代表可启动，不代表已验证求解许可证。</p>
+          <Button disabled={!projectPath.trim() || !version.trim() || startingVerification || running !== null} onClick={() => void verifySolver()}>
+            {startingVerification ? '正在创建验证任务' : '真实求解验证（占用许可证）'}
+          </Button>
+          <p className={styles.details}>需再次确认；将创建可审计的 Baseline 任务，工程在副本上求解。成功且证据完整后，本节点最多 30 分钟向可信节点发布 READY，实际许可证仍可能变化。</p>
+          {verificationTaskId && <p className={styles.details}>验证任务已启动：{verificationTaskId}。请到“任务”页查看进度和复核结果。</p>}
+          {probe?.readinessExpiresAt && <p className={styles.details}>最近真实求解证明：{probe.readinessVerifiedAt}；到期：{probe.readinessExpiresAt}</p>}
           <Field label="风扇转速比例" hint="仅用于动作验证，范围 (1.0, 1.5]"><Input type="number" min={1.01} max={1.5} step={0.01} value={ratio} onChange={(_, data) => setRatio(data.value)} /></Field>
           {error && <div className={styles.error}>{error}</div>}
           <Button appearance="primary" disabled={!projectPath.trim() || running !== null} onClick={() => void run('inspect')}>{running === 'inspect' ? '正在启动 AEDT' : '检查工程'}</Button>

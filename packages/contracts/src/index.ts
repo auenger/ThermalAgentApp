@@ -344,6 +344,17 @@ export interface IcepakEnvironmentProbe {
   licenseStatus: 'UNKNOWN' | 'AVAILABLE' | 'UNAVAILABLE'
   capabilities: string[]
   diagnostics: string[]
+  readinessVerifiedAt?: string
+  readinessExpiresAt?: string
+}
+
+export interface IcepakReadinessRecord {
+  version: string
+  pluginVersion: string
+  resultSha256: string
+  source: 'LOCAL_ATTEMPT' | 'REMOTE_JOB'
+  sourceId: string
+  verifiedAt: string
 }
 
 export interface IcepakProjectOperationInput {

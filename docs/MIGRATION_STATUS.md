@@ -24,7 +24,7 @@
 - [x] Core 同源发布 React Web。
 - [x] Electron 桌面启动入口。
 - [x] Desktop 独占 loopback 端口及开发/packaged 资源路径解析。
-- [x] Icepak 插件进程健康检查、轻量安装识别，以及本机显式启动/释放独立 AEDT 会话的深度探测。
+- [x] Icepak 插件进程健康检查、轻量安装识别、本机显式启动/释放独立 AEDT 会话，以及经用户单独授权的真实求解能力验证入口。
 - [x] 从旧项目迁移通用 AEDT 工程检查逻辑。
 - [x] 从旧项目迁移 Baseline PyAEDT 求解代码路径（待 Windows 真实回归）。
 - [x] 从旧项目迁移温度 Monitor、原生残差和收敛证据采集（待 Windows 真实回归）。
@@ -67,7 +67,7 @@
 
 - [x] 显式 LAN 发布下的签名 UDP 组播节点发现、30 秒时效与重放防护（待 Windows 双机和防火墙验收）。
 - [x] 持久节点身份、本机手动信任登记、双向签名身份握手及短时 X25519/AES-GCM 加密通道；加密 ping、Offer、租约续期与当前租约授权的输入下载、结果上传原语已验证，自动配对待实现。
-- [ ] 可用于自动调度的真实 Icepak 能力心跳（签名 UDP 心跳、持久快照、30 秒新鲜度和负载选择已接通；显式深度探测可证明 `LAUNCHABLE`，但求解许可证、项目兼容性和自动刷新仍未验证，因此不会宣告 `READY` 或容量）。
+- [ ] 可用于生产自动调度的真实 Icepak 能力心跳（签名 UDP 心跳、持久快照、30 秒新鲜度和负载选择已接通；显式真实 Baseline 成功后可签发 30 分钟的版本限定 READY 证明，过期自动降级，并供接单/执行前统一校验；尚无真实 Windows/AEDT/许可证双机验收，不能视为生产可用）。
 - [ ] Owner、Executor、Attempt 和 Lease 远程协调（显式派单及经用户授权的持久自动队列，已在模拟双/三 App 中验证等待、重启恢复、空闲节点选择、租约失效后改派、受管求解和 Owner 审批 Gate；真实 Windows 双机验收与崩溃后即时失败通知待完成）。
 - [ ] Artifact 分块传输和断点续传（输入与结果已接入远程 Baseline 流程，并验证部分文件恢复和 SHA；空间预留/限速、真实大工程与 Windows 双机验证待完成）。
 - [ ] 网络分区、租约超时和迟到结果处理。
@@ -117,6 +117,7 @@ pnpm dev:core
 - Executor 收到 Offer 后会在可信 Owner 被发现时自动续租并拉取输入，支持中断续传和完整 SHA 校验；`remote_jobs` 用 Lease ID/epoch 栅栏进入 `INPUT_READY`。测试覆盖租约过期后新 epoch 再验输入。
 - Executor 到 Owner 的结果分块上传已接入远程 Baseline：加密会话、定期续租、可恢复部分文件、最终 SHA 校验、当前 Lease/epoch 与最新 Attempt 校验、SQLite 原子关联及重复确认。双 App 测试覆盖损坏文件、错误节点/epoch、终止 Attempt 和部分块恢复。
 - 默认启用的远程执行处理器已接通 `INPUT_READY → RUNNING → SYNCING_RESULTS → COMPLETED`：调用受管 Icepak 插件，持久化结果 SHA，Owner 校验必要证据并原子完成 Attempt/Run、请求人工审批及释放租约。模拟双 App 端到端测试通过；真实 Windows READY/许可证和双机验收仍缺，不能宣称生产可用。
-- 自动派单需用户在本机单独授权；SQLite 持久保存待派发意图、输入 SHA 和求解参数。模拟测试覆盖无节点等待、Owner 重启、源文件变化不影响快照、授权撤销、空闲节点自动接单，以及首节点租约被撤销后的跨节点改派。真实 READY 心跳仍缺，因此生产环境尚不能依赖自动调度。
+- 自动派单需用户在本机单独授权；SQLite 持久保存待派发意图、输入 SHA 和求解参数。模拟测试覆盖无节点等待、Owner 重启、源文件变化不影响快照、授权撤销、空闲节点自动接单，以及首节点租约被撤销后的跨节点改派。真实 Windows 多机验收未完成，因此生产环境尚不能依赖自动调度。
+- Icepak 插件现用 `win32` 平台契约；Core 不从安装或 AEDT 启动推断求解 READY。用户明确授权的诊断 Baseline 成功且证据完整后，SQLite 记录版本/插件/结果 SHA 与时间，Core 最多 30 分钟发布对应版本的 READY，并在版本变化、过期和非 Windows 时降级。模拟测试已通过，真实许可证占用情况仍需 Windows 验收。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

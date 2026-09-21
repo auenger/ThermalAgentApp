@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
-import { extname, join, resolve, sep } from 'node:path'
+import { basename, extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
 import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
@@ -27,6 +27,7 @@ import { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'
 import { PeerRemoteRunControl, PeerRemoteRunError } from './peer-remote-run-control.js'
 import { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
 import { PeerAutoDispatcher } from './peer-auto-dispatcher.js'
+import { effectiveIcepakProbe } from './icepak-readiness.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -68,6 +69,8 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   leaseSweep.unref()
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
+  const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
+    effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts)
   const pendingLaunchProbes = new Map<string, Promise<IcepakEnvironmentProbe>>()
   const launchProbe = (version?: string): Promise<IcepakEnvironmentProbe> => {
     if (!pluginClient.probeLaunchability) throw new RequestError(501, 'PROBE_UNAVAILABLE', 'Icepak launch probe is not supported by this plugin client')
@@ -86,10 +89,11 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       catch { cachedProbe = null }
       probedAt = Date.now()
     }
-    const status = cachedProbe?.status ?? 'DEGRADED'
+    const effective = cachedProbe ? await effectiveIcepakProbe(cachedProbe, database, artifacts) : null
+    const status = effective?.status ?? 'DEGRADED'
     return {
       pluginStatus: status,
-      aedtVersions: cachedProbe?.aedtVersions ?? [],
+      aedtVersions: effective?.aedtVersions ?? [],
       maxConcurrent: status === 'READY' ? 1 : 0,
       activeAttempts: database.listActiveAttempts().length,
     }
@@ -100,9 +104,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
   const peerLeases = new PeerLeaseControl(nodeIdentity.nodeId, database)
   const remoteRuns = new PeerRemoteRunControl(nodeIdentity.nodeId, database, artifacts)
-  const remoteSolve = new PeerRemoteSolveProcessor(home, database, artifacts, pluginClient, discovery, peerSecure, peerArtifacts)
+  const remoteSolve = new PeerRemoteSolveProcessor(home, database, artifacts, pluginClient, discovery, peerSecure, peerArtifacts, readinessProbe)
   const remoteInput = new PeerRemoteInputProcessor(database, discovery, peerSecure, peerArtifacts, () => remoteSolve.wake())
-  const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient, () => remoteInput.wake(true))
+  const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient, () => remoteInput.wake(true), readinessProbe)
   const peerDispatcher = new PeerTaskDispatcher(nodeIdentity.nodeId, database, artifacts, peerSecure)
   const autoDispatcher = new PeerAutoDispatcher(nodeIdentity.nodeId, database, discovery, peerDispatcher)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
@@ -547,7 +551,7 @@ async function route(
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/plugins/icepak/probe') {
-    writeJson(response, 200, { probe: await pluginClient.probeEnvironment() })
+    writeJson(response, 200, { probe: await effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts) })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/probe-launchability') {
@@ -559,6 +563,36 @@ async function route(
       throw new RequestError(400, 'INVALID_VERSION', 'version must be an AEDT year.release value')
     }
     writeJson(response, 200, { probe: await launchProbe(version) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/verify-solver') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'solver verification is local-only')
+    assertLocalWriteOrigin(request)
+    const value = await readJsonBody(request)
+    if (!isObject(value) || value.authorizeSolve !== true) {
+      throw new RequestError(400, 'SOLVE_APPROVAL_REQUIRED', 'real Icepak solve requires explicit authorization')
+    }
+    const input = parseIcepakProjectOperationInput(value)
+    if (!input.version || !/^20\d{2}\.[12]$/u.test(input.version)) {
+      throw new RequestError(400, 'INVALID_VERSION', 'select an AEDT version before solver verification')
+    }
+    const detected = await pluginClient.probeEnvironment()
+    if (detected.platform !== 'win32' || !detected.pyaedtAvailable ||
+      !detected.aedtVersions.includes(input.version)) {
+      throw new RequestError(409, 'ICEPAK_NOT_DETECTED', 'selected AEDT/PyAEDT environment is not available on this Windows node')
+    }
+    let source
+    try { source = await stat(input.projectPath) }
+    catch { throw new RequestError(400, 'PROJECT_NOT_FOUND', 'Icepak project file is unavailable') }
+    if (!source.isFile() || source.size < 1) throw new RequestError(400, 'PROJECT_NOT_FOUND', 'Icepak project file is empty or not a file')
+    const task = database.createTask(createTask({ title: `Icepak 能力验证 · ${basename(input.projectPath)}`,
+      description: '用户显式授权的一次真实求解，用于验证本机 Icepak 能力与许可证；结果仍需人工复核。',
+      ownerNodeId: nodeIdentity.nodeId,
+      requirementSnapshot: { projectPath: input.projectPath, aedtVersion: input.version, diagnosticReadinessProbe: true },
+    }))
+    database.transitionTask(task.id, 'READY', task.version, '用户明确授权真实 Icepak 求解验证')
+    const started = await executions.startBaseline(task.id, input)
+    writeJson(response, 202, { task: database.getTask(task.id), run: started.run, attempt: started.attempt })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/inspect') {

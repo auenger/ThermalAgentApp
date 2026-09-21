@@ -1,12 +1,14 @@
 import { basename, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { RemoteJobRecord } from '@thermal-agent/contracts'
+import type { IcepakEnvironmentProbe, RemoteJobRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { PeerArtifactTransfer } from './peer-artifact-transfer.js'
 import type { DiscoveredPeer, PeerDiscovery } from './peer-discovery.js'
 import { PeerLeaseControl } from './peer-lease-control.js'
 import { PeerSecureChannel } from './peer-secure-channel.js'
+import { provesIcepakSolve } from './icepak-readiness.js'
 
 const RENEW_INTERVAL_MS = 20_000
 const RETRY_DELAY_MS = 10_000
@@ -26,6 +28,7 @@ export class PeerRemoteSolveProcessor {
     private readonly discovery: PeerDiscovery,
     private readonly channel: PeerSecureChannel,
     private readonly transfer: PeerArtifactTransfer,
+    private readonly readinessProbe?: () => Promise<IcepakEnvironmentProbe>,
   ) {}
 
   start(): void {
@@ -106,7 +109,7 @@ export class PeerRemoteSolveProcessor {
       timer.unref()
 
       if (stage === 'INPUT_READY') {
-        const probe = await this.plugin.probeEnvironment()
+        const probe = await (this.readinessProbe?.() ?? this.plugin.probeEnvironment())
         if (probe.platform !== 'win32' || probe.status !== 'READY' || probe.licenseStatus !== 'AVAILABLE' ||
           !probe.capabilities.includes('baseline_solve')) throw new Error('Icepak is no longer READY for remote solve')
         const input = this.database.getArtifact(job.inputSha256)
@@ -159,6 +162,14 @@ export class PeerRemoteSolveProcessor {
         throw new Error('Owner did not confirm the completed Baseline')
       }
       this.database.transitionRemoteJob(job.attemptId, job.leaseId, job.epoch, 'SYNCING_RESULTS', 'COMPLETED')
+      try {
+        const version = typeof job.parameters.version === 'string' ? job.parameters.version : ''
+        const evidence = JSON.parse(await readFile(this.artifacts.resolveArtifact(staged.resultSha256), 'utf8'))
+        if (provesIcepakSolve(evidence, version)) {
+          const probe = await this.plugin.probeEnvironment()
+          this.database.recordIcepakReadinessFromRemoteJob(job.attemptId, version, probe.pluginVersion, staged.resultSha256)
+        }
+      } catch (error) { console.error('remote Icepak readiness evidence was not recorded', error) }
       this.retryAfter.delete(job.attemptId)
     } catch (error) {
       const cause = renewalError ?? (error instanceof Error ? error : new Error('remote solve failed'))

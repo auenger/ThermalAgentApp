@@ -24,3 +24,4 @@ export { PeerTaskDispatcher, PeerDispatchError } from './peer-task-dispatcher.js
 export { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'
 export { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
 export { PeerAutoDispatcher } from './peer-auto-dispatcher.js'
+export { effectiveIcepakProbe, provesIcepakSolve, ICEPAK_READINESS_TTL_MS } from './icepak-readiness.js'

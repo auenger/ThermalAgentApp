@@ -1,4 +1,4 @@
-import type { RemoteJobRecord } from '@thermal-agent/contracts'
+import type { IcepakEnvironmentProbe, RemoteJobRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { PeerSecureChannel } from './peer-secure-channel.js'
@@ -30,6 +30,7 @@ export class PeerTaskInbox {
     private readonly database: LocalDatabase,
     private readonly plugin: IcepakPluginPort,
     private readonly onAccepted?: () => void,
+    private readonly readinessProbe?: () => Promise<IcepakEnvironmentProbe>,
   ) {}
 
   async receive(peerNodeId: string, value: unknown): Promise<{ operation: 'task.baseline.accepted'; attemptId: string; status: RemoteJobRecord['status'] }> {
@@ -47,7 +48,7 @@ export class PeerTaskInbox {
       if (this.database.listRemoteJobs().some(job => ['OFFERED', 'TRANSFERRING', 'INPUT_READY', 'RUNNING', 'SYNCING_RESULTS'].includes(job.status))) {
         throw new PeerTaskError('EXECUTOR_BUSY', 'executor already has a remote job')
       }
-      const probe = await this.plugin.probeEnvironment()
+      const probe = await (this.readinessProbe?.() ?? this.plugin.probeEnvironment())
       if (probe.platform !== 'win32' || probe.status !== 'READY' || probe.licenseStatus !== 'AVAILABLE' ||
         !probe.capabilities.includes('baseline_solve') ||
         (typeof offer.parameters.version === 'string' && !probe.aedtVersions.includes(offer.parameters.version))) {

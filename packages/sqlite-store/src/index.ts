@@ -32,6 +32,7 @@ import type {
   PeerRecord,
   RemoteJobRecord,
   AutoDispatchRecord,
+  IcepakReadinessRecord,
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
 
@@ -289,6 +290,15 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS auto_dispatch_status_created_idx
         ON auto_dispatch_requests(status, created_at);
 
+      CREATE TABLE IF NOT EXISTS icepak_readiness (
+        version TEXT PRIMARY KEY,
+        plugin_version TEXT NOT NULL,
+        result_sha256 TEXT NOT NULL REFERENCES artifacts(sha256),
+        source TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        verified_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
         skill_key TEXT NOT NULL UNIQUE,
@@ -390,6 +400,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (9, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (10, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -600,6 +613,52 @@ export class LocalDatabase {
   listAutoDispatches(): AutoDispatchRecord[] {
     return (this.db.prepare('SELECT * FROM auto_dispatch_requests ORDER BY created_at ASC').all() as SqliteRow[])
       .map(decodeAutoDispatch)
+  }
+
+  listIcepakReadiness(): IcepakReadinessRecord[] {
+    return (this.db.prepare('SELECT * FROM icepak_readiness ORDER BY verified_at DESC').all() as SqliteRow[])
+      .map(row => ({
+        version: String(row.version), pluginVersion: String(row.plugin_version),
+        resultSha256: String(row.result_sha256),
+        source: row.source as IcepakReadinessRecord['source'], sourceId: String(row.source_id),
+        verifiedAt: String(row.verified_at),
+      }))
+  }
+
+  recordIcepakReadinessFromAttempt(attemptId: string, version: string, resultSha256: string): IcepakReadinessRecord {
+    const attempt = this.getAttempt(attemptId)
+    const run = attempt ? this.getRun(attempt.runId) : null
+    const localId = this.getLocalIdentity()?.nodeId
+    if (!attempt || !run || attempt.executorNodeId !== localId || attempt.status !== 'SUCCEEDED' ||
+      attempt.pluginId !== 'icepak-pyaedt' || run.selectedAttemptId !== attemptId ||
+      !this.listAttemptArtifacts(attemptId).some(item => item.role === 'SOLVER_RESULT' && item.sha256 === resultSha256) ||
+      !this.listAttemptArtifacts(attemptId).some(item => item.role === 'SOLVED_PROJECT' && item.sha256 === attempt.outputArtifactSha256) ||
+      !this.getArtifact(resultSha256)) throw new PeerConflictError('local solve evidence cannot attest Icepak readiness')
+    return this.upsertIcepakReadiness(version, attempt.pluginVersion, resultSha256, 'LOCAL_ATTEMPT', attemptId)
+  }
+
+  recordIcepakReadinessFromRemoteJob(attemptId: string, version: string,
+    pluginVersion: string, resultSha256: string): IcepakReadinessRecord {
+    const job = this.getRemoteJob(attemptId)
+    if (!job || job.executorNodeId !== this.getLocalIdentity()?.nodeId || job.status !== 'COMPLETED' ||
+      job.resultSha256 !== resultSha256 || !this.getArtifact(resultSha256)) {
+      throw new PeerConflictError('remote solve evidence cannot attest Icepak readiness')
+    }
+    return this.upsertIcepakReadiness(version, pluginVersion, resultSha256, 'REMOTE_JOB', attemptId)
+  }
+
+  private upsertIcepakReadiness(version: string, pluginVersion: string, resultSha256: string,
+    source: IcepakReadinessRecord['source'], sourceId: string): IcepakReadinessRecord {
+    if (!/^20\d{2}\.[1-9]$/u.test(version) || !pluginVersion || pluginVersion.length > 80) {
+      throw new PeerConflictError('Icepak readiness version is invalid')
+    }
+    const now = new Date().toISOString()
+    this.db.prepare(`INSERT INTO icepak_readiness(version, plugin_version, result_sha256, source, source_id, verified_at)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(version) DO UPDATE SET
+      plugin_version = excluded.plugin_version, result_sha256 = excluded.result_sha256,
+      source = excluded.source, source_id = excluded.source_id, verified_at = excluded.verified_at`)
+      .run(version, pluginVersion, resultSha256, source, sourceId, now)
+    return this.listIcepakReadiness().find(item => item.version === version) as IcepakReadinessRecord
   }
 
   enqueueAutoDispatch(taskId: string, ownerNodeId: string, expectedVersion: number,

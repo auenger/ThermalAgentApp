@@ -4,6 +4,7 @@ import type { ArtifactStore } from '@thermal-agent/artifact-store'
 import type { IcepakCandidateInput, IcepakProjectOperationInput, IcepakProjectOperationResult, AttemptRecord, RunRecord, ThermalVerdict } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
+import { provesIcepakSolve } from './icepak-readiness.js'
 
 export interface StartedExecution {
   run: RunRecord
@@ -230,6 +231,11 @@ export class IcepakExecutionManager {
       this.database.transitionAttempt(attemptId, 'SUCCEEDED', {
         progressStage: 'result_collected', outputArtifactSha256: solvedArtifact.sha256,
       })
+      const readinessVersion = input.version ?? result.project.aedtVersion
+      if (provesIcepakSolve(result, readinessVersion)) {
+        try { this.database.recordIcepakReadinessFromAttempt(attemptId, readinessVersion, resultArtifact.sha256) }
+        catch (error) { console.error('Icepak readiness evidence was not recorded', error) }
+      }
       this.database.updateSkillRunStep(taskId, 'solve', 'COMPLETED', { attemptId, outputArtifactSha256: solvedArtifact.sha256 })
       this.database.updateSkillRunStep(taskId, 'judge', 'RUNNING', { attemptId })
       const task = this.database.getTask(taskId)

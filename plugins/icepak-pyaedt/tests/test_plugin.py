@@ -128,6 +128,7 @@ class PluginProtocolTests(unittest.TestCase):
 
     def test_non_windows_probe_never_claims_solve_readiness(self) -> None:
         result = probe_environment()
+        self.assertEqual(result["platform"], sys.platform)
         if os.name != "nt":
             self.assertEqual(result["status"], "NOT_INSTALLED")
             self.assertNotEqual(result["status"], "READY")
