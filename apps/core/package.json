@@ -8,6 +8,7 @@
     "@thermal-agent/artifact-store": "workspace:*",
     "@thermal-agent/contracts": "workspace:*",
     "@thermal-agent/domain": "workspace:*",
+    "@thermal-agent/process-control": "workspace:*",
     "@thermal-agent/sqlite-store": "workspace:*",
     "@deepseek-ai/dsh": "0.1.5-rc.2"
   },

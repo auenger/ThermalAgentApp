@@ -30,7 +30,8 @@
 - [x] 从旧项目迁移温度 Monitor、原生残差和收敛证据采集（待 Windows 真实回归）。
 - [x] 从旧项目迁移风扇动作、写后回读及一次受审批的候选求解协调。
 - [x] 本地求解 Attempt heartbeat、用户取消和 Core 重启中断识别。
-- [ ] Windows 进程树强制终止与可恢复重试。
+- [x] Windows 进程树强制终止（`taskkill /T /F`，待真实 AEDT 回归）。
+- [ ] 失败 Attempt 的可恢复重试策略。
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
 - [ ] PDF 报告迁移。
@@ -95,5 +96,6 @@ pnpm dev:core
 - Thermal Tools Bridge 鉴权、Task 草稿和 Icepak 只读操作。
 - Skill 草稿证据门槛、幂等提取、并发审核和发布文件权限边界。
 - Electron 开发与 `app.asar`/unpacked 资源路径分离。
+- Windows 进程树终止命令和非 Windows 信号降级。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

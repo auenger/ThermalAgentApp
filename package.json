@@ -24,6 +24,7 @@
     "@thermal-agent/artifact-store": "workspace:*",
     "@thermal-agent/core": "workspace:*",
     "@thermal-agent/domain": "workspace:*",
+    "@thermal-agent/process-control": "workspace:*",
     "@thermal-agent/sqlite-store": "workspace:*",
     "@types/node": "^22.13.0",
     "electron": "^38.0.0",

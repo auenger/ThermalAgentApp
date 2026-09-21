@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { prepareDshProfile } from './dsh-profile.js'
 import { bindDshWorkspace } from './dsh-workspace.js'
+import { terminateProcessTree } from '@thermal-agent/process-control'
 
 export interface DshStatus {
   phase: 'unconfigured' | 'starting' | 'ready' | 'stopped' | 'failed'
@@ -146,12 +147,11 @@ export class DshHost {
     const child = this.child
     if (!child) return
     await new Promise<void>(resolveStop => {
-      const timeout = setTimeout(() => child.kill('SIGKILL'), 5_000)
+      const timeout = setTimeout(() => terminateProcessTree(child, { force: true }), 5_000)
       timeout.unref()
       child.once('close', () => { clearTimeout(timeout); resolveStop() })
-      child.kill('SIGTERM')
+      terminateProcessTree(child)
     })
     if (this.child === child) this.child = undefined
   }
 }
-

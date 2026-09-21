@@ -47,6 +47,9 @@ importers:
       '@thermal-agent/domain':
         specifier: workspace:*
         version: link:packages/domain
+      '@thermal-agent/process-control':
+        specifier: workspace:*
+        version: link:packages/process-control
       '@thermal-agent/sqlite-store':
         specifier: workspace:*
         version: link:packages/sqlite-store
@@ -74,11 +77,18 @@ importers:
       '@thermal-agent/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@thermal-agent/process-control':
+        specifier: workspace:*
+        version: link:../../packages/process-control
       '@thermal-agent/sqlite-store':
         specifier: workspace:*
         version: link:../../packages/sqlite-store
 
   apps/desktop:
+    dependencies:
+      '@thermal-agent/process-control':
+        specifier: workspace:*
+        version: link:../../packages/process-control
     devDependencies:
       electron:
         specifier: ^38.0.0
@@ -128,6 +138,8 @@ importers:
       '@thermal-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  packages/process-control: {}
 
   packages/sqlite-store:
     dependencies:

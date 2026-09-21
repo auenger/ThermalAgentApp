@@ -4,6 +4,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "references": [{ "path": "../../packages/process-control" }],
-  "include": ["src/**/*.ts", "src/**/*.cts"]
+  "include": ["src/**/*.ts"]
 }

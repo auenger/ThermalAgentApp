@@ -8,7 +8,8 @@
     { "path": "../../packages/contracts" },
     { "path": "../../packages/domain" },
     { "path": "../../packages/sqlite-store" },
-    { "path": "../../packages/artifact-store" }
+    { "path": "../../packages/artifact-store" },
+    { "path": "../../packages/process-control" }
   ],
   "include": ["src/**/*.ts"]
 }

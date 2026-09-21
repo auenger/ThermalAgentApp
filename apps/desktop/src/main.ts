@@ -3,6 +3,7 @@ import { app, BrowserWindow, nativeTheme } from 'electron'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { resolveDesktopRuntimePaths } from './runtime-paths.js'
+import { terminateProcessTree } from '@thermal-agent/process-control'
 
 let coreOrigin = ''
 let window: BrowserWindow | undefined
@@ -94,5 +95,5 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  coreProcess?.kill('SIGTERM')
+  if (coreProcess) terminateProcessTree(coreProcess)
 })

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { terminateProcessTree } from '@thermal-agent/process-control'
 import type {
   IcepakEnvironmentProbe,
   IcepakProjectOperationInput,
@@ -87,7 +88,7 @@ export class IcepakPluginClient {
       lineBuffer += chunk
       if (stdoutBytes > 64 * 1024 * 1024) {
         stdoutOverflow = true
-        child.kill('SIGKILL')
+        terminateProcessTree(child, { force: true })
         return
       }
       let newline = lineBuffer.indexOf('\n')
@@ -114,13 +115,13 @@ export class IcepakPluginClient {
     const response = await new Promise<RpcResponse>((resolveResponse, reject) => {
       let aborted = false
       const timer = setTimeout(() => {
-        child.kill('SIGKILL')
+        terminateProcessTree(child, { force: true })
         reject(new Error(`Icepak plugin ${method} timed out`))
       }, timeoutMs)
       timer.unref()
       const abort = () => {
         aborted = true
-        child.kill('SIGTERM')
+        terminateProcessTree(child, { force: true })
       }
       if (options.signal?.aborted) abort()
       options.signal?.addEventListener('abort', abort, { once: true })

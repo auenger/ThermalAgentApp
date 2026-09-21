@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "dist/main.js",
+  "dependencies": {
+    "@thermal-agent/process-control": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -b"
   },
