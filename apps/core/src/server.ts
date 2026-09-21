@@ -76,7 +76,11 @@ async function route(
   if (request.method === 'GET' && taskMatch) {
     const task = database.getTask(taskMatch[1])
     if (!task) throw new TaskNotFoundError(taskMatch[1])
-    writeJson(response, 200, { task, events: database.listTaskEvents(task.id) })
+    const runs = database.listTaskRuns(task.id).map(run => ({
+      ...run,
+      attempts: database.listRunAttempts(run.id),
+    }))
+    writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id) })
     return
   }
   const transitionMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/transitions$/iu)

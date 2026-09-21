@@ -11,7 +11,8 @@
 - [x] Task Owner 与远程 Executor ADR。
 - [x] 执行状态、热判定和审批状态分离。
 - [x] Icepak 插件 Manifest 和版本化 RPC 契约。
-- [ ] Run、Attempt、Lease 和 Peer 协议完整定义。
+- [x] Run 与 Attempt 本地执行契约、状态、心跳和结果选择。
+- [ ] Lease 和 Peer 协议完整定义。
 - [ ] Skill、Skill Version 和 Approval 契约完整定义。
 
 ## 阶段 1：单机桌面闭环
@@ -71,6 +72,7 @@ pnpm dev:core
 当前自动化覆盖：
 
 - Task 领域状态机。
+- Run/Attempt 持久化、状态约束、heartbeat 和选中结果。
 - SQLite 重启恢复、事件审计和版本冲突。
 - Artifact SHA 去重和路径约束。
 - Core API 创建和转换 Task。

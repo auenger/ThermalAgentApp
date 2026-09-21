@@ -47,6 +47,7 @@ test('Core API creates, persists and transitions a task through one business wri
   const detailResponse = await fetch(`${base}/api/tasks/${created.task.id}`)
   const detail = await detailResponse.json()
   assert.equal(detail.task.executionStatus, 'READY')
+  assert.deepEqual(detail.runs, [])
   assert.deepEqual(detail.events.map(event => event.eventType), ['task.created', 'task.status_changed'])
 })
 

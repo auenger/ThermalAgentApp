@@ -3,14 +3,20 @@ import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type {
+  AttemptRecord,
+  AttemptStatus,
   ArtifactRecord,
+  CreateRunInput,
   ExecutionStatus,
+  RunKind,
+  RunRecord,
+  RunStatus,
   TaskEvent,
   TaskRecord,
   ThermalVerdict,
   ApprovalStatus,
 } from '@thermal-agent/contracts'
-import { assertTaskTransition } from '@thermal-agent/domain'
+import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
 
 type SqliteRow = Record<string, unknown>
 
@@ -94,8 +100,52 @@ export class LocalDatabase {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        selected_attempt_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id, sequence)
+      );
+
+      CREATE INDEX IF NOT EXISTS runs_task_sequence_idx
+        ON runs(task_id, sequence ASC);
+
+      CREATE TABLE IF NOT EXISTS attempts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        executor_node_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        plugin_version TEXT NOT NULL,
+        parameters_json TEXT NOT NULL,
+        progress_stage TEXT,
+        input_artifact_sha256 TEXT,
+        output_artifact_sha256 TEXT,
+        started_at TEXT,
+        heartbeat_at TEXT,
+        finished_at TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS attempts_run_created_idx
+        ON attempts(run_id, created_at ASC);
+
+      CREATE INDEX IF NOT EXISTS attempts_status_heartbeat_idx
+        ON attempts(status, heartbeat_at ASC);
+
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (1, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (2, datetime('now'));
     `)
   }
 
@@ -201,6 +251,159 @@ export class LocalDatabase {
     }))
   }
 
+  createRunWithAttempt(input: CreateRunInput): { run: RunRecord; attempt: AttemptRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (!this.getTask(input.taskId)) throw new TaskNotFoundError(input.taskId)
+      const sequenceRow = this.db.prepare(
+        'SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM runs WHERE task_id = ?',
+      ).get(input.taskId) as SqliteRow
+      const now = new Date().toISOString()
+      const run: RunRecord = {
+        id: randomUUID(),
+        taskId: input.taskId,
+        kind: input.kind,
+        sequence: Number(sequenceRow.next_sequence),
+        status: 'PLANNED',
+        selectedAttemptId: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      const attempt: AttemptRecord = {
+        id: randomUUID(),
+        runId: run.id,
+        executorNodeId: input.executorNodeId,
+        status: 'QUEUED',
+        pluginId: input.pluginId,
+        pluginVersion: input.pluginVersion,
+        parameters: structuredClone(input.parameters),
+        progressStage: null,
+        inputArtifactSha256: input.inputArtifactSha256 ?? null,
+        outputArtifactSha256: null,
+        startedAt: null,
+        heartbeatAt: null,
+        finishedAt: null,
+        errorCode: null,
+        errorMessage: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      this.db.prepare(`
+        INSERT INTO runs(id, task_id, kind, sequence, status, selected_attempt_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(run.id, run.taskId, run.kind, run.sequence, run.status, null, now, now)
+      this.db.prepare(`
+        INSERT INTO attempts(
+          id, run_id, executor_node_id, status, plugin_id, plugin_version,
+          parameters_json, progress_stage, input_artifact_sha256, output_artifact_sha256,
+          started_at, heartbeat_at, finished_at, error_code, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        attempt.id, attempt.runId, attempt.executorNodeId, attempt.status,
+        attempt.pluginId, attempt.pluginVersion, JSON.stringify(attempt.parameters), null,
+        attempt.inputArtifactSha256, null, null, null, null, null, null, now, now,
+      )
+      this.insertEvent({
+        id: randomUUID(), taskId: input.taskId, eventType: 'run.created',
+        fromStatus: null, toStatus: null, reason: null,
+        payload: { runId: run.id, attemptId: attempt.id, kind: run.kind, sequence: run.sequence },
+        createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return { run, attempt }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getRun(id: string): RunRecord | null {
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as SqliteRow | undefined
+    return row ? decodeRun(row) : null
+  }
+
+  listTaskRuns(taskId: string): RunRecord[] {
+    const rows = this.db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY sequence ASC').all(taskId) as SqliteRow[]
+    return rows.map(decodeRun)
+  }
+
+  getAttempt(id: string): AttemptRecord | null {
+    const row = this.db.prepare('SELECT * FROM attempts WHERE id = ?').get(id) as SqliteRow | undefined
+    return row ? decodeAttempt(row) : null
+  }
+
+  listRunAttempts(runId: string): AttemptRecord[] {
+    const rows = this.db.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at ASC').all(runId) as SqliteRow[]
+    return rows.map(decodeAttempt)
+  }
+
+  transitionAttempt(
+    id: string,
+    toStatus: AttemptStatus,
+    details: { progressStage?: string; outputArtifactSha256?: string; errorCode?: string; errorMessage?: string } = {},
+  ): AttemptRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT * FROM attempts WHERE id = ?').get(id) as SqliteRow | undefined
+      if (!row) throw new Error(`attempt ${id} was not found`)
+      const current = decodeAttempt(row)
+      assertAttemptTransition(current.status, toStatus)
+      const now = new Date().toISOString()
+      const startedAt = current.startedAt ?? (toStatus === 'STARTING' || toStatus === 'RUNNING' ? now : null)
+      const heartbeatAt = toStatus === 'STARTING' || toStatus === 'RUNNING' ? now : current.heartbeatAt
+      const finishedAt = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(toStatus) ? now : null
+      this.db.prepare(`
+        UPDATE attempts SET
+          status = ?, progress_stage = ?, output_artifact_sha256 = ?, started_at = ?,
+          heartbeat_at = ?, finished_at = ?, error_code = ?, error_message = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        toStatus,
+        details.progressStage?.slice(0, 200) ?? current.progressStage,
+        details.outputArtifactSha256 ?? current.outputArtifactSha256,
+        startedAt,
+        heartbeatAt,
+        finishedAt,
+        details.errorCode?.slice(0, 100) ?? null,
+        details.errorMessage?.slice(0, 2_000) ?? null,
+        now,
+        id,
+      )
+      const runStatus: RunStatus = toStatus === 'SUCCEEDED'
+        ? 'COMPLETED'
+        : toStatus === 'CANCELLED'
+          ? 'CANCELLED'
+          : ['FAILED', 'INTERRUPTED'].includes(toStatus)
+            ? 'FAILED'
+            : 'RUNNING'
+      this.db.prepare(`
+        UPDATE runs SET status = ?, selected_attempt_id = ?, updated_at = ? WHERE id = ?
+      `).run(runStatus, toStatus === 'SUCCEEDED' ? id : null, now, current.runId)
+      const taskRow = this.db.prepare('SELECT task_id FROM runs WHERE id = ?').get(current.runId) as SqliteRow
+      this.insertEvent({
+        id: randomUUID(), taskId: String(taskRow.task_id), eventType: 'attempt.status_changed',
+        fromStatus: null, toStatus: null, reason: details.errorMessage?.slice(0, 500) ?? null,
+        payload: { runId: current.runId, attemptId: id, fromAttemptStatus: current.status, toAttemptStatus: toStatus },
+        createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return this.getAttempt(id) as AttemptRecord
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  heartbeatAttempt(id: string, progressStage?: string): AttemptRecord {
+    const now = new Date().toISOString()
+    const result = this.db.prepare(`
+      UPDATE attempts SET heartbeat_at = ?, progress_stage = COALESCE(?, progress_stage), updated_at = ?
+      WHERE id = ? AND status IN ('STARTING', 'RUNNING')
+    `).run(now, progressStage?.slice(0, 200) ?? null, now, id)
+    if (Number(result.changes) !== 1) throw new Error(`attempt ${id} is not active`)
+    return this.getAttempt(id) as AttemptRecord
+  }
+
   upsertArtifact(artifact: ArtifactRecord): ArtifactRecord {
     this.db.prepare(`
       INSERT INTO artifacts(sha256, size_bytes, media_type, original_name, relative_path, created_at)
@@ -268,6 +471,41 @@ function decodeTask(row: SqliteRow): TaskRecord {
     approvalStatus: row.approval_status as ApprovalStatus,
     requirementSnapshot: parseObject(row.requirement_snapshot_json),
     version: Number(row.version),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+function decodeRun(row: SqliteRow): RunRecord {
+  return {
+    id: String(row.id),
+    taskId: String(row.task_id),
+    kind: row.kind as RunKind,
+    sequence: Number(row.sequence),
+    status: row.status as RunStatus,
+    selectedAttemptId: row.selected_attempt_id === null ? null : String(row.selected_attempt_id),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+function decodeAttempt(row: SqliteRow): AttemptRecord {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    executorNodeId: String(row.executor_node_id),
+    status: row.status as AttemptStatus,
+    pluginId: String(row.plugin_id),
+    pluginVersion: String(row.plugin_version),
+    parameters: parseObject(row.parameters_json),
+    progressStage: row.progress_stage === null ? null : String(row.progress_stage),
+    inputArtifactSha256: row.input_artifact_sha256 === null ? null : String(row.input_artifact_sha256),
+    outputArtifactSha256: row.output_artifact_sha256 === null ? null : String(row.output_artifact_sha256),
+    startedAt: row.started_at === null ? null : String(row.started_at),
+    heartbeatAt: row.heartbeat_at === null ? null : String(row.heartbeat_at),
+    finishedAt: row.finished_at === null ? null : String(row.finished_at),
+    errorCode: row.error_code === null ? null : String(row.error_code),
+    errorMessage: row.error_message === null ? null : String(row.error_message),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   }

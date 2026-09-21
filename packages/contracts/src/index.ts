@@ -21,6 +21,23 @@ export type ThermalVerdict = (typeof THERMAL_VERDICTS)[number]
 export const APPROVAL_STATUSES = ['NONE', 'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED'] as const
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number]
 
+export const RUN_KINDS = ['BASELINE', 'CANDIDATE', 'VALIDATION'] as const
+export type RunKind = (typeof RUN_KINDS)[number]
+
+export const RUN_STATUSES = ['PLANNED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const
+export type RunStatus = (typeof RUN_STATUSES)[number]
+
+export const ATTEMPT_STATUSES = [
+  'QUEUED',
+  'STARTING',
+  'RUNNING',
+  'SUCCEEDED',
+  'FAILED',
+  'CANCELLED',
+  'INTERRUPTED',
+] as const
+export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number]
+
 export const PLUGIN_STATUSES = [
   'NOT_INSTALLED',
   'DETECTED',
@@ -71,6 +88,47 @@ export interface TaskEvent {
   reason: string | null
   payload: Record<string, unknown>
   createdAt: string
+}
+
+export interface RunRecord {
+  id: string
+  taskId: string
+  kind: RunKind
+  sequence: number
+  status: RunStatus
+  selectedAttemptId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AttemptRecord {
+  id: string
+  runId: string
+  executorNodeId: string
+  status: AttemptStatus
+  pluginId: string
+  pluginVersion: string
+  parameters: Record<string, unknown>
+  progressStage: string | null
+  inputArtifactSha256: string | null
+  outputArtifactSha256: string | null
+  startedAt: string | null
+  heartbeatAt: string | null
+  finishedAt: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateRunInput {
+  taskId: string
+  kind: RunKind
+  executorNodeId: string
+  pluginId: string
+  pluginVersion: string
+  parameters: Record<string, unknown>
+  inputArtifactSha256?: string | null
 }
 
 export interface ArtifactRecord {

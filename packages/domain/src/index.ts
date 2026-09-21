@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { CreateTaskInput, ExecutionStatus, TaskRecord } from '@thermal-agent/contracts'
+import type { AttemptStatus, CreateTaskInput, ExecutionStatus, TaskRecord } from '@thermal-agent/contracts'
 
 const TRANSITIONS: Readonly<Record<ExecutionStatus, readonly ExecutionStatus[]>> = {
   DRAFT: ['READY', 'CANCELLED'],
@@ -16,10 +16,27 @@ const TRANSITIONS: Readonly<Record<ExecutionStatus, readonly ExecutionStatus[]>>
   ESCALATED: [],
 }
 
+const ATTEMPT_TRANSITIONS: Readonly<Record<AttemptStatus, readonly AttemptStatus[]>> = {
+  QUEUED: ['STARTING', 'CANCELLED'],
+  STARTING: ['RUNNING', 'FAILED', 'CANCELLED', 'INTERRUPTED'],
+  RUNNING: ['SUCCEEDED', 'FAILED', 'CANCELLED', 'INTERRUPTED'],
+  SUCCEEDED: [],
+  FAILED: [],
+  CANCELLED: [],
+  INTERRUPTED: [],
+}
+
 export class InvalidTaskTransitionError extends Error {
   constructor(readonly from: ExecutionStatus, readonly to: ExecutionStatus) {
     super(`task transition ${from} -> ${to} is not allowed`)
     this.name = 'InvalidTaskTransitionError'
+  }
+}
+
+export class InvalidAttemptTransitionError extends Error {
+  constructor(readonly from: AttemptStatus, readonly to: AttemptStatus) {
+    super(`attempt transition ${from} -> ${to} is not allowed`)
+    this.name = 'InvalidAttemptTransitionError'
   }
 }
 
@@ -29,6 +46,10 @@ export function canTransitionTask(from: ExecutionStatus, to: ExecutionStatus): b
 
 export function assertTaskTransition(from: ExecutionStatus, to: ExecutionStatus): void {
   if (!canTransitionTask(from, to)) throw new InvalidTaskTransitionError(from, to)
+}
+
+export function assertAttemptTransition(from: AttemptStatus, to: AttemptStatus): void {
+  if (!ATTEMPT_TRANSITIONS[from].includes(to)) throw new InvalidAttemptTransitionError(from, to)
 }
 
 export function createTask(input: CreateTaskInput, now = new Date().toISOString(), id = randomUUID()): TaskRecord {
