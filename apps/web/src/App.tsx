@@ -319,6 +319,10 @@ function SkillLibrary({ styles, skills, onChanged }: { styles: ReturnType<typeof
   const [detail, setDetail] = useState<SkillDetail | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [runTitle, setRunTitle] = useState('')
+  const [runProjectPath, setRunProjectPath] = useState('')
+  const [runTarget, setRunTarget] = useState('')
+  const [runMessage, setRunMessage] = useState('')
 
   useEffect(() => {
     if (!skills.length) { setSelectedId(null); setDetail(null); return }
@@ -352,6 +356,24 @@ function SkillLibrary({ styles, skills, onChanged }: { styles: ReturnType<typeof
     finally { setBusy(false) }
   }
 
+  async function startRun() {
+    if (!detail) return
+    setBusy(true); setError(''); setRunMessage('')
+    try {
+      const target = runTarget.trim() ? Number(runTarget) : undefined
+      if (target !== undefined && !Number.isFinite(target)) throw new Error('最高温度目标必须是数字')
+      const response = await fetch(`/api/skills/${detail.id}/runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: runTitle, description: `由 Skill「${detail.name}」创建`, projectPath: runProjectPath, targetTmaxC: target, version: '2024.2', cores: 4 }),
+      })
+      const body = await response.json() as { task?: TaskRecord; error?: { message?: string } }
+      if (!response.ok || !body.task) throw new Error(body.error?.message ?? 'Skill Run 创建失败')
+      setRunMessage(`已创建任务草稿：${body.task.title}`); setRunTitle(''); setRunProjectPath(''); setRunTarget('')
+      await onChanged()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Skill Run 创建失败') }
+    finally { setBusy(false) }
+  }
+
   return <>
     <div className={styles.intro}><div><h1 className={styles.title}>散热技能库</h1><p className={styles.subtitle}>草稿只保存在业务库；人工审核启用后才导出到 DSH。停用会撤回发布文件。</p></div></div>
     {skills.length === 0 ? <div className={styles.panel}><div className={styles.empty}><div><BrainCircuit20Regular fontSize={28} /><p>暂无 Skill。请先从具备完整证据的已完成任务沉淀草稿。</p></div></div></div> :
@@ -361,11 +383,12 @@ function SkillLibrary({ styles, skills, onChanged }: { styles: ReturnType<typeof
           <div className={styles.statusRow}><div><h2 className={styles.panelTitle}>{detail.name}</h2><p className={styles.details}>{detail.description}</p></div><Badge color={detail.status === 'ENABLED' ? 'success' : detail.status === 'DRAFT' ? 'warning' : 'informative'}>{detail.status}</Badge></div>
           <div className={styles.section}><strong>步骤与验收</strong><ol>{detail.version.definition.steps.map(step => <li key={step.id}><strong>{step.title}</strong><div className={styles.details}>{step.description}<br />验证：{step.verification}</div></li>)}</ol></div>
           <div className={styles.section}><strong>权限边界</strong><ul>{detail.version.definition.permissions.map(item => <li key={item}>{item}</li>)}</ul></div>
-          <p className={styles.details}>来源任务：{detail.sources.length} · 版本：v{detail.activeVersion}{detail.publishedPath ? ` · 已发布到 ${detail.publishedPath}` : ''}</p>
+          <p className={styles.details}>来源任务：{detail.sources.length} · 版本：v{detail.activeVersion} · 运行：{detail.runCount} · 成功：{detail.successCount} · 连续失败：{detail.consecutiveFailures}{detail.publishedPath ? ` · 已发布到 ${detail.publishedPath}` : ''}</p>
           {error && <p className={styles.error}>{error}</p>}
           {detail.status === 'DRAFT' || detail.status === 'DISABLED'
             ? <Button appearance="primary" disabled={busy} onClick={() => void review('enable')}>{busy ? '处理中' : '审核并启用'}</Button>
             : detail.status === 'ENABLED' ? <Button disabled={busy} onClick={() => void review('disable')}>{busy ? '处理中' : '停用并撤回'}</Button> : null}
+          {detail.status === 'ENABLED' && <div className={styles.section}><strong>从此 Skill 创建任务</strong><div className={styles.form}><Field label="任务名称" required><Input value={runTitle} onChange={(_, data) => setRunTitle(data.value)} /></Field><Field label="Windows 工程路径" required><Input value={runProjectPath} onChange={(_, data) => setRunProjectPath(data.value)} placeholder="C:\\ThermalModels\\Project1.aedt" /></Field><Field label="最高温度目标（°C）"><Input type="number" value={runTarget} onChange={(_, data) => setRunTarget(data.value)} /></Field><Button appearance="primary" disabled={busy || !runTitle.trim() || !runProjectPath.trim()} onClick={() => void startRun()}>{busy ? '环境检查中' : '检查环境并创建 Skill Run'}</Button>{runMessage && <p className={styles.details}>{runMessage}</p>}</div></div>}
         </> : <Spinner label="正在读取 Skill 详情" />}</div>
       </section>}
   </>

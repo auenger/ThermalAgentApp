@@ -227,6 +227,8 @@ export class IcepakExecutionManager {
       this.database.transitionAttempt(attemptId, 'SUCCEEDED', {
         progressStage: 'result_collected', outputArtifactSha256: solvedArtifact.sha256,
       })
+      this.database.updateSkillRunStep(taskId, 'solve', 'COMPLETED', { attemptId, outputArtifactSha256: solvedArtifact.sha256 })
+      this.database.updateSkillRunStep(taskId, 'judge', 'RUNNING', { attemptId })
       const task = this.database.getTask(taskId)
       if (task?.executionStatus === 'RUNNING') {
         const verdict = determineThermalVerdict(result, task.requirementSnapshot)
@@ -243,6 +245,9 @@ export class IcepakExecutionManager {
           errorMessage: message,
         })
       }
+      this.database.updateSkillRunStep(taskId, 'solve', 'FAILED', { attemptId }, {
+        code: cancelled ? 'USER_CANCELLED' : 'ICEPAK_EXECUTION_FAILED', message,
+      })
       const task = this.database.getTask(taskId)
       if (task?.executionStatus === 'RUNNING') {
         this.database.transitionTask(taskId, cancelled ? 'CANCELLED' : 'FAILED', task.version, message)
@@ -287,6 +292,8 @@ export class IcepakExecutionManager {
         this.database.linkAttemptArtifact({ attemptId, sha256: convergenceArtifact.sha256, role: 'CONVERGENCE_EVIDENCE', createdAt: new Date().toISOString() })
       }
       this.database.transitionAttempt(attemptId, 'SUCCEEDED', { progressStage: 'result_collected', outputArtifactSha256: solvedArtifact.sha256 })
+      this.database.updateSkillRunStep(taskId, 'solve', 'COMPLETED', { attemptId, outputArtifactSha256: solvedArtifact.sha256, kind: 'CANDIDATE' })
+      this.database.updateSkillRunStep(taskId, 'judge', 'RUNNING', { attemptId, kind: 'CANDIDATE' })
       const task = this.database.getTask(taskId)
       if (task?.executionStatus === 'RUNNING') {
         const rollback = result.comparison?.rollbackRequired === true
@@ -304,6 +311,9 @@ export class IcepakExecutionManager {
           progressStage: cancelled ? 'cancelled' : 'failed', errorCode: cancelled ? 'USER_CANCELLED' : 'ICEPAK_CANDIDATE_FAILED', errorMessage: message,
         })
       }
+      this.database.updateSkillRunStep(taskId, 'solve', 'FAILED', { attemptId, kind: 'CANDIDATE' }, {
+        code: cancelled ? 'USER_CANCELLED' : 'ICEPAK_CANDIDATE_FAILED', message,
+      })
       const task = this.database.getTask(taskId)
       if (task?.executionStatus === 'RUNNING') this.database.transitionTask(taskId, cancelled ? 'CANCELLED' : 'FAILED', task.version, message)
     } finally {

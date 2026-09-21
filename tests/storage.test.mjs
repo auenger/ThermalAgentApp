@@ -137,4 +137,29 @@ test('completed evidence creates a review-only skill draft that publishes only a
   const disabled = database.reviewSkill(enabled.id, 'DISABLED', 'local-user', enabled.updatedAt, null)
   assert.equal(disabled.status, 'DISABLED')
   await assert.rejects(access(publishedPath))
+  const republishedPath = publisher.publish(disabled)
+  const reenabled = database.reviewSkill(disabled.id, 'ENABLED', 'local-user', disabled.updatedAt, republishedPath)
+
+  for (let index = 0; index < 3; index += 1) {
+    const skillTask = createTask({
+      title: `Skill failure ${index + 1}`, description: '', ownerNodeId: 'local-node',
+      requirementSnapshot: { projectPath: 'C:\\models\\Project1.aedt', skillId: reenabled.id },
+    })
+    const createdRun = database.createTaskFromSkill(reenabled.id, skillTask, { projectPath: 'C:\\models\\Project1.aedt' }, {
+      probe: { status: 'READY' }, inspect: { verified: true },
+    })
+    assert.equal(createdRun.run.steps.find(step => step.stepId === 'probe').status, 'COMPLETED')
+    database.updateSkillRunStep(skillTask.id, 'confirm', 'COMPLETED', { taskVersion: 2 })
+    database.updateSkillRunStep(skillTask.id, 'solve', 'COMPLETED', { attemptId: `attempt-${index}` })
+    database.updateSkillRunStep(skillTask.id, 'judge', 'FAILED', {}, { code: 'USER_REJECTED_RESULT', message: '人工拒绝' })
+    const finishedRun = database.finishSkillRunForTask(skillTask.id, false, '人工拒绝结果')
+    assert.equal(finishedRun.run.status, 'FAILED')
+  }
+  const needsRepair = database.getSkill(reenabled.id)
+  assert.equal(needsRepair.status, 'NEEDS_REPAIR')
+  assert.equal(needsRepair.runCount, 3)
+  assert.equal(needsRepair.consecutiveFailures, 3)
+  publisher.unpublish(needsRepair.publishedPath)
+  database.clearSkillPublishedPath(needsRepair.id)
+  await assert.rejects(access(republishedPath))
 })

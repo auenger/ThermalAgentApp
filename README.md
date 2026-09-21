@@ -26,8 +26,9 @@
 - 固定 DSH `0.1.5-rc.2` 的本地 Agent Host、持久会话工作区和散热专用 preset。
 - Token 保护的 Thermal Tools Bridge，以及任务、Icepak 探测和工程检查工具。
 - 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
+- Skill Run、步骤证据与失败统计；启用 Skill 可先完成环境/工程检查再创建 Task，连续 3 次失败自动撤回并进入 `NEEDS_REPAIR`。
 
-当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 运行/修复闭环、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
+当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 对话式修订、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
 
 Windows 离线安装包还需要提供固定 Node `22.22.x` 运行时（供 DSH 使用），并将 PyAEDT 插件、DSH CLI 及其依赖放入 unpacked 资源。Desktop 已按这一目录边界解析路径，但仓库当前不伪装成已产出或验证过 Windows 安装包。
 

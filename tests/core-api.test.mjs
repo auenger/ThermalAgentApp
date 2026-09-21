@@ -166,7 +166,15 @@ test('Core owns Icepak run directories and delegates project operations only thr
 
 test('Core keeps skill drafts out of DSH until an explicit review publishes them', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-skill-api-'))
-  const app = createCoreApp({ home, startAgentRuntime: false })
+  const pluginClient = {
+    async probeEnvironment() {
+      return { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', protocolVersion: '1.0.0', status: 'READY', platform: 'win32', aedtVersions: ['2024.2'], selectedVersion: '2024.2', pyaedtAvailable: true, licenseStatus: 'AVAILABLE', capabilities: ['inspect-project', 'solve-project'], diagnostics: [] }
+    },
+    async inspectProject(input) {
+      return { status: 'ok', mode: 'inspect', sourceProject: input.projectPath, workingProject: input.projectPath, inputSha256: 'd'.repeat(64), project: { name: 'Project1', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: ['IcepakDesign1'], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: [], objects: [] }, validation: { verified: true, checks: [] } }
+    },
+  }
+  const app = createCoreApp({ home, pluginClient, startAgentRuntime: false })
   app.server.listen(0, '127.0.0.1')
   await new Promise(resolve => app.server.once('listening', resolve))
   t.after(async () => { await app.close(); await rm(home, { recursive: true, force: true }) })
@@ -204,6 +212,27 @@ test('Core keeps skill drafts out of DSH until an explicit review publishes them
   const { skill: enabled } = await enableResponse.json()
   assert.equal(enabled.status, 'ENABLED')
   await access(enabled.publishedPath)
+
+  const runResponse = await fetch(`${base}/api/skills/${enabled.id}/runs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Skill-driven task', projectPath: 'C:\\models\\Project1.aedt', targetTmaxC: 90, version: '2024.2', cores: 4 }),
+  })
+  assert.equal(runResponse.status, 201)
+  const skillRun = await runResponse.json()
+  assert.equal(skillRun.task.executionStatus, 'DRAFT')
+  assert.equal(skillRun.run.status, 'RUNNING')
+  assert.equal(skillRun.run.steps.find(step => step.stepId === 'probe').status, 'COMPLETED')
+  assert.equal(skillRun.run.steps.find(step => step.stepId === 'confirm').status, 'PENDING')
+  const taskDetailResponse = await fetch(`${base}/api/tasks/${skillRun.task.id}`)
+  const taskDetail = await taskDetailResponse.json()
+  assert.equal(taskDetail.skillRun.id, skillRun.run.id)
+  const confirmResponse = await fetch(`${base}/api/tasks/${skillRun.task.id}/transitions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'READY', expectedVersion: 1, reason: '确认 Skill 输入' }),
+  })
+  assert.equal(confirmResponse.status, 200)
+  const confirmedDetail = await (await fetch(`${base}/api/tasks/${skillRun.task.id}`)).json()
+  assert.equal(confirmedDetail.skillRun.steps.find(step => step.stepId === 'confirm').status, 'COMPLETED')
 
   const staleResponse = await fetch(`${base}/api/skills/${draft.id}/disable`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
+import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
@@ -102,6 +102,37 @@ async function route(
     writeJson(response, 200, { skill })
     return
   }
+  const skillRunMatch = url.pathname.match(/^\/api\/skills\/([0-9a-f-]+)\/runs$/iu)
+  if (request.method === 'POST' && skillRunMatch) {
+    const input = parseCreateSkillRunInput(await readJsonBody(request))
+    const skill = database.getSkill(skillRunMatch[1])
+    if (!skill) throw new SkillNotFoundError(skillRunMatch[1])
+    if (skill.status !== 'ENABLED') throw new SkillConflictError('skill must be ENABLED before it can run')
+    const probe = await pluginClient.probeEnvironment()
+    if (!['LAUNCHABLE', 'PROJECT_COMPATIBLE', 'READY'].includes(probe.status)) {
+      throw new RequestError(409, 'ICEPAK_NOT_LAUNCHABLE', `Icepak environment is ${probe.status}`)
+    }
+    const inspectOutput = join(home, 'runs', 'skill-inspect', randomUUID())
+    const inspection = await pluginClient.inspectProject({
+      projectPath: input.projectPath, version: input.version, outputDir: inspectOutput,
+    })
+    if (!inspection.validation.verified) throw new RequestError(409, 'ICEPAK_PROJECT_INVALID', 'Icepak project inspection was not verified')
+    const task = createTask({
+      title: input.title, description: input.description, ownerNodeId: 'local-node',
+      requirementSnapshot: {
+        projectPath: input.projectPath, aedtVersion: input.version ?? probe.selectedVersion ?? undefined,
+        cores: input.cores ?? 4, ...(input.targetTmaxC === undefined ? {} : { targetTmaxC: input.targetTmaxC }),
+        skillId: skill.id, skillVersion: skill.activeVersion,
+        inspection: { inputSha256: inspection.inputSha256, design: inspection.project.activeDesign, verified: inspection.validation.verified },
+      },
+    })
+    const created = database.createTaskFromSkill(skill.id, task, { ...input }, {
+      probe: { status: probe.status, selectedVersion: probe.selectedVersion, capabilities: probe.capabilities },
+      inspect: { inputSha256: inspection.inputSha256, activeDesign: inspection.project.activeDesign, verified: inspection.validation.verified },
+    })
+    writeJson(response, 201, created)
+    return
+  }
   const draftSkillMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/skill-draft$/iu)
   if (request.method === 'POST' && draftSkillMatch) {
     writeJson(response, 201, { skill: database.createSkillDraftFromTask(draftSkillMatch[1]) })
@@ -149,7 +180,7 @@ async function route(
         artifacts: database.listAttemptArtifacts(attempt.id),
       })),
     }))
-    writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id) })
+    writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id), skillRun: database.getSkillRunForTask(task.id) })
     return
   }
   const transitionMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/transitions$/iu)
@@ -159,6 +190,7 @@ async function route(
       throw new RequestError(400, 'TRANSITION_REQUIRES_WORKFLOW', 'this task transition must be performed by its controlled workflow')
     }
     const task = database.transitionTask(transitionMatch[1], input.status, input.expectedVersion, input.reason)
+    if (input.status === 'READY') database.updateSkillRunStep(task.id, 'confirm', 'COMPLETED', { taskVersion: task.version })
     writeJson(response, 200, { task })
     return
   }
@@ -166,6 +198,14 @@ async function route(
   if (request.method === 'POST' && approvalMatch) {
     const input = parseTaskApprovalDecisionInput(await readJsonBody(request))
     const task = database.resolveTaskApproval(approvalMatch[1], input.decision, input.expectedVersion, input.reason)
+    database.updateSkillRunStep(task.id, 'judge', input.decision === 'APPROVED' ? 'COMPLETED' : 'FAILED', {
+      thermalVerdict: task.thermalVerdict, approvalStatus: task.approvalStatus,
+    }, input.decision === 'REJECTED' ? { code: 'USER_REJECTED_RESULT', message: input.reason ?? '用户拒绝当前结果' } : undefined)
+    const skillResult = database.finishSkillRunForTask(task.id, input.decision === 'APPROVED', input.reason ?? `结果${input.decision}`)
+    if (skillResult?.skill.status === 'NEEDS_REPAIR' && skillResult.skill.publishedPath) {
+      skillPublisher.unpublish(skillResult.skill.publishedPath)
+      database.clearSkillPublishedPath(skillResult.skill.id)
+    }
     writeJson(response, 200, { task })
     return
   }
@@ -173,6 +213,7 @@ async function route(
   if (request.method === 'POST' && baselineMatch) {
     const input = parseIcepakProjectOperationInput(await readJsonBody(request))
     const started = await executions.startBaseline(baselineMatch[1], input)
+    database.updateSkillRunStep(baselineMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id })
     writeJson(response, 202, started)
     return
   }
@@ -180,6 +221,7 @@ async function route(
   if (request.method === 'POST' && candidateMatch) {
     const input = parseIcepakCandidateInput(await readJsonBody(request))
     const started = await executions.startCandidate(candidateMatch[1], input)
+    database.updateSkillRunStep(candidateMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id, kind: 'CANDIDATE' })
     writeJson(response, 202, started)
     return
   }
@@ -187,6 +229,7 @@ async function route(
   if (request.method === 'POST' && retryMatch) {
     const input = parseExpectedVersionInput(await readJsonBody(request))
     const started = await executions.retryLatestRun(retryMatch[1], input.expectedVersion)
+    database.updateSkillRunStep(retryMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id, retry: true })
     writeJson(response, 202, started)
     return
   }

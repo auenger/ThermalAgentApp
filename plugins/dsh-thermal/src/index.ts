@@ -61,6 +61,15 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'thermal_list_skills',
+    description: 'List only human-reviewed and enabled thermal skills. Use this to recommend a reusable workflow; running it still requires the App workflow.',
+    parameters: {},
+    output: textOutput(),
+    isConcurrencySafe: () => true,
+    async execute(_args, exec) { return JSON.stringify(await bridgeRequest('/v1/skills', exec.signal)) },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'thermal_get_task',
     description: 'Read one thermal task including Run, Attempt, event, and artifact evidence.',
     parameters: {
@@ -111,4 +120,3 @@ export function apply(ctx: Context): void {
     async execute(args, exec) { return JSON.stringify(await bridgeRequest('/v1/icepak/inspect', exec.signal, args)) },
   }))
 }
-

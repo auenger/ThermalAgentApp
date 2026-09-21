@@ -47,7 +47,8 @@
 - [x] 人工确认 Gate：DSH 不暴露启动 Baseline 或发布 Skill 的工具。
 - [x] 从已完成且证据完整的任务生成幂等 Skill 草稿。
 - [x] Skill 版本、来源、人工审核、启用及 DSH 发布/撤回。
-- [ ] Skill Run/步骤断点、失败统计和 `NEEDS_REPAIR` 修复闭环。
+- [x] Skill Run、步骤断点、成功/失败统计和连续失败 `NEEDS_REPAIR` 自动撤回。
+- [ ] `NEEDS_REPAIR` 的 Agent 修订、沙箱验证和人工发布新版本。
 
 ## 阶段 3：局域网 Web
 
@@ -94,9 +95,10 @@ pnpm dev:core
 - Baseline 后台执行、输入快照、进度 heartbeat、取消和结果回收。
 - Baseline 失败后的显式重试、不可变输入复用和 Attempt 上限。
 - DSH preset 解析、Host 启停/重启和一次性 token 认证页面。
-- DSH Agent 实例暴露 13 个工具，其中 5 个为受控散热工具。
+- DSH Agent 实例暴露受控散热工具，包括只读查询已审核 Skill。
 - Thermal Tools Bridge 鉴权、Task 草稿和 Icepak 只读操作。
 - Skill 草稿证据门槛、幂等提取、并发审核和发布文件权限边界。
+- Skill 驱动 Task、环境/工程前置检查、步骤证据和连续失败自动撤回。
 - Electron 开发与 `app.asar`/unpacked 资源路径分离。
 - Windows 进程树终止命令和非 Windows 信号降级。
 

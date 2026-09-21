@@ -14,6 +14,11 @@ import type {
   RunStatus,
   SkillDetail,
   SkillRecord,
+  SkillRunDetail,
+  SkillRunRecord,
+  SkillRunStatus,
+  SkillRunStepRecord,
+  SkillStepStatus,
   SkillSourceRecord,
   SkillStatus,
   SkillVersionRecord,
@@ -185,6 +190,10 @@ export class LocalDatabase {
         active_version INTEGER NOT NULL,
         source_task_count INTEGER NOT NULL DEFAULT 0,
         published_path TEXT,
+        run_count INTEGER NOT NULL DEFAULT 0,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        last_run_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -255,7 +264,19 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (3, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (4, datetime('now'));
     `)
+    this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
+    this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
+    this.ensureColumn('skills', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0')
+    this.ensureColumn('skills', 'last_run_at', 'TEXT')
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as SqliteRow[]
+    if (!columns.some(item => String(item.name) === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
   }
 
   createTask(task: TaskRecord): TaskRecord {
@@ -825,6 +846,131 @@ export class LocalDatabase {
     }
   }
 
+  createTaskFromSkill(
+    skillId: string,
+    task: TaskRecord,
+    parameters: Record<string, unknown>,
+    initialEvidence: Record<string, Record<string, unknown>> = {},
+  ): { task: TaskRecord; run: SkillRunDetail } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const skill = this.getSkill(skillId)
+      if (!skill) throw new SkillNotFoundError(skillId)
+      if (skill.status !== 'ENABLED') throw new SkillConflictError('skill must be ENABLED before it can run')
+      this.db.prepare(`
+        INSERT INTO tasks(
+          id, title, description, owner_node_id, executor_node_id,
+          execution_status, thermal_verdict, approval_status,
+          requirement_snapshot_json, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(task.id, task.title, task.description, task.ownerNodeId, task.executorNodeId,
+        task.executionStatus, task.thermalVerdict, task.approvalStatus,
+        JSON.stringify(task.requirementSnapshot), task.version, task.createdAt, task.updatedAt)
+      this.insertEvent({
+        id: randomUUID(), taskId: task.id, eventType: 'task.created_from_skill', fromStatus: null,
+        toStatus: task.executionStatus, reason: null,
+        payload: { skillId, skillVersion: skill.activeVersion }, createdAt: task.createdAt,
+      })
+      const runId = randomUUID()
+      this.db.prepare(`
+        INSERT INTO skill_runs(id, skill_id, version, task_id, status, parameters_json, result_summary, started_at, finished_at)
+        VALUES (?, ?, ?, ?, 'RUNNING', ?, '', ?, NULL)
+      `).run(runId, skillId, skill.activeVersion, task.id, JSON.stringify(parameters), task.createdAt)
+      for (const [index, step] of skill.version.definition.steps.entries()) {
+        const evidence = initialEvidence[step.id]
+        const status: SkillStepStatus = evidence ? 'COMPLETED' : 'PENDING'
+        this.db.prepare(`
+          INSERT INTO skill_run_steps(
+            id, run_id, step_id, step_index, title, status, evidence_json,
+            error_code, error_message, started_at, finished_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+        `).run(randomUUID(), runId, step.id, index, step.title, status, JSON.stringify(evidence ?? {}),
+          evidence ? task.createdAt : null, evidence ? task.createdAt : null)
+      }
+      this.db.prepare(`
+        UPDATE skills SET run_count = run_count + 1, last_run_at = ?, updated_at = ? WHERE id = ?
+      `).run(task.createdAt, task.createdAt, skillId)
+      this.db.exec('COMMIT')
+      return { task: this.getTask(task.id) as TaskRecord, run: this.getSkillRunForTask(task.id) as SkillRunDetail }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getSkillRunForTask(taskId: string): SkillRunDetail | null {
+    const row = this.db.prepare('SELECT * FROM skill_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1').get(taskId) as SqliteRow | undefined
+    if (!row) return null
+    const run = decodeSkillRun(row)
+    const steps = this.db.prepare('SELECT * FROM skill_run_steps WHERE run_id = ? ORDER BY step_index ASC').all(run.id) as SqliteRow[]
+    return { ...run, steps: steps.map(decodeSkillRunStep) }
+  }
+
+  updateSkillRunStep(
+    taskId: string,
+    stepId: string,
+    status: SkillStepStatus,
+    evidence: Record<string, unknown> = {},
+    error?: { code: string; message: string },
+  ): SkillRunDetail | null {
+    const run = this.getSkillRunForTask(taskId)
+    if (!run || run.status !== 'RUNNING') return run
+    const step = run.steps.find(item => item.stepId === stepId)
+    if (!step) return run
+    const now = new Date().toISOString()
+    const startedAt = step.startedAt ?? (status === 'RUNNING' || status === 'COMPLETED' || status === 'FAILED' ? now : null)
+    const finishedAt = status === 'COMPLETED' || status === 'FAILED' || status === 'SKIPPED' ? now : null
+    this.db.prepare(`
+      UPDATE skill_run_steps SET status = ?, evidence_json = ?, error_code = ?, error_message = ?,
+        started_at = ?, finished_at = ? WHERE id = ?
+    `).run(status, JSON.stringify({ ...step.evidence, ...evidence }), error?.code ?? null,
+      error?.message.slice(0, 2_000) ?? null, startedAt, finishedAt, step.id)
+    return this.getSkillRunForTask(taskId)
+  }
+
+  finishSkillRunForTask(taskId: string, success: boolean, summary: string): { run: SkillRunDetail; skill: SkillDetail } | null {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const run = this.getSkillRunForTask(taskId)
+      if (!run || run.status !== 'RUNNING') { this.db.exec('COMMIT'); return null }
+      const now = new Date().toISOString()
+      const status: SkillRunStatus = success ? 'COMPLETED' : 'FAILED'
+      this.db.prepare('UPDATE skill_runs SET status = ?, result_summary = ?, finished_at = ? WHERE id = ?')
+        .run(status, summary.slice(0, 2_000), now, run.id)
+      if (success) {
+        this.db.prepare(`
+          UPDATE skills SET success_count = success_count + 1, consecutive_failures = 0, updated_at = ? WHERE id = ?
+        `).run(now, run.skillId)
+      } else {
+        this.db.prepare(`
+          UPDATE skills SET consecutive_failures = consecutive_failures + 1,
+            status = CASE WHEN consecutive_failures + 1 >= 3 THEN 'NEEDS_REPAIR' ELSE status END,
+            updated_at = ? WHERE id = ?
+        `).run(now, run.skillId)
+      }
+      this.insertEvent({
+        id: randomUUID(), taskId, eventType: success ? 'skill.run_completed' : 'skill.run_failed',
+        fromStatus: null, toStatus: null, reason: summary.slice(0, 500),
+        payload: { skillId: run.skillId, skillRunId: run.id, version: run.version }, createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return {
+        run: this.getSkillRunForTask(taskId) as SkillRunDetail,
+        skill: this.getSkill(run.skillId) as SkillDetail,
+      }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  clearSkillPublishedPath(id: string): SkillDetail {
+    const result = this.db.prepare('UPDATE skills SET published_path = NULL, updated_at = ? WHERE id = ?')
+      .run(new Date().toISOString(), id)
+    if (Number(result.changes) !== 1) throw new SkillNotFoundError(id)
+    return this.getSkill(id) as SkillDetail
+  }
+
   getSkill(id: string): SkillDetail | null {
     const row = this.db.prepare('SELECT * FROM skills WHERE id = ?').get(id) as SqliteRow | undefined
     if (!row) return null
@@ -962,8 +1108,31 @@ function decodeSkill(row: SqliteRow): SkillRecord {
     activeVersion: Number(row.active_version),
     sourceTaskCount: Number(row.source_task_count),
     publishedPath: row.published_path === null ? null : String(row.published_path),
+    runCount: Number(row.run_count ?? 0),
+    successCount: Number(row.success_count ?? 0),
+    consecutiveFailures: Number(row.consecutive_failures ?? 0),
+    lastRunAt: row.last_run_at === null || row.last_run_at === undefined ? null : String(row.last_run_at),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  }
+}
+
+function decodeSkillRun(row: SqliteRow): SkillRunRecord {
+  return {
+    id: String(row.id), skillId: String(row.skill_id), version: Number(row.version), taskId: String(row.task_id),
+    status: row.status as SkillRunStatus, parameters: parseObject(row.parameters_json), resultSummary: String(row.result_summary),
+    startedAt: String(row.started_at), finishedAt: row.finished_at === null ? null : String(row.finished_at),
+  }
+}
+
+function decodeSkillRunStep(row: SqliteRow): SkillRunStepRecord {
+  return {
+    id: String(row.id), runId: String(row.run_id), stepId: String(row.step_id), stepIndex: Number(row.step_index),
+    title: String(row.title), status: row.status as SkillStepStatus, evidence: parseObject(row.evidence_json),
+    errorCode: row.error_code === null ? null : String(row.error_code),
+    errorMessage: row.error_message === null ? null : String(row.error_message),
+    startedAt: row.started_at === null ? null : String(row.started_at),
+    finishedAt: row.finished_at === null ? null : String(row.finished_at),
   }
 }
 

@@ -58,6 +58,10 @@ export class ThermalToolsBridge {
       writeJson(response, 200, { tasks: this.database.listTasks(200) })
       return
     }
+    if (request.method === 'GET' && url.pathname === '/v1/skills') {
+      writeJson(response, 200, { skills: this.database.listSkills().filter(skill => skill.status === 'ENABLED') })
+      return
+    }
     if (request.method === 'GET' && url.pathname === '/v1/tasks/detail') {
       const taskId = url.searchParams.get('id') ?? ''
       const task = this.database.getTask(taskId)
@@ -133,4 +137,3 @@ function writeJson(response: ServerResponse, status: number, value: unknown): vo
   })
   response.end(body)
 }
-

@@ -53,6 +53,10 @@ export type PluginStatus = (typeof PLUGIN_STATUSES)[number]
 
 export const SKILL_STATUSES = ['DRAFT', 'ENABLED', 'DISABLED', 'NEEDS_REPAIR'] as const
 export type SkillStatus = (typeof SKILL_STATUSES)[number]
+export const SKILL_RUN_STATUSES = ['RUNNING', 'COMPLETED', 'FAILED'] as const
+export type SkillRunStatus = (typeof SKILL_RUN_STATUSES)[number]
+export const SKILL_STEP_STATUSES = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED'] as const
+export type SkillStepStatus = (typeof SKILL_STEP_STATUSES)[number]
 
 export interface ThermalSkillStep {
   id: string
@@ -78,8 +82,49 @@ export interface SkillRecord {
   activeVersion: number
   sourceTaskCount: number
   publishedPath: string | null
+  runCount: number
+  successCount: number
+  consecutiveFailures: number
+  lastRunAt: string | null
   createdAt: string
   updatedAt: string
+}
+
+export interface SkillRunRecord {
+  id: string
+  skillId: string
+  version: number
+  taskId: string
+  status: SkillRunStatus
+  parameters: Record<string, unknown>
+  resultSummary: string
+  startedAt: string
+  finishedAt: string | null
+}
+
+export interface SkillRunStepRecord {
+  id: string
+  runId: string
+  stepId: string
+  stepIndex: number
+  title: string
+  status: SkillStepStatus
+  evidence: Record<string, unknown>
+  errorCode: string | null
+  errorMessage: string | null
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export interface SkillRunDetail extends SkillRunRecord { steps: SkillRunStepRecord[] }
+
+export interface CreateSkillRunInput {
+  title: string
+  description: string
+  projectPath: string
+  targetTmaxC?: number
+  version?: string
+  cores?: number
 }
 
 export interface SkillVersionRecord {
@@ -447,5 +492,25 @@ export function parseSkillReviewInput(value: unknown): SkillReviewInput {
   return {
     reviewer: requiredText(value.reviewer, 'reviewer', 200),
     expectedUpdatedAt,
+  }
+}
+
+export function parseCreateSkillRunInput(value: unknown): CreateSkillRunInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  const projectPath = requiredText(value.projectPath, 'projectPath', 4_096)
+  if (!projectPath.toLowerCase().endsWith('.aedt')) throw new Error('projectPath must reference an .aedt file')
+  if (value.targetTmaxC !== undefined && !Number.isFinite(Number(value.targetTmaxC))) {
+    throw new Error('targetTmaxC must be a finite number')
+  }
+  if (value.cores !== undefined && (!Number.isInteger(value.cores) || Number(value.cores) < 1)) {
+    throw new Error('cores must be a positive integer')
+  }
+  return {
+    title: requiredText(value.title, 'title', 200),
+    description: typeof value.description === 'string' ? value.description.trim().slice(0, 20_000) : '',
+    projectPath,
+    targetTmaxC: value.targetTmaxC === undefined ? undefined : Number(value.targetTmaxC),
+    version: typeof value.version === 'string' && value.version.trim() ? value.version.trim().slice(0, 50) : undefined,
+    cores: value.cores === undefined ? undefined : Number(value.cores),
   }
 }
