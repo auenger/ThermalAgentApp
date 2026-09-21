@@ -370,11 +370,37 @@ function TaskTable({ styles, tasks, onChanged }: { styles: ReturnType<typeof use
 function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof useStyles>; task: TaskRecord; onChanged(): Promise<void> }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline' | 'candidate' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
-    setBusy(true); setError('')
+  async function act(kind: 'confirm' | 'baseline' | 'remote-baseline' | 'retry-offer' | 'candidate' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
+    setBusy(true); setError(''); setNotice('')
     try {
-      const response = kind === 'confirm'
+      let response: Response
+      if (kind === 'remote-baseline' || kind === 'retry-offer') {
+        let retryExecutorNodeId = task.executorNodeId
+        if (kind === 'retry-offer' && !retryExecutorNodeId) {
+          const detailResponse = await fetch(`/api/tasks/${task.id}`)
+          const detail = await detailResponse.json() as { runs?: Array<{ attempts: Array<{ executorNodeId: string }> }> }
+          if (!detailResponse.ok) throw new Error('无法读取待重发任务的执行节点')
+          retryExecutorNodeId = detail.runs?.at(-1)?.attempts.at(-1)?.executorNodeId ?? null
+        }
+        const discoveryResponse = await fetch('/api/nodes/discovery')
+        const discoveryBody = await discoveryResponse.json() as { discovery?: DiscoveryStatus; error?: { message?: string } }
+        if (!discoveryResponse.ok || !discoveryBody.discovery) throw new Error(discoveryBody.error?.message ?? '无法查询空闲计算节点')
+        const version = String(task.requirementSnapshot.aedtVersion ?? '2024.2')
+        const candidates = discoveryBody.discovery.discovered.filter(peer => peer.trusted && peer.heartbeat.pluginStatus === 'READY' &&
+          peer.heartbeat.activeAttempts < peer.heartbeat.maxConcurrent && peer.heartbeat.aedtVersions.includes(version))
+          .sort((a, b) => a.heartbeat.activeAttempts - b.heartbeat.activeAttempts)
+        const peer = kind === 'retry-offer'
+          ? discoveryBody.discovery.discovered.find(item => item.identity.nodeId === retryExecutorNodeId && item.trusted)
+          : candidates[0]
+        if (!peer) throw new Error(kind === 'retry-offer' ? '原执行节点当前不可发现或已撤销信任' : '当前没有 READY 且空闲的兼容 Icepak 节点')
+        response = await fetch(`/api/tasks/${task.id}/runs/remote-baseline${kind === 'retry-offer' ? '/retry-offer' : ''}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ peerNodeId: peer.identity.nodeId, expectedVersion: task.version,
+            ...(kind === 'remote-baseline' ? { projectPath, version, cores: task.requirementSnapshot.cores ?? 4 } : {}) }),
+        })
+      } else response = kind === 'confirm'
         ? await fetch(`/api/tasks/${task.id}/transitions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'READY', expectedVersion: task.version, reason: '用户确认需求与工程路径' }) })
         : kind === 'baseline'
           ? await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
@@ -387,15 +413,19 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
           : kind === 'skill'
             ? await fetch(`/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
             : await fetch(`/api/tasks/${task.id}/approval`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: kind === 'approve' ? 'APPROVED' : 'REJECTED', expectedVersion: task.version, reason: kind === 'approve' ? '用户复核并接受求解证据' : '用户拒绝当前结果并升级人工处理' }) })
-      const body = await response.json() as { error?: { message?: string } }
+      const body = await response.json() as { delivered?: boolean; deliveryError?: string; error?: { message?: string } }
       if (!response.ok) throw new Error(body.error?.message ?? '操作未完成')
       if (kind === 'report') window.open(`/api/tasks/${task.id}/report`, '_blank', 'noopener,noreferrer')
+      if (kind === 'remote-baseline' || kind === 'retry-offer') {
+        setNotice(body.delivered ? '执行节点已接收任务 Offer；尚未开始下载或求解。' : `Offer 未被接收，可稍后重发：${body.deliveryError ?? '节点暂时不可用'}`)
+      }
       await onChanged()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '操作未完成') }
     finally { setBusy(false) }
   }
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
-  if (task.executionStatus === 'READY') return <div><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '启动 Baseline'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'READY') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '本机 Baseline'}</Button>{!isLanClient && <Button size="small" disabled={!projectPath || busy} onClick={() => void act('remote-baseline')}>派发到空闲节点</Button>}</div>{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
+  if ((task.executionStatus === 'QUEUED' || task.executionStatus === 'LEASED') && !isLanClient) return <div><Button size="small" disabled={busy} onClick={() => void act('retry-offer')}>{busy ? '重发中' : '重发远程 Offer'}</Button>{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'WAITING_FOR_APPROVAL') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button>{task.thermalVerdict === 'FAIL' && <Button size="small" disabled={busy} onClick={() => void act('candidate')}>批准风扇 +10%</Button>}<Button size="small" disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'COMPLETED') return <div><div className={styles.headerActions}><Button size="small" disabled={busy} onClick={() => void act('report')}>{busy ? '生成中' : '查看 PDF 报告'}</Button><Button size="small" disabled={busy} onClick={() => void act('skill')}>沉淀 Skill 草稿</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'FAILED' || task.executionStatus === 'CANCELLED') return <div><Button size="small" disabled={busy} onClick={() => void act('retry')}>{busy ? '重试中' : '重试最近 Run'}</Button>{error && <div className={styles.error}>{error}</div>}</div>

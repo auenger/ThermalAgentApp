@@ -562,15 +562,22 @@ export class LocalDatabase {
     try {
       const existing = this.getRemoteJob(input.attemptId)
       if (existing) {
-        const same = existing.taskId === input.taskId && existing.runId === input.runId &&
+        const sameWork = existing.taskId === input.taskId && existing.runId === input.runId &&
           existing.ownerNodeId === input.ownerNodeId && existing.executorNodeId === input.executorNodeId &&
-          existing.leaseId === input.leaseId && existing.epoch === input.epoch &&
           existing.inputSha256 === input.inputSha256 && existing.inputSizeBytes === input.inputSizeBytes &&
           existing.inputOriginalName === input.inputOriginalName &&
           JSON.stringify(existing.parameters) === JSON.stringify(input.parameters)
-        if (!same) throw new PeerConflictError('remote job attempt was offered with conflicting details')
+        if (!sameWork || input.epoch < existing.epoch ||
+          (input.epoch === existing.epoch && input.leaseId !== existing.leaseId) ||
+          (input.epoch > existing.epoch && existing.status !== 'OFFERED')) {
+          throw new PeerConflictError('remote job attempt was offered with conflicting details')
+        }
+        if (input.epoch > existing.epoch) {
+          this.db.prepare('UPDATE remote_jobs SET lease_id = ?, epoch = ?, updated_at = ? WHERE attempt_id = ?')
+            .run(input.leaseId, input.epoch, new Date().toISOString(), input.attemptId)
+        }
         this.db.exec('COMMIT')
-        return existing
+        return this.getRemoteJob(input.attemptId) as RemoteJobRecord
       }
       const busy = this.db.prepare(`
         SELECT attempt_id FROM remote_jobs
@@ -939,6 +946,53 @@ export class LocalDatabase {
       })
       this.db.exec('COMMIT')
       return { run, attempt }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  prepareRemoteBaseline(
+    taskId: string, ownerNodeId: string, executorNodeId: string, expectedVersion: number,
+    inputArtifactSha256: string, parameters: Record<string, unknown>, pluginVersion: string,
+  ): { task: TaskRecord; run: RunRecord; attempt: AttemptRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      if (!task) throw new TaskNotFoundError(taskId)
+      if (task.ownerNodeId !== ownerNodeId) throw new PeerConflictError('this node does not own the task')
+      if (task.version !== expectedVersion) throw new VersionConflictError(expectedVersion, task.version)
+      if (task.executionStatus !== 'READY' || this.listTaskRuns(taskId).length > 0) {
+        throw new PeerConflictError('remote baseline requires a READY task without an existing Run')
+      }
+      if (!this.getArtifact(inputArtifactSha256)) throw new PeerConflictError('input artifact is not stored locally')
+      const now = new Date().toISOString()
+      const runId = randomUUID()
+      const attemptId = randomUUID()
+      this.db.prepare(`
+        INSERT INTO runs(id, task_id, kind, sequence, status, selected_attempt_id, created_at, updated_at)
+        VALUES (?, ?, 'BASELINE', 1, 'PLANNED', NULL, ?, ?)
+      `).run(runId, taskId, now, now)
+      this.db.prepare(`
+        INSERT INTO attempts(
+          id, run_id, executor_node_id, status, plugin_id, plugin_version,
+          parameters_json, progress_stage, input_artifact_sha256, output_artifact_sha256,
+          started_at, heartbeat_at, finished_at, error_code, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, 'QUEUED', 'icepak-pyaedt', ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+      `).run(attemptId, runId, executorNodeId, pluginVersion, JSON.stringify(parameters), inputArtifactSha256, now, now)
+      this.db.prepare(`
+        INSERT INTO attempt_artifacts(attempt_id, sha256, role, created_at)
+        VALUES (?, ?, 'INPUT_PROJECT', ?)
+      `).run(attemptId, inputArtifactSha256, now)
+      this.db.prepare(`
+        UPDATE tasks SET execution_status = 'QUEUED', version = ?, updated_at = ? WHERE id = ? AND version = ?
+      `).run(task.version + 1, now, taskId, task.version)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'run.remote_baseline_prepared',
+        fromStatus: 'READY', toStatus: 'QUEUED', reason: '用户显式选择远程 Baseline',
+        payload: { runId, attemptId, executorNodeId, inputArtifactSha256 }, createdAt: now })
+      this.db.exec('COMMIT')
+      return { task: this.getTask(taskId) as TaskRecord, run: this.getRun(runId) as RunRecord,
+        attempt: this.getAttempt(attemptId) as AttemptRecord }
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error

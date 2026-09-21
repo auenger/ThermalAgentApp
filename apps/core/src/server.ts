@@ -22,6 +22,7 @@ import { PeerSecureChannel, PeerSecureError } from './peer-secure-channel.js'
 import { PeerArtifactError, PeerArtifactTransfer } from './peer-artifact-transfer.js'
 import { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'
 import { PeerTaskInbox, PeerTaskError } from './peer-task-inbox.js'
+import { PeerTaskDispatcher, PeerDispatchError } from './peer-task-dispatcher.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -94,6 +95,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
   const peerLeases = new PeerLeaseControl(nodeIdentity.nodeId, database)
   const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient)
+  const peerDispatcher = new PeerTaskDispatcher(nodeIdentity.nodeId, database, artifacts, peerSecure)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -104,7 +106,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, peerTasks, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, peerTasks, peerDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -150,6 +152,7 @@ async function route(
   peerArtifacts: PeerArtifactTransfer,
   peerLeases: PeerLeaseControl,
   peerTasks: PeerTaskInbox,
+  peerDispatcher: PeerTaskDispatcher,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -439,6 +442,33 @@ async function route(
     writeJson(response, 202, started)
     return
   }
+  const remoteBaselineMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/remote-baseline$/iu)
+  if (request.method === 'POST' && remoteBaselineMatch) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'remote dispatch is local-only')
+    assertLocalWriteOrigin(request)
+    assertLocalOwner(database, remoteBaselineMatch[1], nodeIdentity.nodeId)
+    const value = await readJsonBody(request)
+    if (!isObject(value) || typeof value.peerNodeId !== 'string') throw new RequestError(400, 'INVALID_DISPATCH', 'peerNodeId is required')
+    const version = parseExpectedVersionInput(value).expectedVersion
+    const input = parseIcepakProjectOperationInput(value)
+    const peer = discovery.status().discovered.find(item => item.identity.nodeId === value.peerNodeId)
+    if (!peer) throw new RequestError(409, 'PEER_NOT_DISCOVERED', 'executor is not currently discovered')
+    writeJson(response, 202, await peerDispatcher.dispatchBaseline(remoteBaselineMatch[1], peer, version, input))
+    return
+  }
+  const retryOfferMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/remote-baseline\/retry-offer$/iu)
+  if (request.method === 'POST' && retryOfferMatch) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'remote dispatch is local-only')
+    assertLocalWriteOrigin(request)
+    assertLocalOwner(database, retryOfferMatch[1], nodeIdentity.nodeId)
+    const value = await readJsonBody(request, 2_048)
+    if (!isObject(value) || typeof value.peerNodeId !== 'string') throw new RequestError(400, 'INVALID_DISPATCH', 'peerNodeId is required')
+    const version = parseExpectedVersionInput(value).expectedVersion
+    const peer = discovery.status().discovered.find(item => item.identity.nodeId === value.peerNodeId)
+    if (!peer) throw new RequestError(409, 'PEER_NOT_DISCOVERED', 'executor is not currently discovered')
+    writeJson(response, 202, await peerDispatcher.retryOffer(retryOfferMatch[1], peer, version))
+    return
+  }
   const candidateMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/candidate$/iu)
   if (request.method === 'POST' && candidateMatch) {
     assertLocalOwner(database, candidateMatch[1], nodeIdentity.nodeId)
@@ -598,6 +628,10 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PeerDispatchError) {
+    writeJson(response, 409, { error: { code: error.code, message: error.message } })
+    return
+  }
   if (error instanceof PeerTaskError) {
     const status = error.code === 'OFFER_NOT_AUTHORIZED' ? 403 : error.code === 'INVALID_OFFER' ? 400 : 409
     writeJson(response, status, { error: { code: error.code, message: error.message } })
