@@ -23,6 +23,7 @@ export interface PluginCallOptions {
 
 export interface IcepakPluginPort {
   probeEnvironment(): Promise<IcepakEnvironmentProbe>
+  probeLaunchability?(version?: string): Promise<IcepakEnvironmentProbe>
   inspectProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
   fanCheck(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
   solveProject(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
@@ -42,6 +43,10 @@ export class IcepakPluginClient {
 
   async probeEnvironment(): Promise<IcepakEnvironmentProbe> {
     return this.call('probe_environment') as Promise<IcepakEnvironmentProbe>
+  }
+
+  async probeLaunchability(version?: string): Promise<IcepakEnvironmentProbe> {
+    return this.call('probe_launchability', version ? { version } : {}, { timeoutMs: 5 * 60_000 }) as Promise<IcepakEnvironmentProbe>
   }
 
   async health(): Promise<unknown> {

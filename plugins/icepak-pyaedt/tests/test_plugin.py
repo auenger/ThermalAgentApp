@@ -13,7 +13,7 @@ PLUGIN_PYTHON = Path(__file__).resolve().parents[1] / "python"
 sys.path.insert(0, str(PLUGIN_PYTHON))
 
 from thermal_icepak_plugin.__main__ import handle_request  # noqa: E402
-from thermal_icepak_plugin.probe import _environment_versions, probe_environment  # noqa: E402
+from thermal_icepak_plugin.probe import _environment_versions, probe_environment, probe_launchability  # noqa: E402
 from thermal_icepak_plugin.project import run_project_operation, validate_fan_speed_ratio  # noqa: E402
 
 
@@ -131,6 +131,42 @@ class PluginProtocolTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(result["status"], "NOT_INSTALLED")
             self.assertNotEqual(result["status"], "READY")
+
+    def test_launch_probe_starts_isolated_session_and_keeps_license_unknown(self) -> None:
+        fake = _FakeIcepak()
+        calls: list[dict] = []
+        releases: list[dict] = []
+        def release(**kwargs: bool) -> bool:
+            releases.append(kwargs)
+            return True
+        fake.release_desktop = release
+        base = {**probe_environment(), "status": "DETECTED", "aedtVersions": ["2024.2"], "selectedVersion": "2024.2"}
+        def factory(**kwargs: object) -> _FakeIcepak:
+            calls.append(kwargs)
+            return fake
+        result = probe_launchability(base_probe=base, icepak_factory=factory)
+        self.assertEqual(result["status"], "LAUNCHABLE")
+        self.assertEqual(result["licenseStatus"], "UNKNOWN")
+        self.assertEqual(calls, [{"version": "2024.2", "non_graphical": True, "new_desktop": True, "close_on_exit": True}])
+        self.assertEqual(releases, [{"close_projects": True, "close_desktop": True}])
+
+    def test_launch_probe_rejects_unknown_version_without_starting(self) -> None:
+        base = {**probe_environment(), "status": "DETECTED", "aedtVersions": ["2024.2"], "selectedVersion": "2024.2"}
+        result = probe_launchability("2025.1", base_probe=base, icepak_factory=lambda **_: self.fail("must not start"))
+        self.assertEqual(result["status"], "NEEDS_CONFIG")
+
+    def test_launch_probe_reports_start_failure_without_claiming_ready(self) -> None:
+        base = {**probe_environment(), "status": "DETECTED", "aedtVersions": ["2024.2"], "selectedVersion": "2024.2"}
+        def fail(**_: object) -> None:
+            raise RuntimeError("launch unavailable")
+        result = probe_launchability(base_probe=base, icepak_factory=fail)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["licenseStatus"], "UNKNOWN")
+
+    def test_launch_probe_protocol_validates_version_type(self) -> None:
+        response = handle_request({"id": "probe-1", "method": "probe_launchability", "params": {"version": 42}})
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "INVALID_REQUEST")
 
     def test_project_inspection_uses_copy_and_validates_capability_profile(self) -> None:
         with tempfile.TemporaryDirectory() as root:

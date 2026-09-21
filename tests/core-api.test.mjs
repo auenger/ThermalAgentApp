@@ -68,6 +68,38 @@ test('Core API creates, persists and transitions a task through one business wri
   assert.equal(lanStopResponse.status, 200)
 })
 
+test('explicit Icepak launch probe is local-only and does not claim solver readiness', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'thermal-agent-launch-probe-'))
+  let launches = 0
+  const pluginClient = {
+    async probeEnvironment() { return { status: 'DETECTED', aedtVersions: ['2024.2'] } },
+    async probeLaunchability(version) {
+      launches++
+      assert.equal(version, '2024.2')
+      return { status: 'LAUNCHABLE', licenseStatus: 'UNKNOWN', selectedVersion: version }
+    },
+  }
+  const app = createCoreApp({ home, pluginClient, startAgentRuntime: false })
+  app.server.listen(0, '127.0.0.1')
+  await new Promise(resolve => app.server.once('listening', resolve))
+  t.after(async () => { await app.close(); await rm(home, { recursive: true, force: true }) })
+  const address = app.server.address()
+  assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}`
+  const invalid = await fetch(`${base}/api/plugins/icepak/probe-launchability`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: '2024.3' }),
+  })
+  assert.equal(invalid.status, 400)
+  const response = await fetch(`${base}/api/plugins/icepak/probe-launchability`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: '2024.2' }),
+  })
+  assert.equal(response.status, 200)
+  const { probe } = await response.json()
+  assert.equal(probe.status, 'LAUNCHABLE')
+  assert.equal(probe.licenseStatus, 'UNKNOWN')
+  assert.equal(launches, 1)
+})
+
 test('Core exposes conservative Icepak environment evidence through the plugin boundary', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-plugin-api-'))
   const app = createCoreApp({ home, startAgentRuntime: false })

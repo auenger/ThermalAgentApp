@@ -57,6 +57,16 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   leaseSweep.unref()
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
+  const pendingLaunchProbes = new Map<string, Promise<IcepakEnvironmentProbe>>()
+  const launchProbe = (version?: string): Promise<IcepakEnvironmentProbe> => {
+    if (!pluginClient.probeLaunchability) throw new RequestError(501, 'PROBE_UNAVAILABLE', 'Icepak launch probe is not supported by this plugin client')
+    const key = version ?? ''
+    const existing = pendingLaunchProbes.get(key)
+    if (existing) return existing
+    const pending = pluginClient.probeLaunchability(version).finally(() => pendingLaunchProbes.delete(key))
+    pendingLaunchProbes.set(key, pending)
+    return pending
+  }
   let cachedProbe: IcepakEnvironmentProbe | null = null
   let probedAt = 0
   const capabilityHeartbeat = async (): Promise<PeerHeartbeat> => {
@@ -84,7 +94,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -116,6 +126,7 @@ async function route(
   database: LocalDatabase,
   artifacts: ArtifactStore,
   pluginClient: IcepakPluginPort,
+  launchProbe: (version?: string) => Promise<IcepakEnvironmentProbe>,
   executions: IcepakExecutionManager,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
@@ -217,7 +228,10 @@ async function route(
     const skill = database.getSkill(skillRunMatch[1])
     if (!skill) throw new SkillNotFoundError(skillRunMatch[1])
     if (skill.status !== 'ENABLED') throw new SkillConflictError('skill must be ENABLED before it can run')
-    const probe = await pluginClient.probeEnvironment()
+    const detected = await pluginClient.probeEnvironment()
+    const probe = detected.status === 'DETECTED' && pluginClient.probeLaunchability
+      ? await launchProbe(input.version)
+      : detected
     if (!['LAUNCHABLE', 'PROJECT_COMPATIBLE', 'READY'].includes(probe.status)) {
       throw new RequestError(409, 'ICEPAK_NOT_LAUNCHABLE', `Icepak environment is ${probe.status}`)
     }
@@ -373,6 +387,17 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname === '/api/plugins/icepak/probe') {
     writeJson(response, 200, { probe: await pluginClient.probeEnvironment() })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/probe-launchability') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'Icepak launch probe can only run from the local App')
+    assertLocalWriteOrigin(request)
+    const input = await readJsonBody(request)
+    const version = input && typeof input === 'object' && 'version' in input ? input.version : undefined
+    if (version !== undefined && (typeof version !== 'string' || !/^20\d{2}\.[12]$/u.test(version))) {
+      throw new RequestError(400, 'INVALID_VERSION', 'version must be an AEDT year.release value')
+    }
+    writeJson(response, 200, { probe: await launchProbe(version) })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/inspect') {

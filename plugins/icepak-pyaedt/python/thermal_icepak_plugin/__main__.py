@@ -7,7 +7,7 @@ import sys
 from typing import Any, Callable
 
 from . import PLUGIN_ID, PLUGIN_VERSION, PROTOCOL_VERSION
-from .probe import probe_environment
+from .probe import probe_environment, probe_launchability
 from .project import run_project_operation
 
 
@@ -71,6 +71,11 @@ def handle_request(value: Any, progress: Callable[[str], None] | None = None) ->
         )
     if method == "probe_environment":
         return _success(request_id, probe_environment())
+    if method == "probe_launchability":
+        params = value.get("params", {})
+        if not isinstance(params, dict) or (params.get("version") is not None and not isinstance(params["version"], str)):
+            return _failure(request_id, "INVALID_REQUEST", "version must be a string")
+        return _success(request_id, probe_launchability(params.get("version")))
     if method in {"inspect_project", "fan_check", "solve_project", "fan_solve"}:
         try:
             params = _project_params(value.get("params"))

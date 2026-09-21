@@ -7,6 +7,7 @@ import os
 import platform
 import re
 from pathlib import Path
+from typing import Any, Callable
 
 from . import PLUGIN_ID, PLUGIN_VERSION, PROTOCOL_VERSION
 
@@ -71,3 +72,46 @@ def probe_environment() -> dict[str, object]:
         ],
         "diagnostics": diagnostics,
     }
+
+
+def probe_launchability(
+    version: str | None = None,
+    *,
+    base_probe: dict[str, object] | None = None,
+    icepak_factory: Callable[..., Any] | None = None,
+) -> dict[str, object]:
+    """Start and release a fresh Icepak session; never infer a solver license."""
+    result = dict(base_probe if base_probe is not None else probe_environment())
+    if result["status"] != "DETECTED":
+        return result
+    versions = result["aedtVersions"]
+    selected = version or result["selectedVersion"]
+    if selected not in versions:
+        result["status"] = "NEEDS_CONFIG"
+        result["diagnostics"] = [f"AEDT version {selected} is not detected on this machine"]
+        return result
+    result["selectedVersion"] = selected
+    app = None
+    try:
+        if icepak_factory is None:
+            from ansys.aedt.core import Icepak
+            icepak_factory = Icepak
+        from .project import _without_agent_secrets
+        with _without_agent_secrets():
+            app = icepak_factory(version=selected, non_graphical=True, new_desktop=True, close_on_exit=True)
+        if app is None:
+            raise RuntimeError("PyAEDT did not return an Icepak session")
+        result["status"] = "LAUNCHABLE"
+        result["diagnostics"] = ["A fresh non-graphical Icepak session started; solver license and project compatibility remain unverified"]
+    except Exception as exc:
+        result["status"] = "DEGRADED"
+        result["diagnostics"] = [f"Icepak session launch failed: {type(exc).__name__}: {str(exc)[:300]}"]
+    finally:
+        if app is not None:
+            try:
+                if app.release_desktop(close_projects=True, close_desktop=True) is False:
+                    raise RuntimeError("PyAEDT reported unsuccessful desktop release")
+            except Exception as exc:
+                result["status"] = "DEGRADED"
+                result["diagnostics"] = [f"Icepak session cleanup failed: {type(exc).__name__}: {str(exc)[:300]}"]
+    return result

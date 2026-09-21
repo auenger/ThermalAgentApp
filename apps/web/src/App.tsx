@@ -229,7 +229,7 @@ export function App() {
             {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
             {page === 'skills' && <SkillLibrary styles={styles} skills={skills} onChanged={refresh} />}
             {page === 'nodes' && <NodeWorkspace styles={styles} />}
-            {page === 'settings' && <><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} /></>}
+            {page === 'settings' && <><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} onProbeUpdated={setProbe} /></>}
           </div>
         </main>
       </div>
@@ -503,13 +503,28 @@ function CreateTaskPanel({ styles, onCreated }: { styles: ReturnType<typeof useS
   return <div className={styles.panel}><h2 className={styles.panelTitle}><Add20Regular />新建需求草稿</h2><form className={styles.form} onSubmit={submit}><Field label="任务名称" required><Input value={title} onChange={(_, data) => setTitle(data.value)} /></Field><Field label="Windows 工程路径" hint="保存后仍需人工确认，Core 会在求解前创建内容快照。"><Input value={projectPath} onChange={(_, data) => setProjectPath(data.value)} placeholder="C:\\ThermalModels\\Project1.aedt" /></Field><Field label="最高温度目标（°C）" hint="留空时热判定保持 PENDING，系统不会猜测目标。"><Input type="number" value={targetTmaxC} onChange={(_, data) => setTargetTmaxC(data.value)} /></Field><Field label="需求描述"><Textarea resize="vertical" value={description} onChange={(_, data) => setDescription(data.value)} /></Field>{error && <div className={styles.error}>{error}</div>}<Button type="submit" appearance="primary" disabled={!title.trim() || saving}>{saving ? '正在保存' : '保存草稿'}</Button></form></div>
 }
 
-function IcepakSettings({ styles, probe }: { styles: ReturnType<typeof useStyles>; probe: IcepakEnvironmentProbe | null }) {
+function IcepakSettings({ styles, probe, onProbeUpdated }: { styles: ReturnType<typeof useStyles>; probe: IcepakEnvironmentProbe | null; onProbeUpdated(probe: IcepakEnvironmentProbe): void }) {
   const [projectPath, setProjectPath] = useState('')
-  const [version, setVersion] = useState('2024.2')
+  const [version, setVersion] = useState(probe?.selectedVersion ?? '2024.2')
   const [ratio, setRatio] = useState('1.1')
   const [running, setRunning] = useState<'inspect' | 'fan-check' | null>(null)
   const [result, setResult] = useState<IcepakProjectOperationResult | null>(null)
   const [error, setError] = useState('')
+  const [probingLaunch, setProbingLaunch] = useState(false)
+  useEffect(() => { if (probe?.selectedVersion) setVersion(probe.selectedVersion) }, [probe?.selectedVersion])
+
+  async function probeLaunch() {
+    setProbingLaunch(true); setError('')
+    try {
+      const response = await fetch('/api/plugins/icepak/probe-launchability', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version }),
+      })
+      const body = await response.json() as { probe?: IcepakEnvironmentProbe; error?: { message?: string } }
+      if (!response.ok || !body.probe) throw new Error(body.error?.message ?? 'Icepak 启动验证失败')
+      onProbeUpdated(body.probe)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Icepak 启动验证失败') }
+    finally { setProbingLaunch(false) }
+  }
 
   async function run(operation: 'inspect' | 'fan-check') {
     setRunning(operation); setError(''); setResult(null)
@@ -542,6 +557,8 @@ function IcepakSettings({ styles, probe }: { styles: ReturnType<typeof useStyles
         <div className={styles.form}>
           <Field label="Windows 主机上的 AEDT 工程路径" hint="例如 C:\\ThermalModels\\Project1.aedt"><Input value={projectPath} onChange={(_, data) => setProjectPath(data.value)} /></Field>
           <Field label="AEDT 版本"><Input value={version} onChange={(_, data) => setVersion(data.value)} /></Field>
+          <Button disabled={probingLaunch || running !== null} onClick={() => void probeLaunch()}>{probingLaunch ? '正在启动并释放 Icepak' : '验证 Icepak 可启动'}</Button>
+          <p className={styles.details}>启动验证会短暂开启独立 AEDT 会话；成功仅代表可启动，不代表已验证求解许可证。</p>
           <Field label="风扇转速比例" hint="仅用于动作验证，范围 (1.0, 1.5]"><Input type="number" min={1.01} max={1.5} step={0.01} value={ratio} onChange={(_, data) => setRatio(data.value)} /></Field>
           {error && <div className={styles.error}>{error}</div>}
           <Button appearance="primary" disabled={!projectPath.trim() || running !== null} onClick={() => void run('inspect')}>{running === 'inspect' ? '正在启动 AEDT' : '检查工程'}</Button>
