@@ -1,0 +1,16 @@
+{
+  "name": "@thermal-agent/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "dependencies": {
+    "@thermal-agent/artifact-store": "workspace:*",
+    "@thermal-agent/contracts": "workspace:*",
+    "@thermal-agent/domain": "workspace:*",
+    "@thermal-agent/sqlite-store": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/domain" },
+    { "path": "packages/sqlite-store" },
+    { "path": "packages/artifact-store" },
+    { "path": "apps/core" },
+    { "path": "apps/desktop" }
+  ]
+}

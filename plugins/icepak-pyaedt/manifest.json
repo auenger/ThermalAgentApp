@@ -1,0 +1,13 @@
+{
+  "id": "icepak-pyaedt",
+  "name": "ANSYS Icepak / PyAEDT",
+  "version": "0.1.0",
+  "protocolVersion": "1.0.0",
+  "entrypoint": ["python", "-m", "thermal_icepak_plugin"],
+  "platforms": ["win32"],
+  "capabilities": [
+    "environment_probe",
+    "health"
+  ],
+  "maxConcurrency": 1
+}

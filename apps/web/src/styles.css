@@ -1,0 +1,14 @@
+:root {
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; margin: 0; }
+button, input, textarea { font: inherit; }
+
+@media (prefers-reduced-motion: no-preference) {
+  button { transition: transform 120ms ease, opacity 120ms ease; }
+  button:active { transform: translateY(1px); }
+}
