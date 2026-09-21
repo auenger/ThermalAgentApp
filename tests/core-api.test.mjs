@@ -56,6 +56,16 @@ test('Core API creates, persists and transitions a task through one business wri
   assert.equal(detail.task.executionStatus, 'READY')
   assert.deepEqual(detail.runs, [])
   assert.deepEqual(detail.events.map(event => event.eventType), ['task.created', 'task.status_changed'])
+
+  const lanStartResponse = await fetch(`${base}/api/lan/start`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port: 0 }),
+  })
+  assert.equal(lanStartResponse.status, 200)
+  const lanStarted = await lanStartResponse.json()
+  assert.equal(lanStarted.lan.enabled, true)
+  assert.match(lanStarted.lan.pairingCode, /^\d{8}$/u)
+  const lanStopResponse = await fetch(`${base}/api/lan/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+  assert.equal(lanStopResponse.status, 200)
 })
 
 test('Core exposes conservative Icepak environment evidence through the plugin boundary', async t => {

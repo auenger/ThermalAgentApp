@@ -12,6 +12,7 @@ import { IcepakExecutionManager } from './execution-manager.js'
 import { DshRuntime } from './dsh-runtime.js'
 import { SkillPublisher } from './skill-publisher.js'
 import { CoreEventStream } from './event-stream.js'
+import { LanPublisher } from './lan-publisher.js'
 
 export interface CoreAppOptions {
   home: string
@@ -40,15 +41,19 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
-  const server = createServer((request, response) => {
-    void route(request, response, database, pluginClient, executions, agentRuntime, skillPublisher, eventStream, webRoot, home).catch(error => writeError(response, error))
-  })
+  let lanPublisher: LanPublisher
+  const handler = (request: IncomingMessage, response: ServerResponse) => {
+    void route(request, response, database, pluginClient, executions, agentRuntime, skillPublisher, eventStream, lanPublisher, webRoot, home).catch(error => writeError(response, error))
+  }
+  const server = createServer(handler)
+  lanPublisher = new LanPublisher(handler)
 
   return {
     server,
     database,
     artifacts,
     async close() {
+      await lanPublisher.stop()
       eventStream.close()
       await new Promise<void>((resolveClose, reject) => {
         if (!server.listening) { resolveClose(); return }
@@ -70,6 +75,7 @@ async function route(
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
   eventStream: CoreEventStream,
+  lanPublisher: LanPublisher,
   webRoot: string,
   home: string,
 ): Promise<void> {
@@ -80,6 +86,24 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname === '/api/events') {
     eventStream.subscribe(response)
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/lan/status') {
+    const local = isLoopbackAddress(request.socket.remoteAddress)
+    writeJson(response, 200, { lan: lanPublisher.status(local) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/lan/start') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'LAN publishing can only be managed from the local App')
+    const value = await readJsonBody(request)
+    const port = typeof value === 'object' && value !== null && 'port' in value ? Number(value.port) : 43111
+    writeJson(response, 200, { lan: await lanPublisher.start(port) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/lan/stop') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'LAN publishing can only be managed from the local App')
+    await lanPublisher.stop()
+    writeJson(response, 200, { lan: lanPublisher.status(false) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/agent/status') {
@@ -330,6 +354,10 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
     'X-Content-Type-Options': 'nosniff',
   })
   response.end(data)
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
 class RequestError extends Error {

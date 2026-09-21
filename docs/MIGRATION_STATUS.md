@@ -54,9 +54,11 @@
 
 - [x] Web 与 Electron 共用 Core API 和 React 构建产物。
 - [x] Core 默认只允许 loopback 监听。
-- [ ] 本地用户认证和会话。
-- [ ] 用户显式开启 LAN 发布。
-- [ ] 设备配对和访问权限。
+- [x] LAN 浏览器短时配对和 HttpOnly、SameSite 会话。
+- [x] 用户从本机 App 显式开启/停止独立 LAN Listener。
+- [x] 未配对 API/SSE 拒绝、写操作同源校验和配对失败限流。
+- [ ] 持久设备身份、撤销列表和细粒度访问权限。
+- [ ] TLS 证书或可信局域网证书方案。
 - [ ] Windows 防火墙引导。
 - [x] 基于 SSE 的 Task/活跃 Attempt 实时状态流。
 
@@ -85,6 +87,7 @@ pnpm dev:core
 - Artifact SHA 去重和路径约束。
 - Core API 创建和转换 Task。
 - Core SSE 初始快照、连接关闭和任务状态推送。
+- LAN 默认关闭、本机管理、短时码配对、会话 Cookie、限流与同源写保护。
 - Web 构建及 Core 静态发布。
 - Icepak 插件协议和非 Windows 环境探测。
 - AEDT 工程副本隔离、工程元数据、能力配置校验。

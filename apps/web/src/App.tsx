@@ -46,6 +46,17 @@ interface DshStatus {
   workspacePath?: string
 }
 
+interface LanStatus {
+  enabled: boolean
+  port?: number
+  addresses: string[]
+  pairingCode?: string
+  pairingExpiresAt?: string
+  sessionCount: number
+}
+
+const isLanClient = !['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname)
+
 const useStyles = makeStyles({
   app: { minHeight: '100dvh', backgroundColor: tokens.colorNeutralBackground2, color: tokens.colorNeutralForeground1 },
   shell: { display: 'grid', gridTemplateColumns: '232px minmax(0, 1fr)', minHeight: '100dvh', '@media (max-width: 900px)': { gridTemplateColumns: '1fr' } },
@@ -130,10 +141,12 @@ export function App() {
   const [tasks, setTasks] = useState<TaskRecord[]>([])
   const [probe, setProbe] = useState<IcepakEnvironmentProbe | null>(null)
   const [skills, setSkills] = useState<SkillRecord[]>([])
+  const [authorized, setAuthorized] = useState(!isLanClient)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
+    if (!authorized) return
     setLoading(true)
     setError('')
     try {
@@ -150,11 +163,17 @@ export function App() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [authorized])
 
   useEffect(() => { void refresh() }, [refresh])
 
   useEffect(() => {
+    if (!isLanClient) return
+    void fetch('/api/health').then(response => setAuthorized(response.ok)).catch(() => setAuthorized(false))
+  }, [])
+
+  useEffect(() => {
+    if (!authorized) return
     const events = new EventSource('/api/events')
     const snapshot = (event: MessageEvent<string>) => {
       try {
@@ -164,10 +183,12 @@ export function App() {
     }
     events.addEventListener('snapshot', snapshot as EventListener)
     return () => events.close()
-  }, [])
+  }, [authorized])
 
   const activeTasks = useMemo(() => tasks.filter(task => !['COMPLETED', 'FAILED', 'CANCELLED', 'ESCALATED'].includes(task.executionStatus)), [tasks])
   const completedTasks = useMemo(() => tasks.filter(task => task.executionStatus === 'COMPLETED'), [tasks])
+
+  if (!authorized) return <FluentProvider theme={dark ? darkTheme : lightTheme} className={styles.app}><LanPairGate styles={styles} onPaired={() => setAuthorized(true)} /></FluentProvider>
 
   return (
     <FluentProvider theme={dark ? darkTheme : lightTheme} className={styles.app}>
@@ -194,7 +215,7 @@ export function App() {
             {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
             {page === 'skills' && <SkillLibrary styles={styles} skills={skills} onChanged={refresh} />}
             {page === 'nodes' && <Placeholder styles={styles} icon={<DesktopPulse20Regular />} title="当前只有本机节点" body="节点发现、设备配对和任务租约会在单机求解闭环稳定后启用。" />}
-            {page === 'settings' && <IcepakSettings styles={styles} probe={probe} />}
+            {page === 'settings' && <><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} /></>}
           </div>
         </main>
       </div>
@@ -221,6 +242,55 @@ function Overview({ styles, tasks, activeCount, completedCount, probe, loading, 
       <CreateTaskPanel styles={styles} onCreated={onCreated} />
     </section>
   </>
+}
+
+function LanPairGate({ styles, onPaired }: { styles: ReturnType<typeof useStyles>; onPaired(): void }) {
+  const [code, setCode] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function pair(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError('')
+    try {
+      const response = await fetch('/api/lan/pair', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: code.trim() }),
+      })
+      const body = await response.json() as { error?: { message?: string } }
+      if (!response.ok) throw new Error(body.error?.message ?? '配对失败')
+      onPaired()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '配对失败') }
+    finally { setBusy(false) }
+  }
+  return <main className={styles.content} style={{ maxWidth: 520, paddingTop: 96 }}><div className={styles.panel}><h1 className={styles.title}>连接 Thermal Agent</h1><p className={styles.subtitle}>请在运行 App 的 Windows 电脑上打开“设置 → 局域网发布”，输入当前短时配对码。</p><form className={styles.form} onSubmit={pair}><Field label="8 位配对码" required><Input value={code} maxLength={8} inputMode="numeric" onChange={(_, data) => setCode(data.value.replace(/\D/gu, ''))} /></Field>{error && <p className={styles.error}>{error}</p>}<Button type="submit" appearance="primary" disabled={busy || code.length !== 8}>{busy ? '配对中' : '配对并进入'}</Button></form></div></main>
+}
+
+function LanSettings({ styles }: { styles: ReturnType<typeof useStyles> }) {
+  const [status, setStatus] = useState<LanStatus | null>(null)
+  const [port, setPort] = useState('43111')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const refresh = useCallback(async () => {
+    try {
+      const response = await fetch('/api/lan/status')
+      const body = await response.json() as { lan?: LanStatus; error?: { message?: string } }
+      if (!response.ok || !body.lan) throw new Error(body.error?.message ?? 'LAN 状态读取失败')
+      setStatus(body.lan); setError('')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'LAN 状态读取失败') }
+  }, [])
+  useEffect(() => { void refresh() }, [refresh])
+  async function toggle() {
+    setBusy(true); setError('')
+    try {
+      const response = await fetch(`/api/lan/${status?.enabled ? 'stop' : 'start'}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: status?.enabled ? '{}' : JSON.stringify({ port: Number(port) }),
+      })
+      const body = await response.json() as { lan?: LanStatus; error?: { message?: string } }
+      if (!response.ok || !body.lan) throw new Error(body.error?.message ?? 'LAN 操作失败')
+      setStatus(body.lan)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'LAN 操作失败') }
+    finally { setBusy(false) }
+  }
+  return <><div className={styles.intro}><div><h1 className={styles.title}>局域网发布</h1><p className={styles.subtitle}>默认关闭。开启后，静态登录页可访问；API、SSE 和业务操作必须先用短时配对码换取 HttpOnly 会话。</p></div></div><div className={styles.panel} style={{ marginBottom: 16 }}><div className={styles.statusRow}><div><h2 className={styles.panelTitle}><DesktopPulse20Regular />LAN Web</h2><p className={styles.details}>{status?.enabled ? status.addresses.join(' · ') || `端口 ${status.port}` : '仅本机可访问'}</p></div><Badge color={status?.enabled ? 'success' : 'informative'}>{status?.enabled ? 'ENABLED' : 'DISABLED'}</Badge></div>{!isLanClient && <div className={styles.form}><Field label="监听端口"><Input type="number" disabled={status?.enabled} value={port} onChange={(_, data) => setPort(data.value)} /></Field>{status?.enabled && status.pairingCode && <div className={styles.resultItem}><div className={styles.details}>短时配对码（10 分钟）</div><div className={styles.metric}>{status.pairingCode}</div><div className={styles.details}>已配对会话：{status.sessionCount}</div></div>}<Button appearance={status?.enabled ? 'secondary' : 'primary'} disabled={busy} onClick={() => void toggle()}>{busy ? '处理中' : status?.enabled ? '停止局域网发布' : '显式开启局域网发布'}</Button></div>}{error && <p className={styles.error}>{error}</p>}</div></>
 }
 
 function AgentWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
@@ -256,6 +326,7 @@ function AgentWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
     } finally { setRestarting(false) }
   }
 
+  if (isLanClient) return <div className={styles.panel}><div className={styles.empty}><div><Bot20Regular fontSize={28} /><p>DSH 对话仅在安装 App 的本机桌面开放。局域网浏览器可查看和管理结构化 Task、Skill 与仿真结果。</p></div></div></div>
   return <>
     <div className={styles.intro}>
       <div><h1 className={styles.title}>散热 Agent</h1><p className={styles.subtitle}>DSH 负责自然语言理解、任务整理和工具选择；昂贵求解与 Skill 发布仍由人工确认。</p></div>

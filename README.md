@@ -15,6 +15,7 @@
 - 内置 Local Core HTTP API。
 - Electron 与浏览器共用的 Fluent UI 工程工作台。
 - Core SSE 状态流，桌面与 Web 可自动更新 Task 和活跃 Attempt 状态。
+- 默认关闭的独立 LAN Listener；本机显式开启后，远端浏览器必须用 8 位短时码换取 HttpOnly、SameSite 会话。
 - Desktop 为每次 App 会话分配独占 loopback 端口，并区分开发目录与 `app.asar`/unpacked 运行资源。
 - Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
@@ -53,7 +54,7 @@ THERMAL_AGENT_NODE_BIN
 THERMAL_AGENT_DSH_PLUGIN
 ```
 
-局域网绑定不会默认开启。后续实现设备配对和认证之后，才允许显式绑定非 loopback 地址。
+局域网绑定不会默认开启。在本机“设置 → 局域网发布”显式开启后，静态配对页可访问，但 API 与 SSE 必须先完成短时码配对；管理 Listener 和查看配对码仍只允许本机。当前为受信任内网 HTTP 模式，尚未完成 TLS 证书与持久设备身份，不应暴露到公网或不可信 Wi-Fi。
 
 在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。也可以新建带工程路径的任务，确认需求后启动后台 Baseline。Core 会先生成内容寻址快照，源工程不会被保存或修改。求解完成后任务进入待复核状态；用户接受证据后才会完成，拒绝则升级人工处理。
 
