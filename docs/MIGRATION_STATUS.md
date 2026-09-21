@@ -36,7 +36,7 @@
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
 - [x] ReportLab PDF 插件、已审批任务的报告生成/下载、Artifact 关联与中英文字体/渲染验收（待 Windows 离线打包和真实工程报告复核）。
-- [ ] Windows 安装包和真实 AEDT 验收（已有 electron-builder NSIS 配置、内置 Node 的 DSH 冒烟、隔离 Python 依赖来源与 x64 预检、`afterPack` 二次检查及 Desktop 缺件拒启；运行时插件也不继承用户 `PYTHONPATH`；尚无 Windows 构建/安装证据）。
+- [ ] Windows 安装包和真实 AEDT 验收（已有 electron-builder NSIS 配置、内置 Node 的 DSH 冒烟、隔离 Python 依赖来源与 x64 预检、`afterPack` 二次检查及 Desktop 缺件拒启；运行时插件也不继承用户 `PYTHONPATH`。2026-09-21 在 macOS 实际运行 `pnpm package:win`，TS/Web 构建通过，但预检按设计拒绝非 Windows x64 构建机；尚无 Windows 构建/安装证据）。
 
 ## 阶段 2：DSH Agent
 

@@ -2,6 +2,8 @@
 
 当前仅有构建配置和静态预检，尚未完成真实 Windows 安装包验收。构建必须在 Windows x64 主机进行；原生依赖不能用 macOS 的 `node_modules` 直接交叉打包。
 
+2026-09-21 在 macOS x86_64 执行 `pnpm package:win`：TypeScript 与 Web 构建通过，随后 `verify-windows-runtime.mjs` 按预期拒绝非 Windows x64 构建机，未生成 NSIS 安装包。该机器也没有 `packaging/windows-runtime/` 下的 Windows Node/Python 资源，仓库尚未配置远程 Windows CI。下一次打包需在 Windows x64 主机按下述步骤准备资源后重新执行；此记录不是安装或 AEDT 验收证据。
+
 ## 构建输入
 
 1. 在 Windows x64 上安装 Node 22.22.x、pnpm 11、Python 3 和 uv，并运行 `pnpm install`、`pnpm test`。
