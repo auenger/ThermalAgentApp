@@ -4,9 +4,9 @@ import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
+import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
-import { LocalDatabase, SkillConflictError, SkillNotFoundError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
+import { LocalDatabase, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { IcepakExecutionManager } from './execution-manager.js'
 import { DshRuntime } from './dsh-runtime.js'
@@ -147,7 +147,17 @@ async function route(
   const transitionMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/transitions$/iu)
   if (request.method === 'POST' && transitionMatch) {
     const input = parseTaskTransitionInput(await readJsonBody(request))
+    if (!['READY', 'CANCELLED'].includes(input.status)) {
+      throw new RequestError(400, 'TRANSITION_REQUIRES_WORKFLOW', 'this task transition must be performed by its controlled workflow')
+    }
     const task = database.transitionTask(transitionMatch[1], input.status, input.expectedVersion, input.reason)
+    writeJson(response, 200, { task })
+    return
+  }
+  const approvalMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/approval$/iu)
+  if (request.method === 'POST' && approvalMatch) {
+    const input = parseTaskApprovalDecisionInput(await readJsonBody(request))
+    const task = database.resolveTaskApproval(approvalMatch[1], input.decision, input.expectedVersion, input.reason)
     writeJson(response, 200, { task })
     return
   }
@@ -278,6 +288,10 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof SkillConflictError) {
     writeJson(response, 409, { error: { code: 'SKILL_CONFLICT', message: error.message } })
+    return
+  }
+  if (error instanceof TaskApprovalConflictError) {
+    writeJson(response, 409, { error: { code: 'TASK_APPROVAL_CONFLICT', message: error.message } })
     return
   }
   if (error instanceof InvalidTaskTransitionError) {

@@ -54,6 +54,13 @@ export class SkillConflictError extends Error {
   }
 }
 
+export class TaskApprovalConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TaskApprovalConflictError'
+  }
+}
+
 export class LocalDatabase {
   readonly path: string
   private readonly db: DatabaseSync
@@ -333,6 +340,78 @@ export class LocalDatabase {
       })
       this.db.exec('COMMIT')
       return { ...current, executionStatus: toStatus, version, updatedAt }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  requestTaskApproval(id: string, verdict: ThermalVerdict, expectedVersion?: number, reason?: string): TaskRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as SqliteRow | undefined
+      if (!row) throw new TaskNotFoundError(id)
+      const current = decodeTask(row)
+      if (expectedVersion !== undefined && current.version !== expectedVersion) {
+        throw new VersionConflictError(expectedVersion, current.version)
+      }
+      if (current.approvalStatus !== 'NONE') throw new TaskApprovalConflictError('task already has an approval decision')
+      assertTaskTransition(current.executionStatus, 'WAITING_FOR_APPROVAL')
+      const now = new Date().toISOString()
+      const version = current.version + 1
+      this.db.prepare(`
+        UPDATE tasks SET execution_status = 'WAITING_FOR_APPROVAL', thermal_verdict = ?,
+          approval_status = 'PENDING', version = ?, updated_at = ? WHERE id = ? AND version = ?
+      `).run(verdict, version, now, id, current.version)
+      this.insertEvent({
+        id: randomUUID(), taskId: id, eventType: 'task.approval_requested',
+        fromStatus: current.executionStatus, toStatus: 'WAITING_FOR_APPROVAL',
+        reason: reason?.trim().slice(0, 500) || null,
+        payload: { thermalVerdict: verdict, approvalStatus: 'PENDING', previousVersion: current.version, version },
+        createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return this.getTask(id) as TaskRecord
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  resolveTaskApproval(
+    id: string,
+    decision: Extract<ApprovalStatus, 'APPROVED' | 'REJECTED'>,
+    expectedVersion?: number,
+    reason?: string,
+  ): TaskRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as SqliteRow | undefined
+      if (!row) throw new TaskNotFoundError(id)
+      const current = decodeTask(row)
+      if (expectedVersion !== undefined && current.version !== expectedVersion) {
+        throw new VersionConflictError(expectedVersion, current.version)
+      }
+      if (current.executionStatus !== 'WAITING_FOR_APPROVAL' || current.approvalStatus !== 'PENDING') {
+        throw new TaskApprovalConflictError('task is not waiting for approval')
+      }
+      const nextStatus: ExecutionStatus = decision === 'APPROVED' ? 'COMPLETED' : 'ESCALATED'
+      assertTaskTransition(current.executionStatus, nextStatus)
+      const now = new Date().toISOString()
+      const version = current.version + 1
+      this.db.prepare(`
+        UPDATE tasks SET execution_status = ?, approval_status = ?, version = ?, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(nextStatus, decision, version, now, id, current.version)
+      this.insertEvent({
+        id: randomUUID(), taskId: id, eventType: 'task.approval_resolved',
+        fromStatus: current.executionStatus, toStatus: nextStatus,
+        reason: reason?.trim().slice(0, 500) || null,
+        payload: { thermalVerdict: current.thermalVerdict, approvalStatus: decision, previousVersion: current.version, version },
+        createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return this.getTask(id) as TaskRecord
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error

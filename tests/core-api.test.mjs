@@ -45,6 +45,12 @@ test('Core API creates, persists and transitions a task through one business wri
   const transitioned = await transitionedResponse.json()
   assert.equal(transitioned.task.version, 2)
 
+  const bypassResponse = await fetch(`${base}/api/tasks/${created.task.id}/transitions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'COMPLETED', expectedVersion: 2 }),
+  })
+  assert.equal(bypassResponse.status, 400)
+
   const detailResponse = await fetch(`${base}/api/tasks/${created.task.id}`)
   const detail = await detailResponse.json()
   assert.equal(detail.task.executionStatus, 'READY')

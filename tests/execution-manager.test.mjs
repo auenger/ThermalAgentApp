@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { IcepakExecutionManager } from '@thermal-agent/core'
+import { determineThermalVerdict, IcepakExecutionManager } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 import { LocalDatabase } from '@thermal-agent/sqlite-store'
 
@@ -19,6 +19,14 @@ async function waitFor(predicate, message) {
 }
 
 function unused() { throw new Error('not used by this test') }
+
+test('thermal verdict is deterministic and never treats solver completion as design pass', () => {
+  assert.equal(determineThermalVerdict({ validation: { verified: false }, metrics: { tmaxC: 80, converged: true } }, { targetTmaxC: 90 }), 'INVALID')
+  assert.equal(determineThermalVerdict({ validation: { verified: true }, metrics: { tmaxC: 80, converged: false } }, { targetTmaxC: 90 }), 'DIVERGED')
+  assert.equal(determineThermalVerdict({ validation: { verified: true }, metrics: { tmaxC: 80, converged: true } }, {}), 'PENDING')
+  assert.equal(determineThermalVerdict({ validation: { verified: true }, metrics: { tmaxC: 80, converged: true } }, { targetTmaxC: 79 }), 'FAIL')
+  assert.equal(determineThermalVerdict({ validation: { verified: true }, metrics: { tmaxC: 80, converged: true } }, { targetTmaxC: 80 }), 'PASS')
+})
 
 test('local execution snapshots input, records progress, and links immutable result artifacts', async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-agent-execution-'))
@@ -45,6 +53,7 @@ test('local execution snapshots input, records progress, and links immutable res
         workingProject: input.projectPath, inputSha256: 'unused',
         project: { name: 'Project1', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: [], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: [], objects: [] },
         validation: { verified: true, checks: [] },
+        metrics: { tmaxC: 121.654, converged: true, solverNormalCompletion: true },
         artifacts: { projectPath: solved, convergencePath: convergence },
       }
     },
@@ -55,7 +64,7 @@ test('local execution snapshots input, records progress, and links immutable res
     database.close()
     await rm(root, { recursive: true, force: true })
   })
-  const task = database.createTask(createTask({ title: 'Baseline', description: '', ownerNodeId: 'local-node', requirementSnapshot: {} }))
+  const task = database.createTask(createTask({ title: 'Baseline', description: '', ownerNodeId: 'local-node', requirementSnapshot: { targetTmaxC: 122 } }))
   database.transitionTask(task.id, 'READY', 1)
   const started = await manager.startBaseline(task.id, { projectPath: source, cores: 4 })
   const finished = await waitFor(
@@ -63,13 +72,19 @@ test('local execution snapshots input, records progress, and links immutable res
     'baseline attempt did not finish',
   )
   assert.equal(finished.progressStage, 'result_collected')
-  assert.equal(database.getTask(task.id)?.executionStatus, 'COMPLETED')
+  const waiting = database.getTask(task.id)
+  assert.equal(waiting?.executionStatus, 'WAITING_FOR_APPROVAL')
+  assert.equal(waiting?.thermalVerdict, 'PASS')
+  assert.equal(waiting?.approvalStatus, 'PENDING')
   assert.equal(database.getRun(started.run.id)?.selectedAttemptId, started.attempt.id)
   assert.deepEqual(database.listAttemptArtifacts(started.attempt.id).map(item => item.role), [
     'INPUT_PROJECT', 'SOLVED_PROJECT', 'SOLVER_RESULT', 'CONVERGENCE_EVIDENCE',
   ])
   assert.deepEqual(progress, ['called'])
   assert.notEqual(plugin.lastProjectPath, source)
+  const completed = database.resolveTaskApproval(task.id, 'APPROVED', waiting.version, '结果已人工复核')
+  assert.equal(completed.executionStatus, 'COMPLETED')
+  assert.equal(completed.approvalStatus, 'APPROVED')
 })
 
 test('cancelling an active local attempt produces terminal Attempt and Task states', async t => {

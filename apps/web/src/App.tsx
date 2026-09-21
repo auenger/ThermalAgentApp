@@ -267,21 +267,23 @@ function TaskList({ styles, tasks, loading, onChanged }: { styles: ReturnType<ty
 }
 
 function TaskTable({ styles, tasks, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; onChanged(): Promise<void> }) {
-  return <div style={{ overflowX: 'auto' }}><table className={styles.table}><thead className={styles.tableHead}><tr><th className={styles.tableCell}>任务</th><th className={styles.tableCell}>执行状态</th><th className={styles.tableCell}>热判定</th><th className={styles.tableCell}>操作</th></tr></thead><tbody>{tasks.map(task => <tr key={task.id}><td className={styles.tableCell}><strong>{task.title}</strong><div className={styles.details}>{task.description || '尚未填写补充说明'}</div></td><td className={styles.tableCell}><Badge appearance="outline">{task.executionStatus}</Badge></td><td className={styles.tableCell}>{task.thermalVerdict}</td><td className={styles.tableCell}><TaskAction styles={styles} task={task} onChanged={onChanged} /></td></tr>)}</tbody></table></div>
+  return <div style={{ overflowX: 'auto' }}><table className={styles.table}><thead className={styles.tableHead}><tr><th className={styles.tableCell}>任务</th><th className={styles.tableCell}>执行状态</th><th className={styles.tableCell}>热判定</th><th className={styles.tableCell}>审批</th><th className={styles.tableCell}>操作</th></tr></thead><tbody>{tasks.map(task => <tr key={task.id}><td className={styles.tableCell}><strong>{task.title}</strong><div className={styles.details}>{task.description || '尚未填写补充说明'}</div></td><td className={styles.tableCell}><Badge appearance="outline">{task.executionStatus}</Badge></td><td className={styles.tableCell}>{task.thermalVerdict}</td><td className={styles.tableCell}>{task.approvalStatus}</td><td className={styles.tableCell}><TaskAction styles={styles} task={task} onChanged={onChanged} /></td></tr>)}</tbody></table></div>
 }
 
 function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof useStyles>; task: TaskRecord; onChanged(): Promise<void> }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline' | 'skill') {
+  async function act(kind: 'confirm' | 'baseline' | 'skill' | 'approve' | 'reject') {
     setBusy(true); setError('')
     try {
       const response = kind === 'confirm'
         ? await fetch(`/api/tasks/${task.id}/transitions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'READY', expectedVersion: task.version, reason: '用户确认需求与工程路径' }) })
         : kind === 'baseline'
           ? await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
-          : await fetch(`/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
+          : kind === 'skill'
+            ? await fetch(`/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
+            : await fetch(`/api/tasks/${task.id}/approval`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: kind === 'approve' ? 'APPROVED' : 'REJECTED', expectedVersion: task.version, reason: kind === 'approve' ? '用户复核并接受求解证据' : '用户拒绝当前结果并升级人工处理' }) })
       const body = await response.json() as { error?: { message?: string } }
       if (!response.ok) throw new Error(body.error?.message ?? '操作未完成')
       await onChanged()
@@ -290,6 +292,7 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   }
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'READY') return <div><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '启动 Baseline'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'WAITING_FOR_APPROVAL') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button><Button size="small" disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'COMPLETED') return <div><Button size="small" disabled={busy} onClick={() => void act('skill')}>{busy ? '提取中' : '沉淀 Skill 草稿'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
   return <span className={styles.details}>{task.executionStatus === 'RUNNING' ? '后台求解中' : '无可用操作'}</span>
 }

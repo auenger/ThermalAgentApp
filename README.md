@@ -17,6 +17,7 @@
 - Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
+- 基于校验、收敛、最高温度目标的确定性热判定，以及独立的人工结果审批 Gate。
 - 固定 DSH `0.1.5-rc.2` 的本地 Agent Host、持久会话工作区和散热专用 preset。
 - Token 保护的 Thermal Tools Bridge，以及任务、Icepak 探测和工程检查工具。
 - 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
@@ -46,7 +47,7 @@ THERMAL_AGENT_DSH_PLUGIN
 
 局域网绑定不会默认开启。后续实现设备配对和认证之后，才允许显式绑定非 loopback 地址。
 
-在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。也可以新建带工程路径的任务，确认需求后启动后台 Baseline。Core 会先生成内容寻址快照，源工程不会被保存或修改。
+在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。也可以新建带工程路径的任务，确认需求后启动后台 Baseline。Core 会先生成内容寻址快照，源工程不会被保存或修改。求解完成后任务进入待复核状态；用户接受证据后才会完成，拒绝则升级人工处理。
 
 “Agent”页面嵌入本机 DSH 对话。Agent 可以通过自然语言创建 Task 草稿、读取任务证据、探测 Icepak 和检查工程，但工具层不提供直接启动 Baseline 的能力；需求确认和昂贵求解必须回到 App 操作。
 

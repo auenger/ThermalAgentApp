@@ -136,6 +136,12 @@ export interface TaskTransitionInput {
   reason?: string
 }
 
+export interface TaskApprovalDecisionInput {
+  decision: 'APPROVED' | 'REJECTED'
+  expectedVersion?: number
+  reason?: string
+}
+
 export interface TaskEvent {
   id: string
   taskId: string
@@ -323,6 +329,19 @@ export function parseTaskTransitionInput(value: unknown): TaskTransitionInput {
   }
   return {
     status: value.status,
+    expectedVersion: value.expectedVersion === undefined ? undefined : Number(value.expectedVersion),
+    reason: typeof value.reason === 'string' ? value.reason.trim().slice(0, 500) : undefined,
+  }
+}
+
+export function parseTaskApprovalDecisionInput(value: unknown): TaskApprovalDecisionInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  if (value.decision !== 'APPROVED' && value.decision !== 'REJECTED') throw new Error('decision is invalid')
+  if (value.expectedVersion !== undefined && (!Number.isInteger(value.expectedVersion) || Number(value.expectedVersion) < 1)) {
+    throw new Error('expectedVersion must be a positive integer')
+  }
+  return {
+    decision: value.decision,
     expectedVersion: value.expectedVersion === undefined ? undefined : Number(value.expectedVersion),
     reason: typeof value.reason === 'string' ? value.reason.trim().slice(0, 500) : undefined,
   }

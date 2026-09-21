@@ -1,6 +1,6 @@
 import { basename, join } from 'node:path'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { IcepakProjectOperationInput, AttemptRecord, RunRecord } from '@thermal-agent/contracts'
+import type { IcepakProjectOperationInput, AttemptRecord, RunRecord, ThermalVerdict } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 
@@ -124,7 +124,8 @@ export class IcepakExecutionManager {
       })
       const task = this.database.getTask(taskId)
       if (task?.executionStatus === 'RUNNING') {
-        this.database.transitionTask(taskId, 'COMPLETED', task.version, 'Baseline 求解及证据收集完成')
+        const verdict = determineThermalVerdict(result, task.requirementSnapshot)
+        this.database.requestTaskApproval(taskId, verdict, task.version, 'Baseline 求解及证据收集完成，等待人工复核')
       }
     } catch (error) {
       const cancelled = controller.signal.aborted
@@ -160,4 +161,18 @@ export class IcepakExecutionManager {
       }
     }
   }
+}
+
+export function determineThermalVerdict(
+  result: { validation: { verified: boolean }; metrics?: Record<string, unknown> },
+  requirementSnapshot: Record<string, unknown>,
+): ThermalVerdict {
+  if (!result.validation.verified) return 'INVALID'
+  const metrics = result.metrics
+  const tmaxC = Number(metrics?.tmaxC)
+  if (!metrics || !Number.isFinite(tmaxC)) return 'INVALID'
+  if (metrics.converged !== true || metrics.solverNormalCompletion === false) return 'DIVERGED'
+  const target = Number(requirementSnapshot.targetTmaxC)
+  if (!Number.isFinite(target)) return 'PENDING'
+  return tmaxC <= target ? 'PASS' : 'FAIL'
 }

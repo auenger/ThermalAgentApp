@@ -31,6 +31,7 @@
 - [x] 本地求解 Attempt heartbeat、用户取消和 Core 重启中断识别。
 - [ ] Windows 进程树强制终止与可恢复重试。
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
+- [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
 - [ ] PDF 报告迁移。
 - [ ] Windows 安装包和真实 AEDT 验收。
 
