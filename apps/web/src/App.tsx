@@ -55,6 +55,21 @@ interface LanStatus {
   sessionCount: number
 }
 
+interface DiscoveryStatus {
+  enabled: boolean
+  udpPort: number
+  group: string
+  lastError: string | null
+  discovered: Array<{
+    identity: PeerIdentity
+    address: string
+    servicePort: number
+    heartbeat: { pluginStatus: string; aedtVersions: string[]; maxConcurrent: number; activeAttempts: number }
+    lastSeenAt: string
+    trusted: boolean
+  }>
+}
+
 const isLanClient = !['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname)
 
 const useStyles = makeStyles({
@@ -289,7 +304,7 @@ function LanSettings({ styles }: { styles: ReturnType<typeof useStyles> }) {
     } catch (reason) { setError(reason instanceof Error ? reason.message : 'LAN 操作失败') }
     finally { setBusy(false) }
   }
-  return <><div className={styles.intro}><div><h1 className={styles.title}>局域网发布</h1><p className={styles.subtitle}>默认关闭。开启后，静态登录页可访问；API、SSE 和业务操作必须先用短时配对码换取 HttpOnly 会话。</p></div></div><div className={styles.panel} style={{ marginBottom: 16 }}><div className={styles.statusRow}><div><h2 className={styles.panelTitle}><DesktopPulse20Regular />LAN Web</h2><p className={styles.details}>{status?.enabled ? status.addresses.join(' · ') || `端口 ${status.port}` : '仅本机可访问'}</p></div><Badge color={status?.enabled ? 'success' : 'informative'}>{status?.enabled ? 'ENABLED' : 'DISABLED'}</Badge></div>{!isLanClient && <div className={styles.form}><Field label="监听端口"><Input type="number" disabled={status?.enabled} value={port} onChange={(_, data) => setPort(data.value)} /></Field>{status?.enabled && status.pairingCode && <div className={styles.resultItem}><div className={styles.details}>短时配对码（10 分钟）</div><div className={styles.metric}>{status.pairingCode}</div><div className={styles.details}>已配对会话：{status.sessionCount}</div></div>}<Button appearance={status?.enabled ? 'secondary' : 'primary'} disabled={busy} onClick={() => void toggle()}>{busy ? '处理中' : status?.enabled ? '停止局域网发布' : '显式开启局域网发布'}</Button></div>}{error && <p className={styles.error}>{error}</p>}</div></>
+  return <><div className={styles.intro}><div><h1 className={styles.title}>局域网发布</h1><p className={styles.subtitle}>默认关闭。开启后，静态登录页可访问；API、SSE 和业务操作必须先用短时配对码换取 HttpOnly 会话。节点签名发现也会同时开启，需要局域网允许 UDP 43112 组播。</p></div></div><div className={styles.panel} style={{ marginBottom: 16 }}><div className={styles.statusRow}><div><h2 className={styles.panelTitle}><DesktopPulse20Regular />LAN Web</h2><p className={styles.details}>{status?.enabled ? status.addresses.join(' · ') || `端口 ${status.port}` : '仅本机可访问'}</p></div><Badge color={status?.enabled ? 'success' : 'informative'}>{status?.enabled ? 'ENABLED' : 'DISABLED'}</Badge></div>{!isLanClient && <div className={styles.form}><Field label="监听端口"><Input type="number" disabled={status?.enabled} value={port} onChange={(_, data) => setPort(data.value)} /></Field>{status?.enabled && status.pairingCode && <div className={styles.resultItem}><div className={styles.details}>短时配对码（10 分钟）</div><div className={styles.metric}>{status.pairingCode}</div><div className={styles.details}>已配对会话：{status.sessionCount}</div></div>}<Button appearance={status?.enabled ? 'secondary' : 'primary'} disabled={busy} onClick={() => void toggle()}>{busy ? '处理中' : status?.enabled ? '停止局域网发布' : '显式开启局域网发布'}</Button></div>}{error && <p className={styles.error}>{error}</p>}</div></>
 }
 
 function AgentWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
@@ -557,6 +572,7 @@ function ResultItem({ styles, label, value }: { styles: ReturnType<typeof useSty
 function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
   const [local, setLocal] = useState<PeerIdentity | null>(null)
   const [peers, setPeers] = useState<PeerRecord[]>([])
+  const [discovery, setDiscovery] = useState<DiscoveryStatus | null>(null)
   const [displayName, setDisplayName] = useState('')
   const [nodeId, setNodeId] = useState('')
   const [publicKey, setPublicKey] = useState('')
@@ -569,15 +585,22 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
       if (!identityResponse.ok || !identityBody.node) throw new Error(identityBody.error?.message ?? '本机身份读取失败')
       setLocal(identityBody.node)
       if (!isLanClient) {
-        const peerResponse = await fetch('/api/nodes/peers')
+        const [peerResponse, discoveryResponse] = await Promise.all([fetch('/api/nodes/peers'), fetch('/api/nodes/discovery')])
         const peerBody = await peerResponse.json() as { peers?: PeerRecord[]; error?: { message?: string } }
         if (!peerResponse.ok || !peerBody.peers) throw new Error(peerBody.error?.message ?? '可信节点读取失败')
         setPeers(peerBody.peers)
+        const discoveryBody = await discoveryResponse.json() as { discovery?: DiscoveryStatus; error?: { message?: string } }
+        if (!discoveryResponse.ok || !discoveryBody.discovery) throw new Error(discoveryBody.error?.message ?? '节点发现状态读取失败')
+        setDiscovery(discoveryBody.discovery)
       }
       setError('')
     } catch (reason) { setError(reason instanceof Error ? reason.message : '节点读取失败') }
   }, [])
-  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => {
+    void refresh()
+    const timer = setInterval(() => { void refresh() }, 5_000)
+    return () => clearInterval(timer)
+  }, [refresh])
 
   async function pair(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError('')
@@ -605,11 +628,12 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
   }
 
   return <>
-    <div className={styles.intro}><div><h1 className={styles.title}>计算节点</h1><p className={styles.subtitle}>每台 App 有独立且持久的 Ed25519 身份。手动登记只建立信任记录；自动发现、加密传输和跨机求解尚未启用。</p></div></div>
+    <div className={styles.intro}><div><h1 className={styles.title}>计算节点</h1><p className={styles.subtitle}>每台 App 有独立且持久的 Ed25519 身份。开启局域网发布后可签名发现附近节点；加密传输和跨机求解尚未启用。</p></div></div>
     <section className={styles.settingsGrid}>
       <div className={styles.panel}><h2 className={styles.panelTitle}><DesktopPulse20Regular />本机身份</h2>{local ? <div className={styles.resultGrid} style={{ gridTemplateColumns: '1fr' }}><ResultItem styles={styles} label="Node ID / 指纹" value={local.nodeId} /><ResultItem styles={styles} label="公钥（可在另一台 App 手动登记）" value={local.publicKey} /></div> : <Spinner label="正在读取本机身份" />}</div>
       <div className={styles.panel}><h2 className={styles.panelTitle}>可信节点登记</h2>{isLanClient ? <p className={styles.placeholder}>节点信任只能在运行 App 的本机电脑上管理。</p> : <><p className={styles.details}>请通过可信的线下方式核对对方 Node ID 与公钥。登记后仍不会自动分配任务；远程执行须待加密传输和双向验证完成。</p><form className={styles.form} onSubmit={pair}><Field label="设备名称" required><Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} /></Field><Field label="对方 Node ID" required><Input value={nodeId} onChange={(_, data) => setNodeId(data.value)} /></Field><Field label="对方公钥" required><Input value={publicKey} onChange={(_, data) => setPublicKey(data.value)} /></Field><Button type="submit" appearance="primary" disabled={busy || !displayName.trim() || !nodeId.trim() || !publicKey.trim()}>登记可信节点</Button></form></>}</div>
     </section>
+    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>局域网发现</h2><p className={styles.details}>{discovery?.enabled ? `已开启 · UDP ${discovery.group}:${discovery.udpPort}` : '未开启；请先在设置中开启局域网发布'}{discovery?.lastError ? ` · ${discovery.lastError}` : ''}</p>{discovery?.discovered.length ? <div className={styles.skillList}>{discovery.discovered.map(peer => <div key={peer.identity.nodeId} className={styles.statusRow}><div><strong>{peer.identity.nodeId}</strong><div className={styles.details}>{peer.address}:{peer.servicePort} · Icepak {peer.heartbeat.pluginStatus} · 负载 {peer.heartbeat.activeAttempts}/{peer.heartbeat.maxConcurrent} · {peer.heartbeat.aedtVersions.join(', ') || '未知 AEDT 版本'}</div></div><div className={styles.headerActions}><Badge color={peer.trusted ? 'success' : 'warning'}>{peer.trusted ? '可信签名' : '未登记'}</Badge>{!peer.trusted && <Button size="small" onClick={() => { setNodeId(peer.identity.nodeId); setPublicKey(peer.identity.publicKey); setDisplayName(peer.identity.nodeId) }}>填入登记</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有发现其他 App。两台电脑需在同一局域网开启发布，且网络允许 UDP 组播。</p>}</div>}
     {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>已登记节点</h2>{peers.length ? <div className={styles.skillList}>{peers.map(peer => <div key={peer.nodeId} className={styles.statusRow}><div><strong>{peer.displayName}</strong><div className={styles.details}>{peer.nodeId} · {peer.pluginStatus} · {peer.lastSeenAt ?? '尚无能力心跳'}</div></div><div className={styles.headerActions}><Badge color={peer.trustStatus === 'TRUSTED' ? 'success' : 'danger'}>{peer.trustStatus}</Badge>{peer.trustStatus === 'TRUSTED' && <Button size="small" disabled={busy} onClick={() => void revoke(peer)}>撤销信任</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有登记其他计算节点。</p>}</div>}
     {error && <p className={styles.error}>{error}</p>}
   </>

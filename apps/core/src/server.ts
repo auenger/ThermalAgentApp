@@ -16,6 +16,8 @@ import { LanPublisher } from './lan-publisher.js'
 import { ReportClient, type ReportPort } from './report-client.js'
 import { ReportConflictError, ReportManager } from './report-manager.js'
 import { NodeIdentity } from './node-identity.js'
+import { PeerDiscovery, type PeerDiscoveryOptions } from './peer-discovery.js'
+import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
   home: string
@@ -23,6 +25,7 @@ export interface CoreAppOptions {
   webRoot?: string
   startAgentRuntime?: boolean
   reportClient?: ReportPort
+  discoveryOptions?: PeerDiscoveryOptions
 }
 
 export interface CoreApp {
@@ -54,6 +57,23 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   leaseSweep.unref()
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
+  let cachedProbe: IcepakEnvironmentProbe | null = null
+  let probedAt = 0
+  const capabilityHeartbeat = async (): Promise<PeerHeartbeat> => {
+    if (!cachedProbe || Date.now() - probedAt > 60_000) {
+      try { cachedProbe = await pluginClient.probeEnvironment() }
+      catch { cachedProbe = null }
+      probedAt = Date.now()
+    }
+    const status = cachedProbe?.status ?? 'DEGRADED'
+    return {
+      pluginStatus: status,
+      aedtVersions: cachedProbe?.aedtVersions ?? [],
+      maxConcurrent: status === 'READY' ? 1 : 0,
+      activeAttempts: database.listActiveAttempts().length,
+    }
+  }
+  const discovery = new PeerDiscovery(nodeIdentity, database, capabilityHeartbeat, options.discoveryOptions)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -64,7 +84,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -76,6 +96,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     nodeIdentity,
     async close() {
       clearInterval(leaseSweep)
+      await discovery.stop()
       await lanPublisher.stop()
       eventStream.close()
       await new Promise<void>((resolveClose, reject) => {
@@ -101,6 +122,7 @@ async function route(
   reports: ReportManager,
   eventStream: CoreEventStream,
   lanPublisher: LanPublisher,
+  discovery: PeerDiscovery,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -112,6 +134,11 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname === '/api/nodes/local') {
     writeJson(response, 200, { node: nodeIdentity.publicIdentity })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/nodes/discovery') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer discovery state is local-only')
+    writeJson(response, 200, { discovery: discovery.status() })
     return
   }
   if (url.pathname === '/api/nodes/peers') {
@@ -151,11 +178,15 @@ async function route(
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'LAN publishing can only be managed from the local App')
     const value = await readJsonBody(request)
     const port = typeof value === 'object' && value !== null && 'port' in value ? Number(value.port) : 43111
-    writeJson(response, 200, { lan: await lanPublisher.start(port) })
+    const lan = await lanPublisher.start(port)
+    try { await discovery.start(lan.port ?? port) }
+    catch (error) { console.error('peer discovery unavailable; LAN web remains enabled', error) }
+    writeJson(response, 200, { lan, discovery: discovery.status() })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/lan/stop') {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'LAN publishing can only be managed from the local App')
+    await discovery.stop()
     await lanPublisher.stop()
     writeJson(response, 200, { lan: lanPublisher.status(false) })
     return

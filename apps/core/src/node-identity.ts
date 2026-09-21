@@ -22,10 +22,15 @@ export class NodeIdentity {
   }
 
   static verify(publicIdentity: NodeIdentityPublic, message: Uint8Array, signature: string): boolean {
-    if (publicIdentity.algorithm !== 'Ed25519') return false
+    if (publicIdentity.algorithm !== 'Ed25519' || !/^node-[a-f0-9]{32}$/u.test(publicIdentity.nodeId) ||
+      typeof publicIdentity.publicKey !== 'string' || publicIdentity.publicKey.length > 512 ||
+      typeof signature !== 'string' || signature.length > 120) return false
     const keyBytes = Buffer.from(publicIdentity.publicKey, 'base64url')
     if (nodeIdFor(keyBytes) !== publicIdentity.nodeId) return false
-    try { return verify(null, message, createPublicKey({ key: keyBytes, format: 'der', type: 'spki' }), Buffer.from(signature, 'base64url')) }
+    try {
+      const key = createPublicKey({ key: keyBytes, format: 'der', type: 'spki' })
+      return key.asymmetricKeyType === 'ed25519' && verify(null, message, key, Buffer.from(signature, 'base64url'))
+    }
     catch { return false }
   }
 
