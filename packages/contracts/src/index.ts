@@ -181,6 +181,7 @@ export interface PeerRecord extends PeerIdentity {
   aedtVersions: string[]
   maxConcurrent: number
   activeAttempts: number
+  freeDiskBytes: number | null
   lastSeenAt: string | null
   pairedAt: string
   revokedAt: string | null
@@ -191,6 +192,7 @@ export interface PeerHeartbeat {
   aedtVersions: string[]
   maxConcurrent: number
   activeAttempts: number
+  freeDiskBytes?: number
 }
 
 export const PEER_SECURE_PROTOCOL = 'thermal-agent-secure-peer-v1' as const

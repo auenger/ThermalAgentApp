@@ -5,6 +5,7 @@ import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { DiscoveredPeer } from './peer-discovery.js'
 import { PeerSecureChannel } from './peer-secure-channel.js'
 import { PeerTaskInbox, type PeerTaskOffer } from './peer-task-inbox.js'
+import { hasAdvertisedDiskCapacity } from './peer-disk-capacity.js'
 
 export interface PeerDispatchResult {
   task: TaskRecord
@@ -53,6 +54,7 @@ export class PeerTaskDispatcher {
       if (artifact.sizeBytes < 1 || !/\.aedt$/iu.test(artifact.originalName)) {
         throw new PeerDispatchError('INVALID_INPUT', 'remote baseline requires a non-empty .aedt project')
       }
+      this.assertExecutorDisk(executor, artifact.sizeBytes)
       const inspection = task.requirementSnapshot.inspection
       if (isObject(inspection) && typeof inspection.inputSha256 === 'string' &&
         inspection.inputSha256 !== artifact.sha256) {
@@ -111,6 +113,7 @@ export class PeerTaskDispatcher {
         throw new PeerDispatchError('INPUT_NOT_FOUND', 'snapshotted .aedt input is unavailable')
       }
       this.assertExecutor(executor, task)
+      this.assertExecutorDisk(executor, artifact.sizeBytes)
       const projectPath = task.requirementSnapshot.projectPath
       if (typeof projectPath !== 'string') throw new PeerDispatchError('INPUT_NOT_CONFIRMED', 'confirmed project path is missing')
       const parameters = normalizeParameters({ ...intent.parameters, projectPath } as IcepakProjectOperationInput, task, executor)
@@ -130,6 +133,9 @@ export class PeerTaskDispatcher {
         throw new PeerDispatchError('TASK_NOT_DISPATCHABLE', 'automatic Baseline request is no longer queued')
       }
       this.assertExecutor(executor, task)
+      const artifact = this.database.getArtifact(intent.inputSha256)
+      if (!artifact) throw new PeerDispatchError('INPUT_NOT_FOUND', 'snapshotted input artifact is unavailable')
+      this.assertExecutorDisk(executor, artifact.sizeBytes)
       const reassigned = this.database.reassignQueuedRemoteBaseline(task.id, this.localNodeId,
         executor.identity.nodeId, task.version, intent.inputSha256)
       return this.sendPrepared(reassigned.task, reassigned.run, reassigned.attempt, executor)
@@ -160,6 +166,9 @@ export class PeerTaskDispatcher {
   ): Promise<PeerDispatchResult> {
     let lease: LeaseRecord | null = null
     try {
+      const artifact = this.database.getArtifact(attempt.inputArtifactSha256 as string)
+      if (!artifact) throw new PeerDispatchError('INPUT_NOT_FOUND', 'remote input artifact metadata is missing')
+      this.assertExecutorDisk(executor, artifact.sizeBytes)
       if (task.executionStatus === 'QUEUED') {
         lease = this.database.claimQueuedTaskLease(task.id, executor.identity.nodeId, this.localNodeId, task.version, 60_000).lease
       } else {
@@ -168,8 +177,6 @@ export class PeerTaskDispatcher {
           throw new PeerDispatchError('LEASE_NOT_CURRENT', 'remote task lease is not current')
         }
       }
-      const artifact = this.database.getArtifact(attempt.inputArtifactSha256 as string)
-      if (!artifact) throw new PeerDispatchError('INPUT_NOT_FOUND', 'remote input artifact metadata is missing')
       const offer: PeerTaskOffer = {
         operation: 'task.baseline.offer', taskId: task.id, runId: run.id, attemptId: attempt.id,
         ownerNodeId: this.localNodeId, executorNodeId: executor.identity.nodeId,
@@ -194,6 +201,12 @@ export class PeerTaskDispatcher {
     const version = typeof task.requirementSnapshot.aedtVersion === 'string' ? task.requirementSnapshot.aedtVersion : undefined
     if (!alreadyLeased && !this.database.listAvailablePeers(version).some(item => item.nodeId === executor.identity.nodeId)) {
       throw new PeerDispatchError('EXECUTOR_NOT_AVAILABLE', 'executor is not READY, compatible and idle')
+    }
+  }
+
+  private assertExecutorDisk(executor: DiscoveredPeer, inputSizeBytes: number): void {
+    if (!hasAdvertisedDiskCapacity(executor.heartbeat.freeDiskBytes, inputSizeBytes)) {
+      throw new PeerDispatchError('EXECUTOR_DISK_LOW', 'executor advertised insufficient disk space for this input')
     }
   }
 }

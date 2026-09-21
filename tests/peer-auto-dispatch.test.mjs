@@ -100,8 +100,10 @@ test('authorized automatic Baseline waits durably, resumes after restart, and di
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }),
   })
   assert.equal(enabled.status, 200)
+  let executorDiskBytes = 1
   const announce = () => {
-    udp.send(Buffer.from(JSON.stringify(createPeerBeacon(executor.nodeIdentity, readyHeartbeat, executorService.lanPort))),
+    udp.send(Buffer.from(JSON.stringify(createPeerBeacon(executor.nodeIdentity,
+      { ...readyHeartbeat, freeDiskBytes: executorDiskBytes }, executorService.lanPort))),
       ownerDiscoveryPort, '127.0.0.1')
     udp.send(Buffer.from(JSON.stringify(createPeerBeacon(owner.nodeIdentity, readyHeartbeat, ownerService.lanPort))),
       executorDiscoveryPort, '127.0.0.1')
@@ -109,6 +111,14 @@ test('authorized automatic Baseline waits durably, resumes after restart, and di
   announce()
   beaconTimer = setInterval(announce, 2_000)
   beaconTimer.unref()
+  for (let index = 0; index < 100 && owner.database.getPeer(executor.nodeIdentity.nodeId)?.freeDiskBytes !== 1; index++) {
+    await delay(20)
+  }
+  assert.equal(owner.database.getPeer(executor.nodeIdentity.nodeId)?.freeDiskBytes, 1)
+  await delay(5_500)
+  assert.equal(owner.database.listTaskRuns(task.id).length, 0, 'insufficient disk must not consume a Run or lease')
+  executorDiskBytes = Number.MAX_SAFE_INTEGER
+  announce()
   let completed = false
   for (let index = 0; index < 300; index++) {
     completed = owner.database.getTask(task.id)?.executionStatus === 'WAITING_FOR_APPROVAL' &&

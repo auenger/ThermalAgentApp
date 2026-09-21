@@ -2,6 +2,7 @@ import type { AutoDispatchRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { PeerDiscovery } from './peer-discovery.js'
 import { PeerDispatchError, PeerTaskDispatcher } from './peer-task-dispatcher.js'
+import { hasAdvertisedDiskCapacity } from './peer-disk-capacity.js'
 
 export class PeerAutoDispatcher {
   private timer?: NodeJS.Timeout
@@ -58,6 +59,11 @@ export class PeerAutoDispatcher {
     }
     let peerNodeId: string | null = null
     try {
+      const inputSizeBytes = this.database.getArtifact(intent.inputSha256)?.sizeBytes
+      if (!inputSizeBytes) {
+        this.database.failAutoDispatch(task.id, 'INPUT_NOT_FOUND', 'snapshotted input artifact metadata is missing')
+        return
+      }
       if (task.executionStatus === 'READY' && !run) {
         const version = typeof intent.parameters.version === 'string' ? intent.parameters.version : undefined
         const available = this.database.listAvailablePeers(version)
@@ -66,6 +72,7 @@ export class PeerAutoDispatcher {
           candidate.trusted && candidate.identity.nodeId === item.nodeId &&
           candidate.heartbeat.pluginStatus === 'READY' &&
           candidate.heartbeat.activeAttempts < candidate.heartbeat.maxConcurrent &&
+          hasAdvertisedDiskCapacity(candidate.heartbeat.freeDiskBytes, inputSizeBytes) &&
           (!version || candidate.heartbeat.aedtVersions.includes(version))))
           .find(item => item !== undefined)
         if (!peer) { this.retryAfter.set(task.id, Date.now() + 5_000); return }
@@ -79,7 +86,8 @@ export class PeerAutoDispatcher {
         const available = this.database.listAvailablePeers(version)
         const discovered = this.discovery.status().discovered
         const original = discovered.find(item => item.trusted && item.identity.nodeId === peerNodeId)
-        const originalReady = original && available.some(item => item.nodeId === peerNodeId)
+        const originalReady = original && available.some(item => item.nodeId === peerNodeId) &&
+          hasAdvertisedDiskCapacity(original.heartbeat.freeDiskBytes, inputSizeBytes)
         let result
         if (task.executionStatus === 'QUEUED' && !originalReady) {
           if (this.database.listRunAttempts(run.id).length >= 3) {
@@ -90,6 +98,7 @@ export class PeerAutoDispatcher {
             candidate.trusted && candidate.identity.nodeId === item.nodeId && item.nodeId !== peerNodeId &&
             candidate.heartbeat.pluginStatus === 'READY' &&
             candidate.heartbeat.activeAttempts < candidate.heartbeat.maxConcurrent &&
+            hasAdvertisedDiskCapacity(candidate.heartbeat.freeDiskBytes, inputSizeBytes) &&
             (!version || candidate.heartbeat.aedtVersions.includes(version)))).find(item => item !== undefined)
           if (!alternate) { this.retryAfter.set(task.id, Date.now() + 5_000); return }
           peerNodeId = alternate.identity.nodeId

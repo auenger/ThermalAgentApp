@@ -23,6 +23,8 @@ test('signed peer beacon rejects tampering, stale timestamps, and invalid capaci
   assert.equal(parsePeerBeacon(Buffer.from(JSON.stringify({ ...beacon, signature: 'x' })), now), null)
   assert.equal(parsePeerBeacon(Buffer.alloc(4_097), now), null)
   assert.throws(() => createPeerBeacon(identity, { ...ready, maxConcurrent: -1 }, 43111, now), /invalid/u)
+  assert.throws(() => createPeerBeacon(identity, { ...ready, freeDiskBytes: -1 }, 43111, now), /invalid/u)
+  assert.throws(() => createPeerBeacon(identity, { ...ready, freeDiskBytes: Number.MAX_SAFE_INTEGER + 1 }, 43111, now), /invalid/u)
 })
 
 test('UDP discovery stores only trusted signed capabilities and rejects replay or revoked peers', async t => {
@@ -53,9 +55,10 @@ test('UDP discovery stores only trusted signed capabilities and rejects replay o
   assert.equal(discovery.ingest(Buffer.from(JSON.stringify(first)), { address: '127.0.0.1' }), null)
 
   database.trustPeer(executor.publicIdentity, 'Windows worker')
-  await send(createPeerBeacon(executor, ready, 43111))
+  await send(createPeerBeacon(executor, { ...ready, freeDiskBytes: 9_000_000_000 }, 43111))
   await waitFor(() => database.getPeer(executor.nodeId)?.pluginStatus === 'READY')
   assert.equal(discovery.status().discovered[0].trusted, true)
+  assert.equal(database.getPeer(executor.nodeId)?.freeDiskBytes, 9_000_000_000)
   assert.equal(database.listAvailablePeers('2024.2').length, 1)
 
   database.revokePeer(executor.nodeId)

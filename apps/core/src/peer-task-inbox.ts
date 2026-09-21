@@ -1,10 +1,10 @@
-import { statfs } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { IcepakEnvironmentProbe, RemoteJobRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { PeerSecureChannel } from './peer-secure-channel.js'
 import type { DiscoveredPeer } from './peer-discovery.js'
+import { localFreeDiskBytes, requiredRemoteDiskBytes } from './peer-disk-capacity.js'
 
 export interface PeerTaskOffer {
   operation: 'task.baseline.offer'
@@ -25,11 +25,6 @@ export interface PeerTaskOffer {
 export class PeerTaskError extends Error {
   constructor(readonly code: string, message: string) { super(message) }
 }
-
-// The download, content-addressed import, working copy and solver outputs can
-// coexist. This is a conservative admission estimate, not a disk reservation.
-const DISK_HEADROOM_BYTES = 512n * 1024n * 1024n
-const INPUT_DISK_MULTIPLIER = 4n
 
 export class PeerTaskInbox {
   constructor(
@@ -61,11 +56,10 @@ export class PeerTaskInbox {
         typeof offer.parameters.version !== 'string' || !probe.aedtVersions.includes(offer.parameters.version)) {
         throw new PeerTaskError('ICEPAK_NOT_READY', 'Icepak is not ready for this baseline offer')
       }
-      let capacity
-      try { capacity = await statfs(dirname(this.database.path), { bigint: true }) }
+      let available
+      try { available = await localFreeDiskBytes(dirname(this.database.path)) }
       catch { throw new PeerTaskError('DISK_CAPACITY_UNKNOWN', 'executor disk capacity cannot be checked') }
-      const available = capacity.bavail * capacity.bsize
-      const required = BigInt(offer.inputSizeBytes) * INPUT_DISK_MULTIPLIER + DISK_HEADROOM_BYTES
+      const required = requiredRemoteDiskBytes(offer.inputSizeBytes)
       if (available < required) {
         throw new PeerTaskError('INSUFFICIENT_DISK', `executor needs at least ${required} free bytes for this input; ${available} available`)
       }

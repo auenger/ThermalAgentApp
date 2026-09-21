@@ -403,6 +403,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (10, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (11, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -413,6 +416,7 @@ export class LocalDatabase {
     this.ensureColumn('remote_jobs', 'solved_sha256', 'TEXT')
     this.ensureColumn('remote_jobs', 'result_sha256', 'TEXT')
     this.ensureColumn('remote_jobs', 'convergence_sha256', 'TEXT')
+    this.ensureColumn('peers', 'free_disk_bytes', 'INTEGER')
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -533,7 +537,7 @@ export class LocalDatabase {
       VALUES (?, ?, ?, 'TRUSTED', 'DETECTED', '[]', 0, 0, NULL, ?, NULL)
       ON CONFLICT(node_id) DO UPDATE SET display_name = excluded.display_name,
         trust_status = 'TRUSTED', plugin_status = 'DETECTED', aedt_versions_json = '[]',
-        max_concurrent = 0, active_attempts = 0, last_seen_at = NULL,
+        max_concurrent = 0, active_attempts = 0, free_disk_bytes = NULL, last_seen_at = NULL,
         paired_at = excluded.paired_at, revoked_at = NULL
     `).run(identity.nodeId, identity.publicKey, name, timestamp)
     return this.getPeer(identity.nodeId) as PeerRecord
@@ -556,15 +560,16 @@ export class LocalDatabase {
     }
     if (!Number.isInteger(heartbeat.maxConcurrent) || heartbeat.maxConcurrent < 0 || heartbeat.maxConcurrent > 32 ||
       !Number.isInteger(heartbeat.activeAttempts) || heartbeat.activeAttempts < 0 || heartbeat.activeAttempts > 32 ||
+      (heartbeat.freeDiskBytes !== undefined && (!Number.isSafeInteger(heartbeat.freeDiskBytes) || heartbeat.freeDiskBytes < 0)) ||
       !Array.isArray(heartbeat.aedtVersions) || heartbeat.aedtVersions.length > 32 ||
       heartbeat.aedtVersions.some(value => typeof value !== 'string' || value.length > 40)) {
       throw new PeerConflictError('peer capacity heartbeat is invalid')
     }
     this.db.prepare(`
       UPDATE peers SET plugin_status = ?, aedt_versions_json = ?, max_concurrent = ?,
-        active_attempts = ?, last_seen_at = ? WHERE node_id = ? AND trust_status = 'TRUSTED'
+        active_attempts = ?, free_disk_bytes = ?, last_seen_at = ? WHERE node_id = ? AND trust_status = 'TRUSTED'
     `).run(heartbeat.pluginStatus, JSON.stringify(heartbeat.aedtVersions), heartbeat.maxConcurrent,
-      heartbeat.activeAttempts, now.toISOString(), nodeId)
+      heartbeat.activeAttempts, heartbeat.freeDiskBytes ?? null, now.toISOString(), nodeId)
     return this.getPeer(nodeId) as PeerRecord
   }
 
@@ -1978,6 +1983,7 @@ function decodePeer(row: SqliteRow): PeerRecord {
     pluginStatus: row.plugin_status as PeerRecord['pluginStatus'],
     aedtVersions: JSON.parse(String(row.aedt_versions_json)) as string[],
     maxConcurrent: Number(row.max_concurrent), activeAttempts: Number(row.active_attempts),
+    freeDiskBytes: row.free_disk_bytes === null ? null : Number(row.free_disk_bytes),
     lastSeenAt: row.last_seen_at === null ? null : String(row.last_seen_at),
     pairedAt: String(row.paired_at), revokedAt: row.revoked_at === null ? null : String(row.revoked_at),
   }

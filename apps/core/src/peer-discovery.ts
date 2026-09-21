@@ -236,5 +236,7 @@ function validHeartbeat(value: unknown): value is PeerHeartbeat {
     Array.isArray(value.aedtVersions) && value.aedtVersions.length <= 32 &&
     value.aedtVersions.every(version => typeof version === 'string' && version.length > 0 && version.length <= 40) &&
     Number.isInteger(value.maxConcurrent) && Number(value.maxConcurrent) >= 0 && Number(value.maxConcurrent) <= 32 &&
-    Number.isInteger(value.activeAttempts) && Number(value.activeAttempts) >= 0 && Number(value.activeAttempts) <= 32
+    Number.isInteger(value.activeAttempts) && Number(value.activeAttempts) >= 0 && Number(value.activeAttempts) <= 32 &&
+    (value.freeDiskBytes === undefined ||
+      (Number.isSafeInteger(value.freeDiskBytes) && Number(value.freeDiskBytes) >= 0))
 }

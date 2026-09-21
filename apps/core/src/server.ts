@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
-import { basename, extname, join, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
 import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
@@ -28,6 +28,7 @@ import { PeerRemoteRunControl, PeerRemoteRunError } from './peer-remote-run-cont
 import { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
 import { PeerAutoDispatcher } from './peer-auto-dispatcher.js'
 import { effectiveIcepakProbe } from './icepak-readiness.js'
+import { heartbeatFreeDiskBytes, localFreeDiskBytes } from './peer-disk-capacity.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -90,12 +91,16 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       probedAt = Date.now()
     }
     const effective = cachedProbe ? await effectiveIcepakProbe(cachedProbe, database, artifacts) : null
-    const status = effective?.status ?? 'DEGRADED'
+    let freeDiskBytes = 0
+    try { freeDiskBytes = heartbeatFreeDiskBytes(await localFreeDiskBytes(dirname(database.path))) }
+    catch { /* fail closed: do not advertise capacity when disk cannot be measured */ }
+    const status = freeDiskBytes > 0 ? (effective?.status ?? 'DEGRADED') : 'DEGRADED'
     return {
       pluginStatus: status,
       aedtVersions: effective?.aedtVersions ?? [],
       maxConcurrent: status === 'READY' ? 1 : 0,
       activeAttempts: database.listActiveAttempts().length,
+      freeDiskBytes,
     }
   }
   const discovery = new PeerDiscovery(nodeIdentity, database, capabilityHeartbeat, options.discoveryOptions)
