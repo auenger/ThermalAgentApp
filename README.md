@@ -19,8 +19,9 @@
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
 - 固定 DSH `0.1.5-rc.2` 的本地 Agent Host、持久会话工作区和散热专用 preset。
 - Token 保护的 Thermal Tools Bridge，以及任务、Icepak 探测和工程检查工具。
+- 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
 
-当前还没有完成 Windows 真实 AEDT 回归验收、候选求解协调、Skill 审核发布、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
+当前还没有完成 Windows 真实 AEDT 回归验收、候选求解协调、Skill 运行/修复闭环、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
 
 ## 本地运行
 
@@ -48,6 +49,8 @@ THERMAL_AGENT_DSH_PLUGIN
 在 Windows Icepak 开发机上，可进入“设置 → Icepak 插件”，填写本机 `.aedt` 路径执行工程检查或风扇动作验证。也可以新建带工程路径的任务，确认需求后启动后台 Baseline。Core 会先生成内容寻址快照，源工程不会被保存或修改。
 
 “Agent”页面嵌入本机 DSH 对话。Agent 可以通过自然语言创建 Task 草稿、读取任务证据、探测 Icepak 和检查工程，但工具层不提供直接启动 Baseline 的能力；需求确认和昂贵求解必须回到 App 操作。
+
+完成任务只有在存在成功 Attempt，且输入工程、求解工程和结构化结果 Artifact 齐全时，才能沉淀为 Skill 草稿。草稿不会进入 DSH；用户在“技能”页面审核启用后才发布到本机工作区，停用会撤回发布文件。
 
 ## 目录
 

@@ -51,6 +51,63 @@ export const PLUGIN_STATUSES = [
 
 export type PluginStatus = (typeof PLUGIN_STATUSES)[number]
 
+export const SKILL_STATUSES = ['DRAFT', 'ENABLED', 'DISABLED', 'NEEDS_REPAIR'] as const
+export type SkillStatus = (typeof SKILL_STATUSES)[number]
+
+export interface ThermalSkillStep {
+  id: string
+  title: string
+  description: string
+  verification: string
+}
+
+export interface ThermalSkillDefinition {
+  parameters: Array<{ key: string; description: string; required: boolean }>
+  steps: ThermalSkillStep[]
+  permissions: string[]
+  successCriteria: string[]
+  failureStrategy: string
+}
+
+export interface SkillRecord {
+  id: string
+  key: string
+  name: string
+  description: string
+  status: SkillStatus
+  activeVersion: number
+  sourceTaskCount: number
+  publishedPath: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillVersionRecord {
+  id: string
+  skillId: string
+  version: number
+  definition: ThermalSkillDefinition
+  changeSummary: string
+  createdAt: string
+}
+
+export interface SkillSourceRecord {
+  skillId: string
+  taskId: string
+  evidence: Record<string, unknown>
+  createdAt: string
+}
+
+export interface SkillDetail extends SkillRecord {
+  version: SkillVersionRecord
+  sources: SkillSourceRecord[]
+}
+
+export interface SkillReviewInput {
+  reviewer: string
+  expectedUpdatedAt: string
+}
+
 export interface TaskRecord {
   id: string
   title: string
@@ -310,5 +367,15 @@ export function parseIcepakProjectOperationInput(value: unknown): IcepakProjectO
     flowConvergenceCriterion: value.flowConvergenceCriterion === undefined ? undefined : Number(value.flowConvergenceCriterion),
     baselineMetrics: value.baselineMetrics as Record<string, unknown> | undefined,
     minImprovementC: value.minImprovementC === undefined ? undefined : Number(value.minImprovementC),
+  }
+}
+
+export function parseSkillReviewInput(value: unknown): SkillReviewInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  const expectedUpdatedAt = requiredText(value.expectedUpdatedAt, 'expectedUpdatedAt', 100)
+  if (Number.isNaN(Date.parse(expectedUpdatedAt))) throw new Error('expectedUpdatedAt is invalid')
+  return {
+    reviewer: requiredText(value.reviewer, 'reviewer', 200),
+    expectedUpdatedAt,
   }
 }

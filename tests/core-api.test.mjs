@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createCoreApp } from '@thermal-agent/core'
+import { createTask } from '@thermal-agent/domain'
 
 test('Core API creates, persists and transitions a task through one business write path', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-core-'))
@@ -129,4 +130,52 @@ test('Core owns Icepak run directories and delegates project operations only thr
   })
   assert.equal(invalidResponse.status, 400)
   assert.equal(calls.length, 2)
+})
+
+test('Core keeps skill drafts out of DSH until an explicit review publishes them', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'thermal-agent-skill-api-'))
+  const app = createCoreApp({ home, startAgentRuntime: false })
+  app.server.listen(0, '127.0.0.1')
+  await new Promise(resolve => app.server.once('listening', resolve))
+  t.after(async () => { await app.close(); await rm(home, { recursive: true, force: true }) })
+  const address = app.server.address()
+  assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}`
+  const task = app.database.createTask(createTask({ title: 'API Skill', description: '', ownerNodeId: 'local-node', requirementSnapshot: {} }))
+  const { attempt } = app.database.createRunWithAttempt({
+    taskId: task.id, kind: 'BASELINE', executorNodeId: 'local-node', pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', parameters: {},
+  })
+  for (const [sha256, role] of [
+    ['a'.repeat(64), 'INPUT_PROJECT'], ['b'.repeat(64), 'SOLVED_PROJECT'], ['c'.repeat(64), 'SOLVER_RESULT'],
+  ]) {
+    app.database.upsertArtifact({ sha256, sizeBytes: 1, mediaType: 'application/octet-stream', originalName: role, relativePath: sha256, createdAt: new Date().toISOString() })
+    app.database.linkAttemptArtifact({ attemptId: attempt.id, sha256, role, createdAt: new Date().toISOString() })
+  }
+  app.database.transitionAttempt(attempt.id, 'STARTING')
+  app.database.transitionAttempt(attempt.id, 'RUNNING')
+  app.database.transitionAttempt(attempt.id, 'SUCCEEDED')
+  for (const [status, version] of [['READY', 1], ['QUEUED', 2], ['RUNNING', 3], ['COMPLETED', 4]]) {
+    app.database.transitionTask(task.id, status, version)
+  }
+
+  const draftResponse = await fetch(`${base}/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
+  assert.equal(draftResponse.status, 201)
+  const { skill: draft } = await draftResponse.json()
+  assert.equal(draft.status, 'DRAFT')
+  assert.equal(draft.publishedPath, null)
+
+  const enableResponse = await fetch(`${base}/api/skills/${draft.id}/enable`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer: 'test-user', expectedUpdatedAt: draft.updatedAt }),
+  })
+  assert.equal(enableResponse.status, 200)
+  const { skill: enabled } = await enableResponse.json()
+  assert.equal(enabled.status, 'ENABLED')
+  await access(enabled.publishedPath)
+
+  const staleResponse = await fetch(`${base}/api/skills/${draft.id}/disable`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewer: 'test-user', expectedUpdatedAt: draft.updatedAt }),
+  })
+  assert.equal(staleResponse.status, 409)
 })

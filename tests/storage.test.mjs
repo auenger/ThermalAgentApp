@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
+import { SkillPublisher } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 import { LocalDatabase, VersionConflictError } from '@thermal-agent/sqlite-store'
 
@@ -84,4 +85,56 @@ test('Run and Attempt records preserve execution identity, heartbeat, and select
   t.after(() => reopened.close())
   assert.equal(reopened.listTaskRuns(task.id)[0].kind, 'BASELINE')
   assert.equal(reopened.listRunAttempts(created.run.id)[0].parameters.cores, 4)
+})
+
+test('completed evidence creates a review-only skill draft that publishes only after approval', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-agent-skills-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const database = new LocalDatabase(join(root, 'thermal.db'))
+  t.after(() => database.close())
+  const incomplete = database.createTask(createTask({
+    title: '未完成任务', description: '', ownerNodeId: 'local-node', requirementSnapshot: {},
+  }))
+  assert.throws(() => database.createSkillDraftFromTask(incomplete.id), /only a COMPLETED task/u)
+
+  const task = database.createTask(createTask({
+    title: '机箱 Baseline', description: '', ownerNodeId: 'local-node', requirementSnapshot: {},
+  }))
+  const { run, attempt } = database.createRunWithAttempt({
+    taskId: task.id, kind: 'BASELINE', executorNodeId: 'local-node', pluginId: 'icepak-pyaedt',
+    pluginVersion: '0.2.0', parameters: {}, inputArtifactSha256: 'a'.repeat(64),
+  })
+  for (const [sha256, role] of [
+    ['a'.repeat(64), 'INPUT_PROJECT'], ['b'.repeat(64), 'SOLVED_PROJECT'], ['c'.repeat(64), 'SOLVER_RESULT'],
+  ]) {
+    database.upsertArtifact({ sha256, sizeBytes: 1, mediaType: 'application/octet-stream', originalName: role, relativePath: sha256, createdAt: new Date().toISOString() })
+    database.linkAttemptArtifact({ attemptId: attempt.id, sha256, role, createdAt: new Date().toISOString() })
+  }
+  database.transitionAttempt(attempt.id, 'STARTING')
+  database.transitionAttempt(attempt.id, 'RUNNING')
+  database.transitionAttempt(attempt.id, 'SUCCEEDED', { outputArtifactSha256: 'b'.repeat(64) })
+  database.transitionTask(task.id, 'READY', 1)
+  database.transitionTask(task.id, 'QUEUED', 2)
+  database.transitionTask(task.id, 'RUNNING', 3)
+  database.transitionTask(task.id, 'COMPLETED', 4)
+
+  const draft = database.createSkillDraftFromTask(task.id)
+  assert.equal(draft.status, 'DRAFT')
+  assert.equal(draft.version.version, 1)
+  assert.deepEqual(draft.sources[0].evidence.artifactRoles, ['INPUT_PROJECT', 'SOLVED_PROJECT', 'SOLVER_RESULT'])
+  assert.equal(database.createSkillDraftFromTask(task.id).id, draft.id)
+  assert.equal(database.getRun(run.id)?.selectedAttemptId, attempt.id)
+
+  const publisher = new SkillPublisher(join(root, 'workspace'))
+  const publishedPath = publisher.publish(draft)
+  const markdown = await readFile(publishedPath, 'utf8')
+  assert.match(markdown, /人工审核/u)
+  assert.match(markdown, /不得自动确认需求、启动 Baseline/u)
+  const enabled = database.reviewSkill(draft.id, 'ENABLED', 'local-user', draft.updatedAt, publishedPath)
+  assert.equal(enabled.status, 'ENABLED')
+  assert.equal(enabled.publishedPath, publishedPath)
+  publisher.unpublish(publishedPath)
+  const disabled = database.reviewSkill(enabled.id, 'DISABLED', 'local-user', enabled.updatedAt, null)
+  assert.equal(disabled.status, 'DISABLED')
+  await assert.rejects(access(publishedPath))
 })

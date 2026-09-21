@@ -12,6 +12,11 @@ import type {
   RunKind,
   RunRecord,
   RunStatus,
+  SkillDetail,
+  SkillRecord,
+  SkillSourceRecord,
+  SkillStatus,
+  SkillVersionRecord,
   TaskEvent,
   TaskRecord,
   ThermalVerdict,
@@ -32,6 +37,20 @@ export class VersionConflictError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
     super(`task version conflict: expected ${expected}, actual ${actual}`)
     this.name = 'VersionConflictError'
+  }
+}
+
+export class SkillNotFoundError extends Error {
+  constructor(readonly skillId: string) {
+    super(`skill ${skillId} was not found`)
+    this.name = 'SkillNotFoundError'
+  }
+}
+
+export class SkillConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SkillConflictError'
   }
 }
 
@@ -150,11 +169,85 @@ export class LocalDatabase {
         PRIMARY KEY(attempt_id, sha256, role)
       );
 
+      CREATE TABLE IF NOT EXISTS skills (
+        id TEXT PRIMARY KEY,
+        skill_key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        status TEXT NOT NULL,
+        active_version INTEGER NOT NULL,
+        source_task_count INTEGER NOT NULL DEFAULT 0,
+        published_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS skill_versions (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        definition_json TEXT NOT NULL,
+        change_summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(skill_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS skill_sources (
+        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        evidence_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(skill_id, task_id),
+        UNIQUE(task_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS skill_reviews (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        reviewer TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS skill_runs (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        parameters_json TEXT NOT NULL,
+        result_summary TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL,
+        finished_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS skill_run_steps (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES skill_runs(id) ON DELETE CASCADE,
+        step_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        error_code TEXT,
+        error_message TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(run_id, step_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS skills_status_updated_idx ON skills(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS skill_runs_started_idx ON skill_runs(skill_id, started_at DESC);
+
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (1, datetime('now'));
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (2, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (3, datetime('now'));
     `)
   }
 
@@ -472,6 +565,135 @@ export class LocalDatabase {
     }))
   }
 
+  createSkillDraftFromTask(taskId: string): SkillDetail {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      if (!task) throw new TaskNotFoundError(taskId)
+      if (task.executionStatus !== 'COMPLETED') {
+        throw new SkillConflictError('only a COMPLETED task can produce a skill draft')
+      }
+      const existing = this.db.prepare(`
+        SELECT skill_id FROM skill_sources WHERE task_id = ?
+      `).get(taskId) as SqliteRow | undefined
+      if (existing) {
+        this.db.exec('COMMIT')
+        return this.getSkill(String(existing.skill_id)) as SkillDetail
+      }
+      const attempt = this.db.prepare(`
+        SELECT a.id AS attempt_id, a.plugin_id, a.plugin_version, a.parameters_json
+        FROM runs r
+        JOIN attempts a ON a.id = r.selected_attempt_id
+        WHERE r.task_id = ? AND r.status = 'COMPLETED' AND a.status = 'SUCCEEDED'
+        ORDER BY r.sequence DESC LIMIT 1
+      `).get(taskId) as SqliteRow | undefined
+      if (!attempt) throw new SkillConflictError('completed task has no selected successful attempt')
+      const artifacts = this.listAttemptArtifacts(String(attempt.attempt_id))
+      const roles = new Set(artifacts.map(item => item.role))
+      for (const required of ['INPUT_PROJECT', 'SOLVED_PROJECT', 'SOLVER_RESULT'] as const) {
+        if (!roles.has(required)) throw new SkillConflictError(`completed task is missing ${required} evidence`)
+      }
+      const id = randomUUID()
+      const versionId = randomUUID()
+      const now = new Date().toISOString()
+      const key = `task-${task.id.replaceAll('-', '').slice(0, 16)}`
+      const definition = {
+        parameters: [
+          { key: 'projectPath', description: '待分析的本地 AEDT 工程绝对路径', required: true },
+          { key: 'targetTmaxC', description: '用户明确给出的最高温度目标；未知时不得猜测', required: false },
+        ],
+        steps: [
+          { id: 'probe', title: '验证 Icepak 环境', description: '探测 AEDT、PyAEDT、许可证和插件能力。', verification: '能力证据明确；不可用时停止。' },
+          { id: 'inspect', title: '隔离检查工程', description: '仅通过 Icepak 插件在工程副本中检查设计、边界、Monitor 与 Setup。', verification: '源工程未被修改且项目校验通过。' },
+          { id: 'confirm', title: '人工确认求解输入', description: '展示需求快照与检查结果，等待用户在 App 中确认。', verification: '任务进入 READY，审批记录可追溯。' },
+          { id: 'solve', title: '执行 Baseline', description: '由 App 启动一次受管 Icepak Baseline，并持续保存心跳。', verification: 'Attempt 成功且输入、求解工程和结果证据均已关联。' },
+          { id: 'judge', title: '分别陈述证据', description: '分别报告温度、Monitor、残差、反向流与收敛性。', verification: '求解状态、热判定和审批状态未被混为一谈。' },
+        ],
+        permissions: ['读取本地任务和证据', '通过 Icepak 插件检查隔离工程副本', '昂贵求解必须由用户在 App 中明确启动', '禁止直接修改源 .aedt'],
+        successCriteria: ['存在成功的受管 Attempt', '输入工程、求解工程与结构化结果均可追溯', '缺少的热判定证据被明确标记为未知'],
+        failureStrategy: '停止当前步骤，保留 Attempt、错误和已有 Artifact；不得绕过人工确认或在源工程上重试。',
+      }
+      const evidence = {
+        attemptId: String(attempt.attempt_id),
+        pluginId: String(attempt.plugin_id),
+        pluginVersion: String(attempt.plugin_version),
+        artifactRoles: [...roles].sort(),
+        thermalVerdict: task.thermalVerdict,
+      }
+      this.db.prepare(`
+        INSERT INTO skills(id, skill_key, name, description, status, active_version, source_task_count, published_path, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'DRAFT', 1, 1, NULL, ?, ?)
+      `).run(id, key, `${task.title}复用流程`.slice(0, 200), `从已完成任务「${task.title}」及其求解证据提取的待审核流程。`, now, now)
+      this.db.prepare(`
+        INSERT INTO skill_versions(id, skill_id, version, definition_json, change_summary, created_at)
+        VALUES (?, ?, 1, ?, ?, ?)
+      `).run(versionId, id, JSON.stringify(definition), `从完成任务「${task.title}」提取`, now)
+      this.db.prepare(`
+        INSERT INTO skill_sources(skill_id, task_id, evidence_json, created_at) VALUES (?, ?, ?, ?)
+      `).run(id, taskId, JSON.stringify(evidence), now)
+      this.insertEvent({
+        id: randomUUID(), taskId, eventType: 'skill.draft_created', fromStatus: null, toStatus: null,
+        reason: null, payload: { skillId: id, skillVersion: 1 }, createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return this.getSkill(id) as SkillDetail
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getSkill(id: string): SkillDetail | null {
+    const row = this.db.prepare('SELECT * FROM skills WHERE id = ?').get(id) as SqliteRow | undefined
+    if (!row) return null
+    const skill = decodeSkill(row)
+    const versionRow = this.db.prepare(`
+      SELECT * FROM skill_versions WHERE skill_id = ? AND version = ?
+    `).get(id, skill.activeVersion) as SqliteRow | undefined
+    if (!versionRow) throw new Error(`skill ${id} active version was not found`)
+    const sourceRows = this.db.prepare('SELECT * FROM skill_sources WHERE skill_id = ? ORDER BY created_at ASC').all(id) as SqliteRow[]
+    return { ...skill, version: decodeSkillVersion(versionRow), sources: sourceRows.map(decodeSkillSource) }
+  }
+
+  listSkills(): SkillRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM skills ORDER BY CASE status WHEN 'ENABLED' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END, updated_at DESC
+    `).all() as SqliteRow[]
+    return rows.map(decodeSkill)
+  }
+
+  reviewSkill(
+    id: string,
+    status: Extract<SkillStatus, 'ENABLED' | 'DISABLED'>,
+    reviewer: string,
+    expectedUpdatedAt: string,
+    publishedPath: string | null,
+  ): SkillDetail {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.getSkill(id)
+      if (!current) throw new SkillNotFoundError(id)
+      if (current.updatedAt !== expectedUpdatedAt) throw new SkillConflictError('skill was changed by another operation')
+      if (status === 'ENABLED' && !['DRAFT', 'DISABLED'].includes(current.status)) {
+        throw new SkillConflictError(`skill status ${current.status} cannot be enabled`)
+      }
+      if (status === 'DISABLED' && current.status !== 'ENABLED') {
+        throw new SkillConflictError(`skill status ${current.status} cannot be disabled`)
+      }
+      const now = new Date().toISOString()
+      this.db.prepare('UPDATE skills SET status = ?, published_path = ?, updated_at = ? WHERE id = ?')
+        .run(status, publishedPath, now, id)
+      this.db.prepare(`
+        INSERT INTO skill_reviews(id, skill_id, version, action, reviewer, created_at) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(randomUUID(), id, current.activeVersion, status === 'ENABLED' ? 'APPROVED_AND_PUBLISHED' : 'DISABLED', reviewer.slice(0, 200), now)
+      this.db.exec('COMMIT')
+      return this.getSkill(id) as SkillDetail
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   private insertEvent(event: TaskEvent): void {
     this.db.prepare(`
       INSERT INTO task_events(
@@ -545,5 +767,40 @@ function decodeAttempt(row: SqliteRow): AttemptRecord {
     errorMessage: row.error_message === null ? null : String(row.error_message),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  }
+}
+
+function decodeSkill(row: SqliteRow): SkillRecord {
+  return {
+    id: String(row.id),
+    key: String(row.skill_key),
+    name: String(row.name),
+    description: String(row.description),
+    status: row.status as SkillStatus,
+    activeVersion: Number(row.active_version),
+    sourceTaskCount: Number(row.source_task_count),
+    publishedPath: row.published_path === null ? null : String(row.published_path),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  }
+}
+
+function decodeSkillVersion(row: SqliteRow): SkillVersionRecord {
+  return {
+    id: String(row.id),
+    skillId: String(row.skill_id),
+    version: Number(row.version),
+    definition: parseObject(row.definition_json) as unknown as SkillVersionRecord['definition'],
+    changeSummary: String(row.change_summary),
+    createdAt: String(row.created_at),
+  }
+}
+
+function decodeSkillSource(row: SqliteRow): SkillSourceRecord {
+  return {
+    skillId: String(row.skill_id),
+    taskId: String(row.task_id),
+    evidence: parseObject(row.evidence_json),
+    createdAt: String(row.created_at),
   }
 }

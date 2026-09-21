@@ -4,12 +4,13 @@ import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
+import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
-import { LocalDatabase, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
+import { LocalDatabase, SkillConflictError, SkillNotFoundError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { IcepakExecutionManager } from './execution-manager.js'
 import { DshRuntime } from './dsh-runtime.js'
+import { SkillPublisher } from './skill-publisher.js'
 
 export interface CoreAppOptions {
   home: string
@@ -33,11 +34,12 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient)
+  const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   const server = createServer((request, response) => {
-    void route(request, response, database, pluginClient, executions, agentRuntime, webRoot, home).catch(error => writeError(response, error))
+    void route(request, response, database, pluginClient, executions, agentRuntime, skillPublisher, webRoot, home).catch(error => writeError(response, error))
   })
 
   return {
@@ -63,6 +65,7 @@ async function route(
   pluginClient: IcepakPluginPort,
   executions: IcepakExecutionManager,
   agentRuntime: DshRuntime,
+  skillPublisher: SkillPublisher,
   webRoot: string,
   home: string,
 ): Promise<void> {
@@ -78,6 +81,42 @@ async function route(
   if (request.method === 'POST' && url.pathname === '/api/agent/restart') {
     await agentRuntime.restart()
     writeJson(response, 202, { agent: agentRuntime.getStatus() })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/skills') {
+    writeJson(response, 200, { skills: database.listSkills() })
+    return
+  }
+  const skillMatch = url.pathname.match(/^\/api\/skills\/([0-9a-f-]+)$/iu)
+  if (request.method === 'GET' && skillMatch) {
+    const skill = database.getSkill(skillMatch[1])
+    if (!skill) throw new SkillNotFoundError(skillMatch[1])
+    writeJson(response, 200, { skill })
+    return
+  }
+  const draftSkillMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/skill-draft$/iu)
+  if (request.method === 'POST' && draftSkillMatch) {
+    writeJson(response, 201, { skill: database.createSkillDraftFromTask(draftSkillMatch[1]) })
+    return
+  }
+  const enableSkillMatch = url.pathname.match(/^\/api\/skills\/([0-9a-f-]+)\/enable$/iu)
+  if (request.method === 'POST' && enableSkillMatch) {
+    const input = parseSkillReviewInput(await readJsonBody(request))
+    const skill = database.getSkill(enableSkillMatch[1])
+    if (!skill) throw new SkillNotFoundError(enableSkillMatch[1])
+    if (skill.updatedAt !== input.expectedUpdatedAt) throw new SkillConflictError('skill was changed by another operation')
+    const publishedPath = skillPublisher.publish(skill)
+    writeJson(response, 200, { skill: database.reviewSkill(skill.id, 'ENABLED', input.reviewer, input.expectedUpdatedAt, publishedPath) })
+    return
+  }
+  const disableSkillMatch = url.pathname.match(/^\/api\/skills\/([0-9a-f-]+)\/disable$/iu)
+  if (request.method === 'POST' && disableSkillMatch) {
+    const input = parseSkillReviewInput(await readJsonBody(request))
+    const skill = database.getSkill(disableSkillMatch[1])
+    if (!skill) throw new SkillNotFoundError(disableSkillMatch[1])
+    if (skill.updatedAt !== input.expectedUpdatedAt) throw new SkillConflictError('skill was changed by another operation')
+    skillPublisher.unpublish(skill.publishedPath)
+    writeJson(response, 200, { skill: database.reviewSkill(skill.id, 'DISABLED', input.reviewer, input.expectedUpdatedAt, null) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/tasks') {
@@ -231,6 +270,14 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof VersionConflictError) {
     writeJson(response, 409, { error: { code: 'VERSION_CONFLICT', message: error.message } })
+    return
+  }
+  if (error instanceof SkillNotFoundError) {
+    writeJson(response, 404, { error: { code: 'SKILL_NOT_FOUND', message: error.message } })
+    return
+  }
+  if (error instanceof SkillConflictError) {
+    writeJson(response, 409, { error: { code: 'SKILL_CONFLICT', message: error.message } })
     return
   }
   if (error instanceof InvalidTaskTransitionError) {

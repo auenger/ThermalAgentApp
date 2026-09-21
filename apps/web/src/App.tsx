@@ -26,7 +26,7 @@ import {
   WeatherSunny20Regular,
   WeatherMoon20Regular,
 } from '@fluentui/react-icons'
-import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, TaskRecord } from '@thermal-agent/contracts'
+import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
 
 const brand: BrandVariants = {
   10: '#130903', 20: '#281006', 30: '#421706', 40: '#5c2009', 50: '#742b10',
@@ -97,6 +97,10 @@ const useStyles = makeStyles({
   resultGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '12px', marginTop: '18px' },
   resultItem: { ...shorthands.padding('12px'), borderRadius: '8px', backgroundColor: tokens.colorNeutralBackground2 },
   resultValue: { marginTop: '5px', fontWeight: 650, overflowWrap: 'anywhere' },
+  skillGrid: { display: 'grid', gridTemplateColumns: 'minmax(280px, 0.7fr) minmax(0, 1.3fr)', gap: '16px', '@media (max-width: 900px)': { gridTemplateColumns: '1fr' } },
+  skillList: { display: 'grid', gap: '8px', marginTop: '14px' },
+  skillButton: { width: '100%', justifyContent: 'space-between', textAlign: 'left' },
+  section: { marginTop: '20px' },
   agentPanel: { height: 'calc(100dvh - 128px)', minHeight: '560px', overflow: 'hidden', ...shorthands.padding('0') },
   agentFrame: { width: '100%', height: '100%', border: 0, backgroundColor: tokens.colorNeutralBackground1 },
   iconMuted: { color: tokens.colorNeutralForeground3 },
@@ -125,6 +129,7 @@ export function App() {
   const [dark, setDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches)
   const [tasks, setTasks] = useState<TaskRecord[]>([])
   const [probe, setProbe] = useState<IcepakEnvironmentProbe | null>(null)
+  const [skills, setSkills] = useState<SkillRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -132,12 +137,14 @@ export function App() {
     setLoading(true)
     setError('')
     try {
-      const [tasksResponse, probeResponse] = await Promise.all([fetch('/api/tasks'), fetch('/api/plugins/icepak/probe')])
-      if (!tasksResponse.ok || !probeResponse.ok) throw new Error('本地 Core 暂时无法返回完整状态')
+      const [tasksResponse, probeResponse, skillsResponse] = await Promise.all([fetch('/api/tasks'), fetch('/api/plugins/icepak/probe'), fetch('/api/skills')])
+      if (!tasksResponse.ok || !probeResponse.ok || !skillsResponse.ok) throw new Error('本地 Core 暂时无法返回完整状态')
       const tasksBody = await tasksResponse.json() as { tasks: TaskRecord[] }
       const probeBody = await probeResponse.json() as { probe: IcepakEnvironmentProbe }
+      const skillsBody = await skillsResponse.json() as { skills: SkillRecord[] }
       setTasks(tasksBody.tasks)
       setProbe(probeBody.probe)
+      setSkills(skillsBody.skills)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '状态读取失败')
     } finally {
@@ -173,7 +180,7 @@ export function App() {
             {page === 'overview' && <Overview styles={styles} tasks={tasks} activeCount={activeTasks.length} completedCount={completedTasks.length} probe={probe} loading={loading} error={error} onCreated={refresh} />}
             {page === 'agent' && <AgentWorkspace styles={styles} />}
             {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
-            {page === 'skills' && <Placeholder styles={styles} icon={<BrainCircuit20Regular />} title="技能库正在迁移" body="下一阶段接入 DSH 后，成功任务会沉淀为待审核的散热 Skill 草稿。" />}
+            {page === 'skills' && <SkillLibrary styles={styles} skills={skills} onChanged={refresh} />}
             {page === 'nodes' && <Placeholder styles={styles} icon={<DesktopPulse20Regular />} title="当前只有本机节点" body="节点发现、设备配对和任务租约会在单机求解闭环稳定后启用。" />}
             {page === 'settings' && <IcepakSettings styles={styles} probe={probe} />}
           </div>
@@ -267,12 +274,14 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline') {
+  async function act(kind: 'confirm' | 'baseline' | 'skill') {
     setBusy(true); setError('')
     try {
       const response = kind === 'confirm'
         ? await fetch(`/api/tasks/${task.id}/transitions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'READY', expectedVersion: task.version, reason: '用户确认需求与工程路径' }) })
-        : await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
+        : kind === 'baseline'
+          ? await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
+          : await fetch(`/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
       const body = await response.json() as { error?: { message?: string } }
       if (!response.ok) throw new Error(body.error?.message ?? '操作未完成')
       await onChanged()
@@ -281,7 +290,65 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   }
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'READY') return <div><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '启动 Baseline'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'COMPLETED') return <div><Button size="small" disabled={busy} onClick={() => void act('skill')}>{busy ? '提取中' : '沉淀 Skill 草稿'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
   return <span className={styles.details}>{task.executionStatus === 'RUNNING' ? '后台求解中' : '无可用操作'}</span>
+}
+
+function SkillLibrary({ styles, skills, onChanged }: { styles: ReturnType<typeof useStyles>; skills: SkillRecord[]; onChanged(): Promise<void> }) {
+  const [selectedId, setSelectedId] = useState<string | null>(skills[0]?.id ?? null)
+  const [detail, setDetail] = useState<SkillDetail | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!skills.length) { setSelectedId(null); setDetail(null); return }
+    if (!selectedId || !skills.some(skill => skill.id === selectedId)) setSelectedId(skills[0].id)
+  }, [skills, selectedId])
+
+  useEffect(() => {
+    if (!selectedId) return
+    let active = true
+    void fetch(`/api/skills/${selectedId}`).then(async response => {
+      const body = await response.json() as { skill?: SkillDetail; error?: { message?: string } }
+      if (!response.ok || !body.skill) throw new Error(body.error?.message ?? 'Skill 详情读取失败')
+      if (active) { setDetail(body.skill); setError('') }
+    }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : 'Skill 详情读取失败') })
+    return () => { active = false }
+  }, [selectedId, skills])
+
+  async function review(action: 'enable' | 'disable') {
+    if (!detail) return
+    setBusy(true); setError('')
+    try {
+      const response = await fetch(`/api/skills/${detail.id}/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewer: 'local-user', expectedUpdatedAt: detail.updatedAt }),
+      })
+      const body = await response.json() as { skill?: SkillDetail; error?: { message?: string } }
+      if (!response.ok || !body.skill) throw new Error(body.error?.message ?? 'Skill 审核操作失败')
+      setDetail(body.skill)
+      await onChanged()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Skill 审核操作失败') }
+    finally { setBusy(false) }
+  }
+
+  return <>
+    <div className={styles.intro}><div><h1 className={styles.title}>散热技能库</h1><p className={styles.subtitle}>草稿只保存在业务库；人工审核启用后才导出到 DSH。停用会撤回发布文件。</p></div></div>
+    {skills.length === 0 ? <div className={styles.panel}><div className={styles.empty}><div><BrainCircuit20Regular fontSize={28} /><p>暂无 Skill。请先从具备完整证据的已完成任务沉淀草稿。</p></div></div></div> :
+      <section className={styles.skillGrid}>
+        <div className={styles.panel}><h2 className={styles.panelTitle}>技能</h2><div className={styles.skillList}>{skills.map(skill => <Button key={skill.id} className={styles.skillButton} appearance={selectedId === skill.id ? 'primary' : 'subtle'} onClick={() => setSelectedId(skill.id)}><span>{skill.name}</span><Badge appearance="outline">{skill.status}</Badge></Button>)}</div></div>
+        <div className={styles.panel}>{detail ? <>
+          <div className={styles.statusRow}><div><h2 className={styles.panelTitle}>{detail.name}</h2><p className={styles.details}>{detail.description}</p></div><Badge color={detail.status === 'ENABLED' ? 'success' : detail.status === 'DRAFT' ? 'warning' : 'informative'}>{detail.status}</Badge></div>
+          <div className={styles.section}><strong>步骤与验收</strong><ol>{detail.version.definition.steps.map(step => <li key={step.id}><strong>{step.title}</strong><div className={styles.details}>{step.description}<br />验证：{step.verification}</div></li>)}</ol></div>
+          <div className={styles.section}><strong>权限边界</strong><ul>{detail.version.definition.permissions.map(item => <li key={item}>{item}</li>)}</ul></div>
+          <p className={styles.details}>来源任务：{detail.sources.length} · 版本：v{detail.activeVersion}{detail.publishedPath ? ` · 已发布到 ${detail.publishedPath}` : ''}</p>
+          {error && <p className={styles.error}>{error}</p>}
+          {detail.status === 'DRAFT' || detail.status === 'DISABLED'
+            ? <Button appearance="primary" disabled={busy} onClick={() => void review('enable')}>{busy ? '处理中' : '审核并启用'}</Button>
+            : detail.status === 'ENABLED' ? <Button disabled={busy} onClick={() => void review('disable')}>{busy ? '处理中' : '停用并撤回'}</Button> : null}
+        </> : <Spinner label="正在读取 Skill 详情" />}</div>
+      </section>}
+  </>
 }
 
 function CreateTaskPanel({ styles, onCreated }: { styles: ReturnType<typeof useStyles>; onCreated(): Promise<void> }) {

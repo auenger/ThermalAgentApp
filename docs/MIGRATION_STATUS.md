@@ -13,7 +13,7 @@
 - [x] Icepak 插件 Manifest 和版本化 RPC 契约。
 - [x] Run 与 Attempt 本地执行契约、状态、心跳和结果选择。
 - [ ] Lease 和 Peer 协议完整定义。
-- [ ] Skill、Skill Version 和 Approval 契约完整定义。
+- [x] Skill、Skill Version 和人工审核契约定义。
 
 ## 阶段 1：单机桌面闭环
 
@@ -42,7 +42,9 @@
 - [x] Loopback + Bearer Token 的 Thermal Tools Bridge。
 - [x] 自然语言创建 Task 草稿、读取任务、环境探测和工程检查工具。
 - [x] 人工确认 Gate：DSH 不暴露启动 Baseline 或发布 Skill 的工具。
-- [ ] Skill 草稿、审核、启用和运行记录。
+- [x] 从已完成且证据完整的任务生成幂等 Skill 草稿。
+- [x] Skill 版本、来源、人工审核、启用及 DSH 发布/撤回。
+- [ ] Skill Run/步骤断点、失败统计和 `NEEDS_REPAIR` 修复闭环。
 
 ## 阶段 3：局域网 Web
 
@@ -89,5 +91,6 @@ pnpm dev:core
 - DSH preset 解析、Host 启停/重启和一次性 token 认证页面。
 - DSH Agent 实例暴露 13 个工具，其中 5 个为受控散热工具。
 - Thermal Tools Bridge 鉴权、Task 草稿和 Icepak 只读操作。
+- Skill 草稿证据门槛、幂等提取、并发审核和发布文件权限边界。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。
