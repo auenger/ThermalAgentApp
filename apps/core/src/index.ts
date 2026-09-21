@@ -17,3 +17,4 @@ export { PeerDiscovery, createPeerBeacon, parsePeerBeacon } from './peer-discove
 export { PeerAuth, PeerAuthError } from './peer-auth.js'
 export { PeerSecureChannel, PeerSecureError } from './peer-secure-channel.js'
 export { PeerArtifactTransfer, PeerArtifactError, PEER_ARTIFACT_CHUNK_BYTES } from './peer-artifact-transfer.js'
+export { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'

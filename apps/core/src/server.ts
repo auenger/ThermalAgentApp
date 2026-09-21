@@ -20,6 +20,7 @@ import { PeerDiscovery, type PeerDiscoveryOptions } from './peer-discovery.js'
 import { PeerAuth, PeerAuthError } from './peer-auth.js'
 import { PeerSecureChannel, PeerSecureError } from './peer-secure-channel.js'
 import { PeerArtifactError, PeerArtifactTransfer } from './peer-artifact-transfer.js'
+import { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -90,6 +91,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerAuth = new PeerAuth(nodeIdentity, database)
   const peerSecure = new PeerSecureChannel(nodeIdentity, database)
   const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
+  const peerLeases = new PeerLeaseControl(nodeIdentity.nodeId, database)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -100,7 +102,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -144,6 +146,7 @@ async function route(
   peerAuth: PeerAuth,
   peerSecure: PeerSecureChannel,
   peerArtifacts: PeerArtifactTransfer,
+  peerLeases: PeerLeaseControl,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -171,6 +174,8 @@ async function route(
       reply = { operation: 'pong', nodeId: nodeIdentity.nodeId }
     } else if (isObject(message) && message.operation === 'artifact.input.chunk') {
       reply = await peerArtifacts.readLeasedInput(decrypted.peerNodeId, message)
+    } else if (isObject(message) && message.operation === 'lease.renew') {
+      reply = peerLeases.renewForExecutor(decrypted.peerNodeId, message)
     } else {
       throw new PeerSecureError('OPERATION_DENIED', 'peer operation is not enabled')
     }
@@ -574,6 +579,11 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PeerLeaseError) {
+    writeJson(response, error.code === 'LEASE_NOT_AUTHORIZED' ? 403 : 400,
+      { error: { code: error.code, message: error.message } })
+    return
+  }
   if (error instanceof PeerArtifactError) {
     writeJson(response, error.code === 'ARTIFACT_NOT_AUTHORIZED' || error.code === 'LEASE_EXPIRED' ? 403 : 409,
       { error: { code: error.code, message: error.message } })

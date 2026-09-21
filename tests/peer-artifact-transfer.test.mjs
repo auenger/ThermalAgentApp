@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { createCoreApp, NodeIdentity, PeerArtifactError, PeerArtifactTransfer, PeerSecureChannel, PEER_ARTIFACT_CHUNK_BYTES } from '@thermal-agent/core'
+import { createCoreApp, NodeIdentity, PeerArtifactError, PeerArtifactTransfer, PeerLeaseControl, PeerLeaseError, PeerSecureChannel, PEER_ARTIFACT_CHUNK_BYTES } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 import { LocalDatabase } from '@thermal-agent/sqlite-store'
 
@@ -59,6 +59,20 @@ test('executor resumes encrypted input transfer only for its current task lease'
   assert.deepEqual(await readFile(executorArtifacts.resolveArtifact(received.sha256)), data)
   assert.equal(executorDb.getArtifact(artifact.sha256)?.sha256, artifact.sha256)
 
+  const renewed = await PeerLeaseControl.renewOnOwner(ownerPeer, channel, lease.id, lease.epoch)
+  assert.equal(renewed.operation, 'lease.renewed')
+  assert.equal(renewed.leaseId, lease.id)
+  assert.equal(renewed.ttlMs, 60_000)
+  assert.ok(owner.database.getLease(lease.id)?.renewedAt)
+  const leaseControl = new PeerLeaseControl(owner.nodeIdentity.nodeId, owner.database)
+  assert.throws(() => leaseControl.renewForExecutor('node-' + 'a'.repeat(32), { leaseId: lease.id, epoch: lease.epoch }),
+    error => error instanceof PeerLeaseError && error.code === 'LEASE_NOT_AUTHORIZED')
+  assert.throws(() => leaseControl.renewForExecutor(executorIdentity.nodeId, { leaseId: lease.id, epoch: lease.epoch + 1 }),
+    error => error instanceof PeerLeaseError && error.code === 'LEASE_NOT_AUTHORIZED')
+  const { sessionId } = await channel.connect(ownerPeer)
+  await assert.rejects(channel.request(ownerPeer, sessionId, { operation: 'lease.renew', leaseId: lease.id, epoch: lease.epoch + 1 }),
+    error => error.code === 'PEER_REJECTED')
+
   const partialPath = join(partialRoot, `${artifact.sha256}.part`)
   await writeFile(partialPath, Buffer.alloc(artifact.sizeBytes, 0))
   await assert.rejects(receiver.downloadLeasedInput(ownerPeer, reference, channel),
@@ -73,7 +87,13 @@ test('executor resumes encrypted input transfer only for its current task lease'
   await assert.rejects(service.readLeasedInput(executorIdentity.nodeId, { ...reference, epoch: reference.epoch + 1, offset: 0 }),
     error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
   assert.equal(owner.database.getRun(run.id)?.taskId, task.id)
+  owner.database.transitionAttempt(attempt.id, 'STARTING')
+  owner.database.transitionAttempt(attempt.id, 'FAILED', { errorCode: 'TEST_FAILED' })
+  assert.throws(() => leaseControl.renewForExecutor(executorIdentity.nodeId, { leaseId: lease.id, epoch: lease.epoch }),
+    error => error instanceof PeerLeaseError && error.code === 'LEASE_NOT_AUTHORIZED')
   owner.database.revokePeer(executorIdentity.nodeId)
+  assert.throws(() => leaseControl.renewForExecutor(executorIdentity.nodeId, { leaseId: lease.id, epoch: lease.epoch }),
+    error => error instanceof PeerLeaseError && error.code === 'LEASE_NOT_AUTHORIZED')
   await assert.rejects(service.readLeasedInput(executorIdentity.nodeId, { ...reference, offset: 0 }),
     error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
 })
