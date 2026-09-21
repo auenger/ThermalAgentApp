@@ -231,6 +231,18 @@ export interface RemoteJobRecord {
   updatedAt: string
 }
 
+export interface AutoDispatchRecord {
+  taskId: string
+  inputSha256: string
+  parameters: Record<string, unknown>
+  status: 'WAITING' | 'DELIVERED' | 'CANCELLED' | 'FAILED'
+  selectedPeerNodeId: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface CreateTaskInput {
   title: string
   description: string

@@ -26,7 +26,7 @@ import {
   WeatherSunny20Regular,
   WeatherMoon20Regular,
 } from '@fluentui/react-icons'
-import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, PeerIdentity, PeerRecord, RemoteJobRecord, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
+import type { AutoDispatchRecord, IcepakEnvironmentProbe, IcepakProjectOperationResult, PeerIdentity, PeerRecord, RemoteJobRecord, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
 
 const brand: BrandVariants = {
   10: '#130903', 20: '#281006', 30: '#421706', 40: '#5c2009', 50: '#742b10',
@@ -153,6 +153,7 @@ export function App() {
   const [page, setPage] = useState<Page>('overview')
   const [dark, setDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches)
   const [tasks, setTasks] = useState<TaskRecord[]>([])
+  const [autoDispatches, setAutoDispatches] = useState<AutoDispatchRecord[]>([])
   const [probe, setProbe] = useState<IcepakEnvironmentProbe | null>(null)
   const [skills, setSkills] = useState<SkillRecord[]>([])
   const [authorized, setAuthorized] = useState(!isLanClient)
@@ -164,12 +165,16 @@ export function App() {
     setLoading(true)
     setError('')
     try {
-      const [tasksResponse, probeResponse, skillsResponse] = await Promise.all([fetch('/api/tasks'), fetch('/api/plugins/icepak/probe'), fetch('/api/skills')])
-      if (!tasksResponse.ok || !probeResponse.ok || !skillsResponse.ok) throw new Error('本地 Core 暂时无法返回完整状态')
+      const [tasksResponse, probeResponse, skillsResponse, autoResponse] = await Promise.all([
+        fetch('/api/tasks'), fetch('/api/plugins/icepak/probe'), fetch('/api/skills'),
+        isLanClient ? Promise.resolve(null) : fetch('/api/auto-dispatch'),
+      ])
+      if (!tasksResponse.ok || !probeResponse.ok || !skillsResponse.ok || (autoResponse && !autoResponse.ok)) throw new Error('本地 Core 暂时无法返回完整状态')
       const tasksBody = await tasksResponse.json() as { tasks: TaskRecord[] }
       const probeBody = await probeResponse.json() as { probe: IcepakEnvironmentProbe }
       const skillsBody = await skillsResponse.json() as { skills: SkillRecord[] }
       setTasks(tasksBody.tasks)
+      setAutoDispatches(autoResponse ? ((await autoResponse.json()) as { requests: AutoDispatchRecord[] }).requests : [])
       setProbe(probeBody.probe)
       setSkills(skillsBody.skills)
     } catch (reason) {
@@ -224,9 +229,9 @@ export function App() {
             </div>
           </header>
           <div className={styles.content}>
-            {page === 'overview' && <Overview styles={styles} tasks={tasks} activeCount={activeTasks.length} completedCount={completedTasks.length} probe={probe} loading={loading} error={error} onCreated={refresh} />}
+            {page === 'overview' && <Overview styles={styles} tasks={tasks} autoDispatches={autoDispatches} activeCount={activeTasks.length} completedCount={completedTasks.length} probe={probe} loading={loading} error={error} onCreated={refresh} />}
             {page === 'agent' && <AgentWorkspace styles={styles} />}
-            {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
+            {page === 'tasks' && <TaskList styles={styles} tasks={tasks} autoDispatches={autoDispatches} loading={loading} onChanged={refresh} />}
             {page === 'skills' && <SkillLibrary styles={styles} skills={skills} onChanged={refresh} />}
             {page === 'nodes' && <NodeWorkspace styles={styles} />}
             {page === 'settings' && <><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} onProbeUpdated={setProbe} /></>}
@@ -240,8 +245,8 @@ export function App() {
   )
 }
 
-function Overview({ styles, tasks, activeCount, completedCount, probe, loading, error, onCreated }: {
-  styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; activeCount: number; completedCount: number
+function Overview({ styles, tasks, autoDispatches, activeCount, completedCount, probe, loading, error, onCreated }: {
+  styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; autoDispatches: AutoDispatchRecord[]; activeCount: number; completedCount: number
   probe: IcepakEnvironmentProbe | null; loading: boolean; error: string; onCreated(): Promise<void>
 }) {
   return <>
@@ -252,7 +257,7 @@ function Overview({ styles, tasks, activeCount, completedCount, probe, loading, 
       <div className={styles.panel}><h2 className={styles.panelTitle}><DocumentData20Regular />已完成</h2><div className={styles.metric}>{completedCount}</div><div className={styles.metricLabel}>个任务已形成完整结果</div></div>
     </section>
     <section className={styles.workGrid}>
-      <TaskPanel styles={styles} tasks={tasks} loading={loading} error={error} onChanged={onCreated} />
+      <TaskPanel styles={styles} tasks={tasks} autoDispatches={autoDispatches} loading={loading} error={error} onChanged={onCreated} />
       <CreateTaskPanel styles={styles} onCreated={onCreated} />
     </section>
   </>
@@ -355,28 +360,34 @@ function AgentWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
   </>
 }
 
-function TaskPanel({ styles, tasks, loading, error, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; loading: boolean; error: string; onChanged(): Promise<void> }) {
-  return <div className={styles.panel}><h2 className={styles.panelTitle}>最近任务</h2>{loading ? <div className={styles.empty}><Spinner label="正在读取本地任务" /></div> : error ? <p className={styles.error}>{error}</p> : tasks.length === 0 ? <div className={styles.empty}><div><DocumentData20Regular fontSize={28} /><p>还没有任务。可以先创建一个需求草稿。</p></div></div> : <TaskTable styles={styles} tasks={tasks.slice(0, 8)} onChanged={onChanged} />}</div>
+function TaskPanel({ styles, tasks, autoDispatches, loading, error, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; autoDispatches: AutoDispatchRecord[]; loading: boolean; error: string; onChanged(): Promise<void> }) {
+  return <div className={styles.panel}><h2 className={styles.panelTitle}>最近任务</h2>{loading ? <div className={styles.empty}><Spinner label="正在读取本地任务" /></div> : error ? <p className={styles.error}>{error}</p> : tasks.length === 0 ? <div className={styles.empty}><div><DocumentData20Regular fontSize={28} /><p>还没有任务。可以先创建一个需求草稿。</p></div></div> : <TaskTable styles={styles} tasks={tasks.slice(0, 8)} autoDispatches={autoDispatches} onChanged={onChanged} />}</div>
 }
 
-function TaskList({ styles, tasks, loading, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; loading: boolean; onChanged(): Promise<void> }) {
-  return <><div className={styles.intro}><div><h1 className={styles.title}>任务</h1><p className={styles.subtitle}>执行状态、热判定和审批状态分别记录，避免把求解完成误认为热设计达标。</p></div></div><div className={styles.panel}>{loading ? <Spinner label="正在加载任务" /> : tasks.length ? <TaskTable styles={styles} tasks={tasks} onChanged={onChanged} /> : <div className={styles.empty}>当前没有任务。</div>}</div></>
+function TaskList({ styles, tasks, autoDispatches, loading, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; autoDispatches: AutoDispatchRecord[]; loading: boolean; onChanged(): Promise<void> }) {
+  return <><div className={styles.intro}><div><h1 className={styles.title}>任务</h1><p className={styles.subtitle}>执行状态、热判定和审批状态分别记录，避免把求解完成误认为热设计达标。</p></div></div><div className={styles.panel}>{loading ? <Spinner label="正在加载任务" /> : tasks.length ? <TaskTable styles={styles} tasks={tasks} autoDispatches={autoDispatches} onChanged={onChanged} /> : <div className={styles.empty}>当前没有任务。</div>}</div></>
 }
 
-function TaskTable({ styles, tasks, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; onChanged(): Promise<void> }) {
-  return <div style={{ overflowX: 'auto' }}><table className={styles.table}><thead className={styles.tableHead}><tr><th className={styles.tableCell}>任务</th><th className={styles.tableCell}>执行状态</th><th className={styles.tableCell}>热判定</th><th className={styles.tableCell}>审批</th><th className={styles.tableCell}>操作</th></tr></thead><tbody>{tasks.map(task => <tr key={task.id}><td className={styles.tableCell}><strong>{task.title}</strong><div className={styles.details}>{task.description || '尚未填写补充说明'}</div></td><td className={styles.tableCell}><Badge appearance="outline">{task.executionStatus}</Badge></td><td className={styles.tableCell}>{task.thermalVerdict}</td><td className={styles.tableCell}>{task.approvalStatus}</td><td className={styles.tableCell}><TaskAction styles={styles} task={task} onChanged={onChanged} /></td></tr>)}</tbody></table></div>
+function TaskTable({ styles, tasks, autoDispatches, onChanged }: { styles: ReturnType<typeof useStyles>; tasks: TaskRecord[]; autoDispatches: AutoDispatchRecord[]; onChanged(): Promise<void> }) {
+  return <div style={{ overflowX: 'auto' }}><table className={styles.table}><thead className={styles.tableHead}><tr><th className={styles.tableCell}>任务</th><th className={styles.tableCell}>执行状态</th><th className={styles.tableCell}>热判定</th><th className={styles.tableCell}>审批</th><th className={styles.tableCell}>操作</th></tr></thead><tbody>{tasks.map(task => <tr key={task.id}><td className={styles.tableCell}><strong>{task.title}</strong><div className={styles.details}>{task.description || '尚未填写补充说明'}</div></td><td className={styles.tableCell}><Badge appearance="outline">{task.executionStatus}</Badge></td><td className={styles.tableCell}>{task.thermalVerdict}</td><td className={styles.tableCell}>{task.approvalStatus}</td><td className={styles.tableCell}><TaskAction styles={styles} task={task} autoDispatch={autoDispatches.find(item => item.taskId === task.id)} onChanged={onChanged} /></td></tr>)}</tbody></table></div>
 }
 
-function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof useStyles>; task: TaskRecord; onChanged(): Promise<void> }) {
+function TaskAction({ styles, task, autoDispatch, onChanged }: { styles: ReturnType<typeof useStyles>; task: TaskRecord; autoDispatch?: AutoDispatchRecord; onChanged(): Promise<void> }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline' | 'remote-baseline' | 'retry-offer' | 'candidate' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
+  async function act(kind: 'confirm' | 'baseline' | 'remote-baseline' | 'auto-baseline' | 'cancel-auto' | 'retry-offer' | 'candidate' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
     setBusy(true); setError(''); setNotice('')
     try {
       let response: Response
-      if (kind === 'remote-baseline' || kind === 'retry-offer') {
+      if (kind === 'auto-baseline') {
+        response = await fetch(`/api/tasks/${task.id}/auto-dispatch`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expectedVersion: task.version, projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2',
+            cores: task.requirementSnapshot.cores ?? 4 }) })
+      } else if (kind === 'cancel-auto') {
+        response = await fetch(`/api/tasks/${task.id}/auto-dispatch`, { method: 'DELETE' })
+      } else if (kind === 'remote-baseline' || kind === 'retry-offer') {
         let retryExecutorNodeId = task.executorNodeId
         if (kind === 'retry-offer' && !retryExecutorNodeId) {
           const detailResponse = await fetch(`/api/tasks/${task.id}`)
@@ -417,15 +428,18 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
       if (!response.ok) throw new Error(body.error?.message ?? '操作未完成')
       if (kind === 'report') window.open(`/api/tasks/${task.id}/report`, '_blank', 'noopener,noreferrer')
       if (kind === 'remote-baseline' || kind === 'retry-offer') {
-        setNotice(body.delivered ? '执行节点已接收任务 Offer；尚未开始下载或求解。' : `Offer 未被接收，可稍后重发：${body.deliveryError ?? '节点暂时不可用'}`)
+        setNotice(body.delivered ? '执行节点已接收任务，将自动下载输入并启动受管求解。' : `Offer 未被接收，可稍后重发：${body.deliveryError ?? '节点暂时不可用'}`)
       }
       await onChanged()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '操作未完成') }
     finally { setBusy(false) }
   }
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
-  if (task.executionStatus === 'READY') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '本机 Baseline'}</Button>{!isLanClient && <Button size="small" disabled={!projectPath || busy} onClick={() => void act('remote-baseline')}>派发到空闲节点</Button>}</div>{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
-  if ((task.executionStatus === 'QUEUED' || task.executionStatus === 'LEASED') && !isLanClient) return <div><Button size="small" disabled={busy} onClick={() => void act('retry-offer')}>{busy ? '重发中' : '重发远程 Offer'}</Button>{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'READY' && autoDispatch?.status === 'WAITING') return <div><Badge appearance="outline">等待兼容空闲节点</Badge> <Button size="small" disabled={busy} onClick={() => void act('cancel-auto')}>撤销自动派发</Button>{autoDispatch.errorMessage && <div className={styles.details}>{autoDispatch.errorMessage}</div>}{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'READY') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '本机 Baseline'}</Button>{!isLanClient && <><Button size="small" disabled={!projectPath || busy} onClick={() => void act('remote-baseline')}>派发到空闲节点</Button><Button size="small" disabled={!projectPath || busy} onClick={() => void act('auto-baseline')}>授权自动派发</Button></>}</div>{autoDispatch?.status === 'FAILED' && <div className={styles.error}>自动派发失败：{autoDispatch.errorMessage}</div>}{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
+  if ((task.executionStatus === 'QUEUED' || task.executionStatus === 'LEASED') && !isLanClient) return autoDispatch?.status === 'WAITING' || autoDispatch?.status === 'DELIVERED'
+    ? <span className={styles.details}>{autoDispatch.status === 'DELIVERED' ? '自动派单已送达，等待执行节点处理' : '自动重试远程 Offer 中'}</span>
+    : <div><Button size="small" disabled={busy} onClick={() => void act('retry-offer')}>{busy ? '重发中' : '重发远程 Offer'}</Button>{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'WAITING_FOR_APPROVAL') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button>{task.thermalVerdict === 'FAIL' && <Button size="small" disabled={busy} onClick={() => void act('candidate')}>批准风扇 +10%</Button>}<Button size="small" disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'COMPLETED') return <div><div className={styles.headerActions}><Button size="small" disabled={busy} onClick={() => void act('report')}>{busy ? '生成中' : '查看 PDF 报告'}</Button><Button size="small" disabled={busy} onClick={() => void act('skill')}>沉淀 Skill 草稿</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'FAILED' || task.executionStatus === 'CANCELLED') return <div><Button size="small" disabled={busy} onClick={() => void act('retry')}>{busy ? '重试中' : '重试最近 Run'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
@@ -732,7 +746,7 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
       <div className={styles.panel}><h2 className={styles.panelTitle}>可信节点登记</h2>{isLanClient ? <p className={styles.placeholder}>节点信任只能在运行 App 的本机电脑上管理。</p> : <><p className={styles.details}>请通过可信的线下方式核对对方 Node ID 与公钥。登记后可验证对方当前是否持有私钥，但不会自动分配任务；远程执行仍需加密传输。</p><form className={styles.form} onSubmit={pair}><Field label="设备名称" required><Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} /></Field><Field label="对方 Node ID" required><Input value={nodeId} onChange={(_, data) => setNodeId(data.value)} /></Field><Field label="对方公钥" required><Input value={publicKey} onChange={(_, data) => setPublicKey(data.value)} /></Field><Button type="submit" appearance="primary" disabled={busy || !displayName.trim() || !nodeId.trim() || !publicKey.trim()}>登记可信节点</Button></form></>}</div>
     </section>
     {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}>
-      <div className={styles.statusRow} style={{ marginTop: 0 }}><div><h2 className={styles.panelTitle}>远程任务接单</h2><p className={styles.details}>默认关闭。开启后仅接收可信节点的加密 Baseline Offer，并要求本机 Icepak 真正 READY；输入会在租约授权下自动下载并校验，但当前不会启动求解。</p></div><Badge color={remoteEnabled ? 'warning' : 'informative'}>{remoteEnabled ? '已开启' : '已关闭'}</Badge></div>
+      <div className={styles.statusRow} style={{ marginTop: 0 }}><div><h2 className={styles.panelTitle}>远程任务接单</h2><p className={styles.details}>默认关闭。开启后仅接收可信节点的加密 Baseline Offer，并要求本机 Icepak 真正 READY；输入校验通过后会自动启动受管求解、续租并回传结果。</p></div><Badge color={remoteEnabled ? 'warning' : 'informative'}>{remoteEnabled ? '已开启' : '已关闭'}</Badge></div>
       <Button appearance={remoteEnabled ? 'secondary' : 'primary'} disabled={busy} onClick={() => void toggleRemoteExecution()}>{remoteEnabled ? '停止远程接单' : '显式开启远程接单'}</Button>
       {remoteJobs.length > 0 && <div className={styles.skillList}>{remoteJobs.map(job => <div key={job.attemptId} className={styles.statusRow}><div><strong>{job.taskId}</strong><div className={styles.details}>Owner {job.ownerNodeId} · Attempt {job.attemptId} · 输入 {job.inputOriginalName}</div>{job.errorMessage && <div className={styles.error}>{job.errorCode}: {job.errorMessage}</div>}</div><Badge>{job.status}</Badge></div>)}</div>}
     </div>}

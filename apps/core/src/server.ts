@@ -26,6 +26,7 @@ import { PeerTaskDispatcher, PeerDispatchError } from './peer-task-dispatcher.js
 import { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'
 import { PeerRemoteRunControl, PeerRemoteRunError } from './peer-remote-run-control.js'
 import { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
+import { PeerAutoDispatcher } from './peer-auto-dispatcher.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -103,6 +104,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const remoteInput = new PeerRemoteInputProcessor(database, discovery, peerSecure, peerArtifacts, () => remoteSolve.wake())
   const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient, () => remoteInput.wake(true))
   const peerDispatcher = new PeerTaskDispatcher(nodeIdentity.nodeId, database, artifacts, peerSecure)
+  const autoDispatcher = new PeerAutoDispatcher(nodeIdentity.nodeId, database, discovery, peerDispatcher)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -110,12 +112,13 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const reports = new ReportManager(home, database, artifacts, options.reportClient ?? new ReportClient())
   remoteInput.start()
   if (options.startRemoteSolve !== false) remoteSolve.start()
+  autoDispatcher.start()
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -129,6 +132,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       clearInterval(leaseSweep)
       await remoteInput.close()
       await remoteSolve.close()
+      await autoDispatcher.close()
       await discovery.stop()
       await lanPublisher.stop()
       peerSecure.close()
@@ -165,6 +169,7 @@ async function route(
   remoteRuns: PeerRemoteRunControl,
   peerTasks: PeerTaskInbox,
   peerDispatcher: PeerTaskDispatcher,
+  autoDispatcher: PeerAutoDispatcher,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -456,6 +461,9 @@ async function route(
   const baselineMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/baseline$/iu)
   if (request.method === 'POST' && baselineMatch) {
     assertLocalOwner(database, baselineMatch[1], nodeIdentity.nodeId)
+    if (database.getAutoDispatch(baselineMatch[1])?.status === 'WAITING') {
+      throw new RequestError(409, 'AUTO_DISPATCH_PENDING', 'cancel automatic dispatch before starting a local Baseline')
+    }
     const input = parseIcepakProjectOperationInput(await readJsonBody(request))
     const started = await executions.startBaseline(baselineMatch[1], input)
     database.updateSkillRunStep(baselineMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id })
@@ -474,6 +482,31 @@ async function route(
     const peer = discovery.status().discovered.find(item => item.identity.nodeId === value.peerNodeId)
     if (!peer) throw new RequestError(409, 'PEER_NOT_DISCOVERED', 'executor is not currently discovered')
     writeJson(response, 202, await peerDispatcher.dispatchBaseline(remoteBaselineMatch[1], peer, version, input))
+    return
+  }
+  if (url.pathname === '/api/auto-dispatch' && request.method === 'GET') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'automatic dispatch intents are local-only')
+    writeJson(response, 200, { requests: database.listAutoDispatches() })
+    return
+  }
+  const autoDispatchMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/auto-dispatch$/iu)
+  if (autoDispatchMatch && request.method === 'POST') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'automatic dispatch is local-only')
+    assertLocalWriteOrigin(request)
+    assertLocalOwner(database, autoDispatchMatch[1], nodeIdentity.nodeId)
+    const value = await readJsonBody(request)
+    const version = parseExpectedVersionInput(value).expectedVersion
+    const input = parseIcepakProjectOperationInput(value)
+    const intent = await peerDispatcher.queueAutomaticBaseline(autoDispatchMatch[1], version, input)
+    autoDispatcher.wake()
+    writeJson(response, 202, { request: intent })
+    return
+  }
+  if (autoDispatchMatch && request.method === 'DELETE') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'automatic dispatch is local-only')
+    assertLocalWriteOrigin(request)
+    assertLocalOwner(database, autoDispatchMatch[1], nodeIdentity.nodeId)
+    writeJson(response, 200, { request: database.cancelAutoDispatch(autoDispatchMatch[1], nodeIdentity.nodeId) })
     return
   }
   const retryOfferMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/remote-baseline\/retry-offer$/iu)

@@ -31,6 +31,7 @@ import type {
   PeerIdentity,
   PeerRecord,
   RemoteJobRecord,
+  AutoDispatchRecord,
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
 
@@ -273,6 +274,21 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS remote_jobs_status_updated_idx
         ON remote_jobs(status, updated_at DESC);
 
+      CREATE TABLE IF NOT EXISTS auto_dispatch_requests (
+        task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+        input_sha256 TEXT NOT NULL REFERENCES artifacts(sha256),
+        parameters_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        selected_peer_node_id TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS auto_dispatch_status_created_idx
+        ON auto_dispatch_requests(status, created_at);
+
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
         skill_key TEXT NOT NULL UNIQUE,
@@ -371,6 +387,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (8, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (9, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -571,6 +590,121 @@ export class LocalDatabase {
 
   listRemoteJobs(): RemoteJobRecord[] {
     return (this.db.prepare('SELECT * FROM remote_jobs ORDER BY created_at DESC').all() as SqliteRow[]).map(decodeRemoteJob)
+  }
+
+  getAutoDispatch(taskId: string): AutoDispatchRecord | null {
+    const row = this.db.prepare('SELECT * FROM auto_dispatch_requests WHERE task_id = ?').get(taskId) as SqliteRow | undefined
+    return row ? decodeAutoDispatch(row) : null
+  }
+
+  listAutoDispatches(): AutoDispatchRecord[] {
+    return (this.db.prepare('SELECT * FROM auto_dispatch_requests ORDER BY created_at ASC').all() as SqliteRow[])
+      .map(decodeAutoDispatch)
+  }
+
+  enqueueAutoDispatch(taskId: string, ownerNodeId: string, expectedVersion: number,
+    inputSha256: string, parameters: Record<string, unknown>): AutoDispatchRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      if (!task) throw new TaskNotFoundError(taskId)
+      if (task.ownerNodeId !== ownerNodeId || task.executionStatus !== 'READY' ||
+        this.listTaskRuns(taskId).length > 0) throw new PeerConflictError('auto dispatch requires an owned READY task without a Run')
+      if (task.version !== expectedVersion) throw new VersionConflictError(expectedVersion, task.version)
+      if (!this.getArtifact(inputSha256)) throw new PeerConflictError('auto dispatch input snapshot is not stored')
+      const existing = this.getAutoDispatch(taskId)
+      if (existing?.status === 'WAITING') throw new PeerConflictError('auto dispatch is already waiting for a node')
+      const now = new Date().toISOString()
+      this.db.prepare(`
+        INSERT INTO auto_dispatch_requests(task_id, input_sha256, parameters_json, status,
+          selected_peer_node_id, error_code, error_message, created_at, updated_at)
+        VALUES (?, ?, ?, 'WAITING', NULL, NULL, NULL, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET input_sha256 = excluded.input_sha256,
+          parameters_json = excluded.parameters_json, status = 'WAITING', selected_peer_node_id = NULL,
+          error_code = NULL, error_message = NULL, updated_at = excluded.updated_at
+      `).run(taskId, inputSha256, JSON.stringify(parameters), now, now)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'task.auto_dispatch_requested',
+        fromStatus: 'READY', toStatus: 'READY', reason: '用户明确授权自动派发一次 Baseline',
+        payload: { inputSha256, parameters }, createdAt: now })
+      this.db.exec('COMMIT')
+      return this.getAutoDispatch(taskId) as AutoDispatchRecord
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  cancelAutoDispatch(taskId: string, ownerNodeId: string): AutoDispatchRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      const intent = this.getAutoDispatch(taskId)
+      if (!task || task.ownerNodeId !== ownerNodeId || task.executionStatus !== 'READY' ||
+        this.listTaskRuns(taskId).length > 0 || intent?.status !== 'WAITING') {
+        throw new PeerConflictError('only a waiting, not-yet-dispatched request can be cancelled')
+      }
+      const now = new Date().toISOString()
+      this.db.prepare(`UPDATE auto_dispatch_requests SET status = 'CANCELLED', updated_at = ? WHERE task_id = ?`)
+        .run(now, taskId)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'task.auto_dispatch_cancelled',
+        fromStatus: 'READY', toStatus: 'READY', reason: '用户撤销自动派发授权', payload: {}, createdAt: now })
+      this.db.exec('COMMIT')
+      return this.getAutoDispatch(taskId) as AutoDispatchRecord
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  recordAutoDispatchDelivery(taskId: string, peerNodeId: string, delivered: boolean, errorMessage?: string): AutoDispatchRecord {
+    const intent = this.getAutoDispatch(taskId)
+    const task = this.getTask(taskId)
+    const attempt = this.listTaskRuns(taskId).at(-1)?.id
+    const latest = attempt ? this.listRunAttempts(attempt).at(-1) : null
+    if (intent?.status !== 'WAITING' || !task ||
+      !['QUEUED', 'LEASED', 'RUNNING', 'WAITING_FOR_APPROVAL', 'COMPLETED', 'FAILED', 'ESCALATED'].includes(task.executionStatus) ||
+      latest?.executorNodeId !== peerNodeId || latest.inputArtifactSha256 !== intent.inputSha256) {
+      throw new PeerConflictError('auto dispatch delivery no longer matches the prepared task')
+    }
+    this.db.prepare(`UPDATE auto_dispatch_requests SET status = ?, selected_peer_node_id = ?,
+      error_code = ?, error_message = ?, updated_at = ? WHERE task_id = ? AND status = 'WAITING'`)
+      .run(delivered ? 'DELIVERED' : 'WAITING', peerNodeId, delivered ? null : 'OFFER_DELIVERY_FAILED',
+        delivered ? null : errorMessage?.slice(0, 2_000) ?? 'Offer was not accepted', new Date().toISOString(), taskId)
+    return this.getAutoDispatch(taskId) as AutoDispatchRecord
+  }
+
+  failAutoDispatch(taskId: string, code: string, message: string): AutoDispatchRecord {
+    const updated = this.db.prepare(`UPDATE auto_dispatch_requests SET status = 'FAILED', error_code = ?,
+      error_message = ?, updated_at = ? WHERE task_id = ? AND status = 'WAITING'`)
+      .run(code.slice(0, 100), message.slice(0, 2_000), new Date().toISOString(), taskId)
+    if (Number(updated.changes) !== 1) throw new PeerConflictError('auto dispatch request is no longer waiting')
+    return this.getAutoDispatch(taskId) as AutoDispatchRecord
+  }
+
+  exhaustQueuedAutoDispatch(taskId: string, ownerNodeId: string): AutoDispatchRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      const intent = this.getAutoDispatch(taskId)
+      const run = this.listTaskRuns(taskId).at(-1)
+      const attempts = run ? this.listRunAttempts(run.id) : []
+      const latest = attempts.at(-1)
+      if (!task || task.ownerNodeId !== ownerNodeId || task.executionStatus !== 'QUEUED' ||
+        intent?.status !== 'WAITING' || !run || run.status !== 'PLANNED' ||
+        attempts.length < 3 || latest?.status !== 'QUEUED' ||
+        this.listTaskLeases(taskId).some(lease => lease.status === 'ACTIVE' && Date.parse(lease.expiresAt) > Date.now())) {
+        throw new PeerConflictError('automatic dispatch reassignment limit cannot be applied to this task')
+      }
+      const now = new Date().toISOString()
+      this.db.prepare(`UPDATE attempts SET status = 'CANCELLED', progress_stage = 'reassignment_limit',
+        error_code = 'AUTO_REASSIGN_LIMIT', error_message = 'Three executor attempts were exhausted',
+        finished_at = ?, updated_at = ? WHERE id = ?`).run(now, now, latest.id)
+      this.db.prepare(`UPDATE runs SET status = 'FAILED', updated_at = ? WHERE id = ?`).run(now, run.id)
+      this.db.prepare(`UPDATE tasks SET execution_status = 'ESCALATED', executor_node_id = NULL,
+        version = ?, updated_at = ? WHERE id = ?`).run(task.version + 1, now, task.id)
+      this.db.prepare(`UPDATE auto_dispatch_requests SET status = 'FAILED', error_code = 'AUTO_REASSIGN_LIMIT',
+        error_message = 'Three executor attempts were exhausted; manual review is required', updated_at = ?
+        WHERE task_id = ?`).run(now, taskId)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'task.auto_dispatch_exhausted',
+        fromStatus: 'QUEUED', toStatus: 'ESCALATED', reason: '三个执行节点 Attempt 均未能启动，需人工处理',
+        payload: { runId: run.id, attemptIds: attempts.map(item => item.id) }, createdAt: now })
+      this.db.exec('COMMIT')
+      return this.getAutoDispatch(taskId) as AutoDispatchRecord
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
   acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'solvedSha256' | 'resultSha256' | 'convergenceSha256' | 'errorCode' | 'errorMessage' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
@@ -1079,6 +1213,51 @@ export class LocalDatabase {
     }
   }
 
+  reassignQueuedRemoteBaseline(taskId: string, ownerNodeId: string, nextExecutorNodeId: string,
+    expectedVersion: number, inputSha256: string): { task: TaskRecord; run: RunRecord; attempt: AttemptRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      const run = this.listTaskRuns(taskId).at(-1)
+      const attempts = run ? this.listRunAttempts(run.id) : []
+      const previous = attempts.at(-1)
+      if (!task || task.ownerNodeId !== ownerNodeId || task.executionStatus !== 'QUEUED' ||
+        !run || run.kind !== 'BASELINE' || run.status !== 'PLANNED' ||
+        !previous || previous.status !== 'QUEUED' || previous.inputArtifactSha256 !== inputSha256 ||
+        previous.executorNodeId === nextExecutorNodeId ||
+        this.getAutoDispatch(taskId)?.status !== 'WAITING' ||
+        attempts.length >= 3 ||
+        this.listTaskLeases(taskId).some(lease => lease.status === 'ACTIVE' && Date.parse(lease.expiresAt) > Date.now()) ||
+        !this.listAvailablePeers(typeof previous.parameters.version === 'string' ? previous.parameters.version : undefined)
+          .some(peer => peer.nodeId === nextExecutorNodeId)) {
+        throw new PeerConflictError('queued remote Baseline cannot be reassigned to this executor')
+      }
+      if (task.version !== expectedVersion) throw new VersionConflictError(expectedVersion, task.version)
+      const now = new Date().toISOString()
+      const attemptId = randomUUID()
+      this.db.prepare(`UPDATE attempts SET status = 'CANCELLED', progress_stage = 'peer_reassigned',
+        error_code = 'PEER_REASSIGNED', error_message = 'Previous executor became unavailable before starting',
+        finished_at = ?, updated_at = ? WHERE id = ?`).run(now, now, previous.id)
+      this.db.prepare(`INSERT INTO attempts(
+        id, run_id, executor_node_id, status, plugin_id, plugin_version, parameters_json,
+        progress_stage, input_artifact_sha256, output_artifact_sha256, started_at,
+        heartbeat_at, finished_at, error_code, error_message, created_at, updated_at
+      ) VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)`)
+        .run(attemptId, run.id, nextExecutorNodeId, previous.pluginId, previous.pluginVersion,
+          JSON.stringify(previous.parameters), inputSha256, now, now)
+      this.db.prepare(`INSERT INTO attempt_artifacts(attempt_id, sha256, role, created_at)
+        VALUES (?, ?, 'INPUT_PROJECT', ?)`).run(attemptId, inputSha256, now)
+      this.db.prepare(`UPDATE tasks SET version = ?, updated_at = ? WHERE id = ? AND version = ?`)
+        .run(task.version + 1, now, taskId, task.version)
+      this.insertEvent({ id: randomUUID(), taskId, eventType: 'run.remote_baseline_reassigned',
+        fromStatus: 'QUEUED', toStatus: 'QUEUED', reason: '原节点未启动，改派兼容空闲节点',
+        payload: { runId: run.id, previousAttemptId: previous.id, attemptId, nextExecutorNodeId }, createdAt: now })
+      this.db.exec('COMMIT')
+      return { task: this.getTask(taskId) as TaskRecord, run: this.getRun(run.id) as RunRecord,
+        attempt: this.getAttempt(attemptId) as AttemptRecord }
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
   retryRun(runId: string, expectedTaskVersion: number): { run: RunRecord; attempt: AttemptRecord; task: TaskRecord } {
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -1161,7 +1340,7 @@ export class LocalDatabase {
   }
 
   listRunAttempts(runId: string): AttemptRecord[] {
-    const rows = this.db.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at ASC').all(runId) as SqliteRow[]
+    const rows = this.db.prepare('SELECT * FROM attempts WHERE run_id = ? ORDER BY created_at ASC, rowid ASC').all(runId) as SqliteRow[]
     return rows.map(decodeAttempt)
   }
 
@@ -1769,6 +1948,17 @@ function decodeRemoteJob(row: SqliteRow): RemoteJobRecord {
     convergenceSha256: row.convergence_sha256 === null || row.convergence_sha256 === undefined ? null : String(row.convergence_sha256),
     errorCode: row.error_code === null || row.error_code === undefined ? null : String(row.error_code),
     errorMessage: row.error_message === null || row.error_message === undefined ? null : String(row.error_message),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  }
+}
+
+function decodeAutoDispatch(row: SqliteRow): AutoDispatchRecord {
+  return {
+    taskId: String(row.task_id), inputSha256: String(row.input_sha256),
+    parameters: parseObject(row.parameters_json), status: row.status as AutoDispatchRecord['status'],
+    selectedPeerNodeId: row.selected_peer_node_id === null ? null : String(row.selected_peer_node_id),
+    errorCode: row.error_code === null ? null : String(row.error_code),
+    errorMessage: row.error_message === null ? null : String(row.error_message),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   }
 }

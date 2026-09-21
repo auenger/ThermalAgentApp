@@ -12,7 +12,7 @@
 - [x] 执行状态、热判定和审批状态分离。
 - [x] Icepak 插件 Manifest 和版本化 RPC 契约。
 - [x] Run 与 Attempt 本地执行契约、状态、心跳和结果选择。
-- [ ] Lease 和 Peer 网络协议完整定义（已有持久身份、信任登记、能力快照、租约栅栏和加密续租原语；派单/执行/结果协议未完成）。
+- [ ] Lease 和 Peer 网络协议完整定义（身份、信任、租约、输入/结果、远程 Baseline 和自动派单已有实现；版本协商、磁盘资源声明与正式协议安全审计未完成）。
 - [x] Skill、Skill Version 和人工审核契约定义。
 
 ## 阶段 1：单机桌面闭环
@@ -68,7 +68,7 @@
 - [x] 显式 LAN 发布下的签名 UDP 组播节点发现、30 秒时效与重放防护（待 Windows 双机和防火墙验收）。
 - [x] 持久节点身份、本机手动信任登记、双向签名身份握手及短时 X25519/AES-GCM 加密通道；加密 ping、Offer、租约续期与当前租约授权的输入下载、结果上传原语已验证，自动配对待实现。
 - [ ] 可用于自动调度的真实 Icepak 能力心跳（签名 UDP 心跳、持久快照、30 秒新鲜度和负载选择已接通；显式深度探测可证明 `LAUNCHABLE`，但求解许可证、项目兼容性和自动刷新仍未验证，因此不会宣告 `READY` 或容量）。
-- [ ] Owner、Executor、Attempt 和 Lease 远程协调（显式派单后的模拟双 App Baseline 已完成输入暂存、受管插件运行、续租、结果同步和 Owner 审批 Gate；自动空闲节点调度、真实 Windows 双机验收与崩溃后失败通知待完成）。
+- [ ] Owner、Executor、Attempt 和 Lease 远程协调（显式派单及经用户授权的持久自动队列，已在模拟双/三 App 中验证等待、重启恢复、空闲节点选择、租约失效后改派、受管求解和 Owner 审批 Gate；真实 Windows 双机验收与崩溃后即时失败通知待完成）。
 - [ ] Artifact 分块传输和断点续传（输入与结果已接入远程 Baseline 流程，并验证部分文件恢复和 SHA；空间预留/限速、真实大工程与 Windows 双机验证待完成）。
 - [ ] 网络分区、租约超时和迟到结果处理。
 
@@ -109,13 +109,14 @@ pnpm dev:core
 - 持久 Ed25519 节点身份、API Owner 防伪、旧任务迁移、手动信任/撤销、能力新鲜度与负载筛选、单活租约/epoch 栅栏及分区后的保守升级。
 - 签名 UDP beacon 的公钥/指纹、时间窗、nonce 重放和容量验证；真实本机 UDP 收包、可信/未登记/撤销节点区分；LAN 发布启停联动。
 - 双向 Ed25519 挑战应答、30 秒时窗与 nonce 防重放、撤销信任后的握手拒绝；此握手仅交换身份元数据，不授予工程/任务传输权限。
-- Ed25519 签名临时 X25519 公钥、HKDF 派生双向独立 AES-256-GCM 会话密钥；消息序号、AAD、完整性标签和短时会话过期；双 App 加密 ping 与非授权操作拒绝。当前仅新增租约授权的输入 Artifact 分块读取，不开放其他工程或任务操作；协议尚未经过外部安全审计。
+- Ed25519 签名临时 X25519 公钥、HKDF 派生双向独立 AES-256-GCM 会话密钥；消息序号、AAD、完整性标签和短时会话过期；双 App 加密 ping 与非授权操作拒绝。现已开放受当前租约约束的输入、结果、Offer、续租和 Baseline 状态操作；协议尚未经过外部安全审计。
 - 双 App 加密输入下载：绑定 Owner、Executor、最新 Run/Attempt、当前 Lease/epoch 和 `INPUT_PROJECT` SHA；128 KiB 分块、部分文件续传、最终 SHA 校验及错误部分文件清理。测试覆盖错误执行节点、错误 SHA、旧 epoch、撤销信任和损坏续传文件；尚未接入自动调度。
-- 当前 Executor 可通过加密会话续租 60 秒；Owner 核验设备身份、Task Owner、Lease/epoch、最新 Run/Attempt 及非终止状态。测试覆盖错误节点、旧 epoch、终止 Attempt 与撤销信任；尚无长任务自动续租循环。
+- Executor 通过加密会话每 20 秒续租，Owner 核验设备身份、Task Owner、Lease/epoch、最新 Run/Attempt 及非终止状态。测试覆盖错误节点、旧 epoch、终止 Attempt 与撤销信任；真实长时间 Windows 求解仍待验收。
 - Executor 远程接单默认关闭，可经本机“计算节点”页或 API 显式开启；可信 Owner 的加密 Baseline Offer 需通过本机 Icepak READY/能力/版本、空闲槽位与目标节点校验，SQLite 按 Attempt 幂等保存并展示收件记录。
 - Owner 可通过本机 Task API/UI 从签名发现的 READY 空闲节点中显式派发 Baseline：输入快照、Run/Attempt/Artifact/QUEUED 原子准备、租约领取、加密 Offer、失败重发及未执行旧租约的 epoch 更新均有双 App 测试。
 - Executor 收到 Offer 后会在可信 Owner 被发现时自动续租并拉取输入，支持中断续传和完整 SHA 校验；`remote_jobs` 用 Lease ID/epoch 栅栏进入 `INPUT_READY`。测试覆盖租约过期后新 epoch 再验输入。
 - Executor 到 Owner 的结果分块上传已接入远程 Baseline：加密会话、定期续租、可恢复部分文件、最终 SHA 校验、当前 Lease/epoch 与最新 Attempt 校验、SQLite 原子关联及重复确认。双 App 测试覆盖损坏文件、错误节点/epoch、终止 Attempt 和部分块恢复。
 - 默认启用的远程执行处理器已接通 `INPUT_READY → RUNNING → SYNCING_RESULTS → COMPLETED`：调用受管 Icepak 插件，持久化结果 SHA，Owner 校验必要证据并原子完成 Attempt/Run、请求人工审批及释放租约。模拟双 App 端到端测试通过；真实 Windows READY/许可证和双机验收仍缺，不能宣称生产可用。
+- 自动派单需用户在本机单独授权；SQLite 持久保存待派发意图、输入 SHA 和求解参数。模拟测试覆盖无节点等待、Owner 重启、源文件变化不影响快照、授权撤销、空闲节点自动接单，以及首节点租约被撤销后的跨节点改派。真实 READY 心跳仍缺，因此生产环境尚不能依赖自动调度。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

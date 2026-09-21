@@ -26,6 +26,9 @@ export class IcepakExecutionManager {
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
     if (task.executionStatus !== 'READY') throw new Error('task must be READY before starting a baseline run')
+    if (this.database.getAutoDispatch(taskId)?.status === 'WAITING') {
+      throw new Error('cancel the waiting automatic remote dispatch before starting a local baseline')
+    }
 
     const inputArtifact = await this.artifacts.importFile(input.projectPath)
     this.database.upsertArtifact(inputArtifact)
