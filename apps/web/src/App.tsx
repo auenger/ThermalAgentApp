@@ -26,7 +26,7 @@ import {
   WeatherSunny20Regular,
   WeatherMoon20Regular,
 } from '@fluentui/react-icons'
-import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, PeerIdentity, PeerRecord, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
+import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, PeerIdentity, PeerRecord, RemoteJobRecord, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
 
 const brand: BrandVariants = {
   10: '#130903', 20: '#281006', 30: '#421706', 40: '#5c2009', 50: '#742b10',
@@ -590,6 +590,8 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
   const [local, setLocal] = useState<PeerIdentity | null>(null)
   const [peers, setPeers] = useState<PeerRecord[]>([])
   const [discovery, setDiscovery] = useState<DiscoveryStatus | null>(null)
+  const [remoteEnabled, setRemoteEnabled] = useState(false)
+  const [remoteJobs, setRemoteJobs] = useState<RemoteJobRecord[]>([])
   const [displayName, setDisplayName] = useState('')
   const [nodeId, setNodeId] = useState('')
   const [publicKey, setPublicKey] = useState('')
@@ -604,13 +606,21 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
       if (!identityResponse.ok || !identityBody.node) throw new Error(identityBody.error?.message ?? '本机身份读取失败')
       setLocal(identityBody.node)
       if (!isLanClient) {
-        const [peerResponse, discoveryResponse] = await Promise.all([fetch('/api/nodes/peers'), fetch('/api/nodes/discovery')])
+        const [peerResponse, discoveryResponse, remoteResponse] = await Promise.all([
+          fetch('/api/nodes/peers'), fetch('/api/nodes/discovery'), fetch('/api/nodes/remote-execution'),
+        ])
         const peerBody = await peerResponse.json() as { peers?: PeerRecord[]; error?: { message?: string } }
         if (!peerResponse.ok || !peerBody.peers) throw new Error(peerBody.error?.message ?? '可信节点读取失败')
         setPeers(peerBody.peers)
         const discoveryBody = await discoveryResponse.json() as { discovery?: DiscoveryStatus; error?: { message?: string } }
         if (!discoveryResponse.ok || !discoveryBody.discovery) throw new Error(discoveryBody.error?.message ?? '节点发现状态读取失败')
         setDiscovery(discoveryBody.discovery)
+        const remoteBody = await remoteResponse.json() as { enabled?: boolean; jobs?: RemoteJobRecord[]; error?: { message?: string } }
+        if (!remoteResponse.ok || typeof remoteBody.enabled !== 'boolean' || !remoteBody.jobs) {
+          throw new Error(remoteBody.error?.message ?? '远程接单状态读取失败')
+        }
+        setRemoteEnabled(remoteBody.enabled)
+        setRemoteJobs(remoteBody.jobs)
       }
       setError('')
     } catch (reason) { setError(reason instanceof Error ? reason.message : '节点读取失败') }
@@ -670,13 +680,33 @@ function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
     finally { setBusy(false) }
   }
 
+  async function toggleRemoteExecution() {
+    setBusy(true); setError('')
+    try {
+      const response = await fetch('/api/nodes/remote-execution', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !remoteEnabled }),
+      })
+      const body = await response.json() as { enabled?: boolean; error?: { message?: string } }
+      if (!response.ok || typeof body.enabled !== 'boolean') throw new Error(body.error?.message ?? '远程接单设置失败')
+      setRemoteEnabled(body.enabled)
+      await refresh()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '远程接单设置失败') }
+    finally { setBusy(false) }
+  }
+
   return <>
-    <div className={styles.intro}><div><h1 className={styles.title}>计算节点</h1><p className={styles.subtitle}>每台 App 有独立且持久的 Ed25519 身份。开启局域网发布后可签名发现附近节点；加密传输和跨机求解尚未启用。</p></div></div>
+    <div className={styles.intro}><div><h1 className={styles.title}>计算节点</h1><p className={styles.subtitle}>每台 App 有独立且持久的 Ed25519 身份。开启局域网发布后可签名发现附近节点；加密输入传输与任务收件协议已接入，跨机求解尚未完成。</p></div></div>
     <section className={styles.settingsGrid}>
       <div className={styles.panel}><h2 className={styles.panelTitle}><DesktopPulse20Regular />本机身份</h2>{local ? <div className={styles.resultGrid} style={{ gridTemplateColumns: '1fr' }}><ResultItem styles={styles} label="Node ID / 指纹" value={local.nodeId} /><ResultItem styles={styles} label="公钥（可在另一台 App 手动登记）" value={local.publicKey} /></div> : <Spinner label="正在读取本机身份" />}</div>
       <div className={styles.panel}><h2 className={styles.panelTitle}>可信节点登记</h2>{isLanClient ? <p className={styles.placeholder}>节点信任只能在运行 App 的本机电脑上管理。</p> : <><p className={styles.details}>请通过可信的线下方式核对对方 Node ID 与公钥。登记后可验证对方当前是否持有私钥，但不会自动分配任务；远程执行仍需加密传输。</p><form className={styles.form} onSubmit={pair}><Field label="设备名称" required><Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} /></Field><Field label="对方 Node ID" required><Input value={nodeId} onChange={(_, data) => setNodeId(data.value)} /></Field><Field label="对方公钥" required><Input value={publicKey} onChange={(_, data) => setPublicKey(data.value)} /></Field><Button type="submit" appearance="primary" disabled={busy || !displayName.trim() || !nodeId.trim() || !publicKey.trim()}>登记可信节点</Button></form></>}</div>
     </section>
-    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>局域网发现</h2><p className={styles.details}>{discovery?.enabled ? `已开启 · UDP ${discovery.group}:${discovery.udpPort}` : '未开启；请先在设置中开启局域网发布'}{discovery?.lastError ? ` · ${discovery.lastError}` : ''}</p>{discovery?.discovered.length ? <div className={styles.skillList}>{discovery.discovered.map(peer => <div key={peer.identity.nodeId} className={styles.statusRow}><div><strong>{peer.identity.nodeId}</strong><div className={styles.details}>{peer.address}:{peer.servicePort} · Icepak {peer.heartbeat.pluginStatus} · 负载 {peer.heartbeat.activeAttempts}/{peer.heartbeat.maxConcurrent} · {peer.heartbeat.aedtVersions.join(', ') || '未知 AEDT 版本'}</div>{peer.trusted && verifiedPeers[peer.identity.nodeId] && <div className={styles.details}>最近身份握手：{new Date(verifiedPeers[peer.identity.nodeId]).toLocaleString()}</div>}{peer.trusted && securePeers[peer.identity.nodeId] && Date.parse(securePeers[peer.identity.nodeId]) > Date.now() && <div className={styles.details}>临时加密会话至 {new Date(securePeers[peer.identity.nodeId]).toLocaleTimeString()}（仅开放 ping）</div>}</div><div className={styles.headerActions}><Badge color={peer.trusted ? 'success' : 'warning'}>{peer.trusted ? '可信签名' : '未登记'}</Badge>{peer.trusted ? <><Button size="small" disabled={busy} onClick={() => void verifyPeer(peer.identity.nodeId)}>验证身份</Button><Button size="small" disabled={busy} onClick={() => void connectPeer(peer.identity.nodeId)}>测试加密通道</Button></> : <Button size="small" onClick={() => { setNodeId(peer.identity.nodeId); setPublicKey(peer.identity.publicKey); setDisplayName(peer.identity.nodeId) }}>填入登记</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有发现其他 App。两台电脑需在同一局域网开启发布，且网络允许 UDP 组播。</p>}</div>}
+    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}>
+      <div className={styles.statusRow} style={{ marginTop: 0 }}><div><h2 className={styles.panelTitle}>远程任务接单</h2><p className={styles.details}>默认关闭。开启后仅接收已登记可信节点的加密 Baseline Offer，并要求本机 Icepak 真正 READY；当前只保存待处理记录，不下载工程或启动求解。</p></div><Badge color={remoteEnabled ? 'warning' : 'informative'}>{remoteEnabled ? '已开启' : '已关闭'}</Badge></div>
+      <Button appearance={remoteEnabled ? 'secondary' : 'primary'} disabled={busy} onClick={() => void toggleRemoteExecution()}>{remoteEnabled ? '停止远程接单' : '显式开启远程接单'}</Button>
+      {remoteJobs.length > 0 && <div className={styles.skillList}>{remoteJobs.map(job => <div key={job.attemptId} className={styles.statusRow}><div><strong>{job.taskId}</strong><div className={styles.details}>Owner {job.ownerNodeId} · Attempt {job.attemptId} · 输入 {job.inputOriginalName}</div></div><Badge>{job.status}</Badge></div>)}</div>}
+    </div>}
+    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>局域网发现</h2><p className={styles.details}>{discovery?.enabled ? `已开启 · UDP ${discovery.group}:${discovery.udpPort}` : '未开启；请先在设置中开启局域网发布'}{discovery?.lastError ? ` · ${discovery.lastError}` : ''}</p>{discovery?.discovered.length ? <div className={styles.skillList}>{discovery.discovered.map(peer => <div key={peer.identity.nodeId} className={styles.statusRow}><div><strong>{peer.identity.nodeId}</strong><div className={styles.details}>{peer.address}:{peer.servicePort} · Icepak {peer.heartbeat.pluginStatus} · 负载 {peer.heartbeat.activeAttempts}/{peer.heartbeat.maxConcurrent} · {peer.heartbeat.aedtVersions.join(', ') || '未知 AEDT 版本'}</div>{peer.trusted && verifiedPeers[peer.identity.nodeId] && <div className={styles.details}>最近身份握手：{new Date(verifiedPeers[peer.identity.nodeId]).toLocaleString()}</div>}{peer.trusted && securePeers[peer.identity.nodeId] && Date.parse(securePeers[peer.identity.nodeId]) > Date.now() && <div className={styles.details}>临时加密会话至 {new Date(securePeers[peer.identity.nodeId]).toLocaleTimeString()}（可测试 ping；其他操作仍需任务租约）</div>}</div><div className={styles.headerActions}><Badge color={peer.trusted ? 'success' : 'warning'}>{peer.trusted ? '可信签名' : '未登记'}</Badge>{peer.trusted ? <><Button size="small" disabled={busy} onClick={() => void verifyPeer(peer.identity.nodeId)}>验证身份</Button><Button size="small" disabled={busy} onClick={() => void connectPeer(peer.identity.nodeId)}>测试加密通道</Button></> : <Button size="small" onClick={() => { setNodeId(peer.identity.nodeId); setPublicKey(peer.identity.publicKey); setDisplayName(peer.identity.nodeId) }}>填入登记</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有发现其他 App。两台电脑需在同一局域网开启发布，且网络允许 UDP 组播。</p>}</div>}
     {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>已登记节点</h2>{peers.length ? <div className={styles.skillList}>{peers.map(peer => <div key={peer.nodeId} className={styles.statusRow}><div><strong>{peer.displayName}</strong><div className={styles.details}>{peer.nodeId} · {peer.pluginStatus} · {peer.lastSeenAt ?? '尚无能力心跳'}</div></div><div className={styles.headerActions}><Badge color={peer.trustStatus === 'TRUSTED' ? 'success' : 'danger'}>{peer.trustStatus}</Badge>{peer.trustStatus === 'TRUSTED' && <Button size="small" disabled={busy} onClick={() => void revoke(peer)}>撤销信任</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有登记其他计算节点。</p>}</div>}
     {error && <p className={styles.error}>{error}</p>}
   </>

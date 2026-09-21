@@ -21,6 +21,7 @@ import { PeerAuth, PeerAuthError } from './peer-auth.js'
 import { PeerSecureChannel, PeerSecureError } from './peer-secure-channel.js'
 import { PeerArtifactError, PeerArtifactTransfer } from './peer-artifact-transfer.js'
 import { PeerLeaseControl, PeerLeaseError } from './peer-lease-control.js'
+import { PeerTaskInbox, PeerTaskError } from './peer-task-inbox.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -92,6 +93,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerSecure = new PeerSecureChannel(nodeIdentity, database)
   const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
   const peerLeases = new PeerLeaseControl(nodeIdentity.nodeId, database)
+  const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -102,7 +104,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, peerTasks, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -147,6 +149,7 @@ async function route(
   peerSecure: PeerSecureChannel,
   peerArtifacts: PeerArtifactTransfer,
   peerLeases: PeerLeaseControl,
+  peerTasks: PeerTaskInbox,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -176,6 +179,8 @@ async function route(
       reply = await peerArtifacts.readLeasedInput(decrypted.peerNodeId, message)
     } else if (isObject(message) && message.operation === 'lease.renew') {
       reply = peerLeases.renewForExecutor(decrypted.peerNodeId, message)
+    } else if (isObject(message) && message.operation === 'task.baseline.offer') {
+      reply = await peerTasks.receive(decrypted.peerNodeId, message)
     } else {
       throw new PeerSecureError('OPERATION_DENIED', 'peer operation is not enabled')
     }
@@ -190,6 +195,20 @@ async function route(
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer discovery state is local-only')
     writeJson(response, 200, { discovery: discovery.status() })
     return
+  }
+  if (url.pathname === '/api/nodes/remote-execution') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'remote execution settings are local-only')
+    if (request.method === 'GET') {
+      writeJson(response, 200, { enabled: database.remoteExecutionEnabled(), jobs: database.listRemoteJobs() })
+      return
+    }
+    if (request.method === 'POST') {
+      assertLocalWriteOrigin(request)
+      const value = await readJsonBody(request, 1_024)
+      if (!isObject(value) || typeof value.enabled !== 'boolean') throw new RequestError(400, 'INVALID_SETTING', 'enabled must be boolean')
+      writeJson(response, 200, { enabled: database.setRemoteExecutionEnabled(value.enabled) })
+      return
+    }
   }
   if (url.pathname === '/api/nodes/peers') {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer trust can only be managed from the local App')
@@ -579,6 +598,11 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PeerTaskError) {
+    const status = error.code === 'OFFER_NOT_AUTHORIZED' ? 403 : error.code === 'INVALID_OFFER' ? 400 : 409
+    writeJson(response, status, { error: { code: error.code, message: error.message } })
+    return
+  }
   if (error instanceof PeerLeaseError) {
     writeJson(response, error.code === 'LEASE_NOT_AUTHORIZED' ? 403 : 400,
       { error: { code: error.code, message: error.message } })

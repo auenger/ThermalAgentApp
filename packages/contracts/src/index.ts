@@ -209,6 +209,23 @@ export interface LeaseRecord {
   revokeReason: string | null
 }
 
+export interface RemoteJobRecord {
+  attemptId: string
+  taskId: string
+  runId: string
+  ownerNodeId: string
+  executorNodeId: string
+  leaseId: string
+  epoch: number
+  inputSha256: string
+  inputSizeBytes: number
+  inputOriginalName: string
+  parameters: Record<string, unknown>
+  status: 'OFFERED' | 'TRANSFERRING' | 'RUNNING' | 'SYNCING_RESULTS' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  createdAt: string
+  updatedAt: string
+}
+
 export interface CreateTaskInput {
   title: string
   description: string

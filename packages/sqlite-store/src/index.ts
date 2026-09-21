@@ -30,6 +30,7 @@ import type {
   PeerHeartbeat,
   PeerIdentity,
   PeerRecord,
+  RemoteJobRecord,
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
 
@@ -239,6 +240,34 @@ export class LocalDatabase {
         PRIMARY KEY(attempt_id, sha256, role)
       );
 
+      CREATE TABLE IF NOT EXISTS remote_execution_settings (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1))
+      );
+
+      INSERT OR IGNORE INTO remote_execution_settings(singleton, enabled) VALUES (1, 0);
+
+      CREATE TABLE IF NOT EXISTS remote_jobs (
+        attempt_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        owner_node_id TEXT NOT NULL,
+        executor_node_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        epoch INTEGER NOT NULL,
+        input_sha256 TEXT NOT NULL,
+        input_size_bytes INTEGER NOT NULL,
+        input_original_name TEXT NOT NULL,
+        parameters_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(owner_node_id, task_id, epoch)
+      );
+
+      CREATE INDEX IF NOT EXISTS remote_jobs_status_updated_idx
+        ON remote_jobs(status, updated_at DESC);
+
       CREATE TABLE IF NOT EXISTS skills (
         id TEXT PRIMARY KEY,
         skill_key TEXT NOT NULL UNIQUE,
@@ -328,6 +357,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (5, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (6, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -504,6 +536,63 @@ export class LocalDatabase {
 
   listTaskLeases(taskId: string): LeaseRecord[] {
     return (this.db.prepare('SELECT * FROM leases WHERE task_id = ? ORDER BY epoch ASC').all(taskId) as SqliteRow[]).map(decodeLease)
+  }
+
+  remoteExecutionEnabled(): boolean {
+    const row = this.db.prepare('SELECT enabled FROM remote_execution_settings WHERE singleton = 1').get() as SqliteRow
+    return Number(row.enabled) === 1
+  }
+
+  setRemoteExecutionEnabled(enabled: boolean): boolean {
+    this.db.prepare('UPDATE remote_execution_settings SET enabled = ? WHERE singleton = 1').run(enabled ? 1 : 0)
+    return this.remoteExecutionEnabled()
+  }
+
+  getRemoteJob(attemptId: string): RemoteJobRecord | null {
+    const row = this.db.prepare('SELECT * FROM remote_jobs WHERE attempt_id = ?').get(attemptId) as SqliteRow | undefined
+    return row ? decodeRemoteJob(row) : null
+  }
+
+  listRemoteJobs(): RemoteJobRecord[] {
+    return (this.db.prepare('SELECT * FROM remote_jobs ORDER BY created_at DESC').all() as SqliteRow[]).map(decodeRemoteJob)
+  }
+
+  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const existing = this.getRemoteJob(input.attemptId)
+      if (existing) {
+        const same = existing.taskId === input.taskId && existing.runId === input.runId &&
+          existing.ownerNodeId === input.ownerNodeId && existing.executorNodeId === input.executorNodeId &&
+          existing.leaseId === input.leaseId && existing.epoch === input.epoch &&
+          existing.inputSha256 === input.inputSha256 && existing.inputSizeBytes === input.inputSizeBytes &&
+          existing.inputOriginalName === input.inputOriginalName &&
+          JSON.stringify(existing.parameters) === JSON.stringify(input.parameters)
+        if (!same) throw new PeerConflictError('remote job attempt was offered with conflicting details')
+        this.db.exec('COMMIT')
+        return existing
+      }
+      const busy = this.db.prepare(`
+        SELECT attempt_id FROM remote_jobs
+        WHERE status IN ('OFFERED', 'TRANSFERRING', 'RUNNING', 'SYNCING_RESULTS') LIMIT 1
+      `).get() as SqliteRow | undefined
+      if (busy) throw new PeerConflictError('executor already has an active remote job')
+      const now = new Date().toISOString()
+      this.db.prepare(`
+        INSERT INTO remote_jobs(
+          attempt_id, task_id, run_id, owner_node_id, executor_node_id, lease_id, epoch,
+          input_sha256, input_size_bytes, input_original_name, parameters_json, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OFFERED', ?, ?)
+      `).run(input.attemptId, input.taskId, input.runId, input.ownerNodeId, input.executorNodeId,
+        input.leaseId, input.epoch, input.inputSha256, input.inputSizeBytes,
+        input.inputOriginalName, JSON.stringify(input.parameters), now, now)
+      const job = this.getRemoteJob(input.attemptId) as RemoteJobRecord
+      this.db.exec('COMMIT')
+      return job
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   claimQueuedTaskLease(
@@ -1398,6 +1487,18 @@ function decodeLease(row: SqliteRow): LeaseRecord {
     renewedAt: row.renewed_at === null ? null : String(row.renewed_at),
     releasedAt: row.released_at === null ? null : String(row.released_at),
     revokeReason: row.revoke_reason === null ? null : String(row.revoke_reason),
+  }
+}
+
+function decodeRemoteJob(row: SqliteRow): RemoteJobRecord {
+  return {
+    attemptId: String(row.attempt_id), taskId: String(row.task_id), runId: String(row.run_id),
+    ownerNodeId: String(row.owner_node_id), executorNodeId: String(row.executor_node_id),
+    leaseId: String(row.lease_id), epoch: Number(row.epoch),
+    inputSha256: String(row.input_sha256), inputSizeBytes: Number(row.input_size_bytes),
+    inputOriginalName: String(row.input_original_name), parameters: parseObject(row.parameters_json),
+    status: row.status as RemoteJobRecord['status'],
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   }
 }
 

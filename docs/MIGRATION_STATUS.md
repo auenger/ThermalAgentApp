@@ -68,7 +68,7 @@
 - [x] 显式 LAN 发布下的签名 UDP 组播节点发现、30 秒时效与重放防护（待 Windows 双机和防火墙验收）。
 - [x] 持久节点身份、本机手动信任登记、双向签名身份握手及短时 X25519/AES-GCM 加密通道；加密 ping 与当前租约授权的输入分块读取已验证，自动配对和其他 Task/Artifact 操作待实现。
 - [ ] 可用于自动调度的真实 Icepak 能力心跳（签名 UDP 心跳、持久快照、30 秒新鲜度和负载选择已接通；显式深度探测可证明 `LAUNCHABLE`，但求解许可证、项目兼容性和自动刷新仍未验证，因此不会宣告 `READY` 或容量）。
-- [ ] Owner、Executor、Attempt 和 Lease 远程协调（已有 Owner 绑定、原子 Lease/epoch/过期栅栏，以及当前 Executor 的加密续租；自动续租循环和远程执行未接线）。
+- [ ] Owner、Executor、Attempt 和 Lease 远程协调（已有 Owner 绑定、原子 Lease/epoch/过期栅栏、加密续租和默认关闭的 Executor 持久 Offer 收件箱；Owner 实际派单、自动续租与远程求解未接线）。
 - [ ] Artifact 分块传输和断点续传（已实现 Owner 到 Executor 的租约授权输入分块拉取、部分文件续传与完整 SHA 校验；结果回传、自动派单接线和 Windows 双机验证待完成）。
 - [ ] 网络分区、租约超时和迟到结果处理。
 
@@ -112,5 +112,6 @@ pnpm dev:core
 - Ed25519 签名临时 X25519 公钥、HKDF 派生双向独立 AES-256-GCM 会话密钥；消息序号、AAD、完整性标签和短时会话过期；双 App 加密 ping 与非授权操作拒绝。当前仅新增租约授权的输入 Artifact 分块读取，不开放其他工程或任务操作；协议尚未经过外部安全审计。
 - 双 App 加密输入下载：绑定 Owner、Executor、最新 Run/Attempt、当前 Lease/epoch 和 `INPUT_PROJECT` SHA；128 KiB 分块、部分文件续传、最终 SHA 校验及错误部分文件清理。测试覆盖错误执行节点、错误 SHA、旧 epoch、撤销信任和损坏续传文件；尚未接入自动调度。
 - 当前 Executor 可通过加密会话续租 60 秒；Owner 核验设备身份、Task Owner、Lease/epoch、最新 Run/Attempt 及非终止状态。测试覆盖错误节点、旧 epoch、终止 Attempt 与撤销信任；尚无长任务自动续租循环。
+- Executor 远程接单默认关闭，可经本机“计算节点”页或 API 显式开启；可信 Owner 的加密 Baseline Offer 需通过本机 Icepak READY/能力/版本、空闲槽位与目标节点校验，SQLite 按 Attempt 幂等保存并展示收件记录。此阶段不下载工程、不启动求解，Owner 派单与完整远程执行仍待实现。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。
