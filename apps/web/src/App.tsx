@@ -154,6 +154,18 @@ export function App() {
 
   useEffect(() => { void refresh() }, [refresh])
 
+  useEffect(() => {
+    const events = new EventSource('/api/events')
+    const snapshot = (event: MessageEvent<string>) => {
+      try {
+        const value = JSON.parse(event.data) as { tasks?: TaskRecord[] }
+        if (Array.isArray(value.tasks)) setTasks(value.tasks)
+      } catch { /* a later valid snapshot will repair transient data */ }
+    }
+    events.addEventListener('snapshot', snapshot as EventListener)
+    return () => events.close()
+  }, [])
+
   const activeTasks = useMemo(() => tasks.filter(task => !['COMPLETED', 'FAILED', 'CANCELLED', 'ESCALATED'].includes(task.executionStatus)), [tasks])
   const completedTasks = useMemo(() => tasks.filter(task => task.executionStatus === 'COMPLETED'), [tasks])
 

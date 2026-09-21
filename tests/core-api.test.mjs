@@ -78,6 +78,32 @@ test('Core exposes conservative Icepak environment evidence through the plugin b
   assert.notEqual(body.probe.status, 'READY')
 })
 
+test('Core streams task snapshots for desktop and LAN web clients', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'thermal-agent-events-'))
+  const app = createCoreApp({ home, startAgentRuntime: false })
+  app.server.listen(0, '127.0.0.1')
+  await new Promise(resolve => app.server.once('listening', resolve))
+  const controller = new AbortController()
+  t.after(async () => { controller.abort(); await app.close(); await rm(home, { recursive: true, force: true }) })
+  const address = app.server.address()
+  assert.ok(address && typeof address !== 'string')
+  app.database.createTask(createTask({ title: 'Live task', description: '', ownerNodeId: 'local-node', requirementSnapshot: {} }))
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/events`, { signal: controller.signal })
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/u)
+  const reader = response.body.getReader()
+  let output = ''
+  while (!output.includes('event: snapshot')) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    output += new TextDecoder().decode(chunk.value)
+  }
+  assert.match(output, /event: snapshot/u)
+  assert.match(output, /Live task/u)
+  await reader.cancel()
+})
+
 test('Core owns Icepak run directories and delegates project operations only through the plugin port', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-project-api-'))
   const calls = []

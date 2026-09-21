@@ -14,6 +14,7 @@
 - 基于 SHA-256 的本地 Artifact Store。
 - 内置 Local Core HTTP API。
 - Electron 与浏览器共用的 Fluent UI 工程工作台。
+- Core SSE 状态流，桌面与 Web 可自动更新 Task 和活跃 Attempt 状态。
 - Desktop 为每次 App 会话分配独占 loopback 端口，并区分开发目录与 `app.asar`/unpacked 运行资源。
 - Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。

@@ -57,7 +57,7 @@
 - [ ] 用户显式开启 LAN 发布。
 - [ ] 设备配对和访问权限。
 - [ ] Windows 防火墙引导。
-- [ ] 实时任务进度。
+- [x] 基于 SSE 的 Task/活跃 Attempt 实时状态流。
 
 ## 阶段 4：去中心化计算节点
 
@@ -83,6 +83,7 @@ pnpm dev:core
 - SQLite 重启恢复、事件审计和版本冲突。
 - Artifact SHA 去重和路径约束。
 - Core API 创建和转换 Task。
+- Core SSE 初始快照、连接关闭和任务状态推送。
 - Web 构建及 Core 静态发布。
 - Icepak 插件协议和非 Windows 环境探测。
 - AEDT 工程副本隔离、工程元数据、能力配置校验。

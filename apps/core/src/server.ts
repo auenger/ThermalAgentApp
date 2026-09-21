@@ -11,6 +11,7 @@ import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-clien
 import { IcepakExecutionManager } from './execution-manager.js'
 import { DshRuntime } from './dsh-runtime.js'
 import { SkillPublisher } from './skill-publisher.js'
+import { CoreEventStream } from './event-stream.js'
 
 export interface CoreAppOptions {
   home: string
@@ -35,11 +36,12 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
+  const eventStream = new CoreEventStream(database)
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   const server = createServer((request, response) => {
-    void route(request, response, database, pluginClient, executions, agentRuntime, skillPublisher, webRoot, home).catch(error => writeError(response, error))
+    void route(request, response, database, pluginClient, executions, agentRuntime, skillPublisher, eventStream, webRoot, home).catch(error => writeError(response, error))
   })
 
   return {
@@ -47,6 +49,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     database,
     artifacts,
     async close() {
+      eventStream.close()
       await new Promise<void>((resolveClose, reject) => {
         if (!server.listening) { resolveClose(); return }
         server.close(error => error ? reject(error) : resolveClose())
@@ -66,12 +69,17 @@ async function route(
   executions: IcepakExecutionManager,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
+  eventStream: CoreEventStream,
   webRoot: string,
   home: string,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/api/health') {
     writeJson(response, 200, { status: 'ok', service: 'thermal-agent-core', version: '0.1.0' })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/events') {
+    eventStream.subscribe(response)
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/agent/status') {
