@@ -83,7 +83,7 @@ test('DSH thermal bridge is token-protected and exposes only controlled Core ope
     async inspectProject(input) { calls.push(input); return { status: 'ok', mode: 'inspect', sourceProject: input.projectPath, workingProject: join(input.outputDir, 'Project1.aedt'), inputSha256: 'a'.repeat(64), project: { name: 'Project1', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: [], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: [], objects: [] }, validation: { verified: true, checks: [] } } },
     fanCheck: unused, solveProject: unused, fanSolve: unused,
   }
-  const bridge = new ThermalToolsBridge(root, database, icepak)
+  const bridge = new ThermalToolsBridge(root, database, icepak, 'node-test')
   const address = await bridge.start()
   t.after(async () => {
     await bridge.stop()
@@ -121,4 +121,3 @@ async function waitFor(predicate, message) {
   }
   throw new Error(message)
 }
-

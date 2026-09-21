@@ -6,7 +6,7 @@ import { extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
 import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
-import { LocalDatabase, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
+import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { IcepakExecutionManager } from './execution-manager.js'
 import { DshRuntime } from './dsh-runtime.js'
@@ -15,6 +15,7 @@ import { CoreEventStream } from './event-stream.js'
 import { LanPublisher } from './lan-publisher.js'
 import { ReportClient, type ReportPort } from './report-client.js'
 import { ReportConflictError, ReportManager } from './report-manager.js'
+import { NodeIdentity } from './node-identity.js'
 
 export interface CoreAppOptions {
   home: string
@@ -28,6 +29,7 @@ export interface CoreApp {
   server: Server
   database: LocalDatabase
   artifacts: ArtifactStore
+  nodeIdentity: NodeIdentity
   close(): Promise<void>
 }
 
@@ -35,10 +37,25 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const home = resolve(options.home)
   mkdirSync(home, { recursive: true })
   const database = new LocalDatabase(join(home, 'data', 'thermal.db'))
+  let nodeIdentity: NodeIdentity
+  try {
+    nodeIdentity = NodeIdentity.loadOrCreate(home, database.getLocalIdentity()?.nodeId)
+    database.bindLocalIdentity(nodeIdentity.publicIdentity)
+  } catch (error) {
+    database.close()
+    throw error
+  }
+  database.adoptLegacyLocalTasks(nodeIdentity.nodeId)
+  database.reconcileLeases()
+  const leaseSweep = setInterval(() => {
+    try { database.reconcileLeases() }
+    catch (error) { console.error('lease reconciliation failed', error) }
+  }, 10_000)
+  leaseSweep.unref()
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
-  const agentRuntime = new DshRuntime(home, database, pluginClient)
+  const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   const eventStream = new CoreEventStream(database)
   const reports = new ReportManager(home, database, artifacts, options.reportClient ?? new ReportClient())
@@ -47,7 +64,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, webRoot, home).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -56,7 +73,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     server,
     database,
     artifacts,
+    nodeIdentity,
     async close() {
+      clearInterval(leaseSweep)
       await lanPublisher.stop()
       eventStream.close()
       await new Promise<void>((resolveClose, reject) => {
@@ -84,10 +103,39 @@ async function route(
   lanPublisher: LanPublisher,
   webRoot: string,
   home: string,
+  nodeIdentity: NodeIdentity,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/api/health') {
     writeJson(response, 200, { status: 'ok', service: 'thermal-agent-core', version: '0.1.0' })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/nodes/local') {
+    writeJson(response, 200, { node: nodeIdentity.publicIdentity })
+    return
+  }
+  if (url.pathname === '/api/nodes/peers') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer trust can only be managed from the local App')
+    if (request.method === 'GET') {
+      writeJson(response, 200, { peers: database.listPeers() })
+      return
+    }
+    if (request.method === 'POST') {
+      assertLocalWriteOrigin(request)
+      const value = await readJsonBody(request)
+      if (!isObject(value) || typeof value.nodeId !== 'string' || typeof value.publicKey !== 'string' || typeof value.displayName !== 'string') {
+        throw new RequestError(400, 'INVALID_PEER', 'nodeId, publicKey and displayName are required')
+      }
+      if (value.nodeId === nodeIdentity.nodeId) throw new RequestError(409, 'SELF_PAIRING', 'a node cannot pair with itself')
+      writeJson(response, 201, { peer: database.trustPeer({ nodeId: value.nodeId, algorithm: 'Ed25519', publicKey: value.publicKey }, value.displayName) })
+      return
+    }
+  }
+  const revokePeerMatch = url.pathname.match(/^\/api\/nodes\/peers\/(node-[a-f0-9]{32})\/revoke$/iu)
+  if (request.method === 'POST' && revokePeerMatch) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer trust can only be managed from the local App')
+    assertLocalWriteOrigin(request)
+    writeJson(response, 200, { peer: database.revokePeer(revokePeerMatch[1]) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/events') {
@@ -148,7 +196,7 @@ async function route(
     })
     if (!inspection.validation.verified) throw new RequestError(409, 'ICEPAK_PROJECT_INVALID', 'Icepak project inspection was not verified')
     const task = createTask({
-      title: input.title, description: input.description, ownerNodeId: 'local-node',
+      title: input.title, description: input.description, ownerNodeId: nodeIdentity.nodeId,
       requirementSnapshot: {
         projectPath: input.projectPath, aedtVersion: input.version ?? probe.selectedVersion ?? undefined,
         cores: input.cores ?? 4, ...(input.targetTmaxC === undefined ? {} : { targetTmaxC: input.targetTmaxC }),
@@ -194,7 +242,8 @@ async function route(
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/tasks') {
-    const input = parseCreateTaskInput(await readJsonBody(request))
+    const value = await readJsonBody(request)
+    const input = parseCreateTaskInput({ ...(isObject(value) ? value : {}), ownerNodeId: nodeIdentity.nodeId })
     const task = database.createTask(createTask(input))
     writeJson(response, 201, { task })
     return
@@ -260,6 +309,7 @@ async function route(
   }
   const baselineMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/baseline$/iu)
   if (request.method === 'POST' && baselineMatch) {
+    assertLocalOwner(database, baselineMatch[1], nodeIdentity.nodeId)
     const input = parseIcepakProjectOperationInput(await readJsonBody(request))
     const started = await executions.startBaseline(baselineMatch[1], input)
     database.updateSkillRunStep(baselineMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id })
@@ -268,6 +318,7 @@ async function route(
   }
   const candidateMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/candidate$/iu)
   if (request.method === 'POST' && candidateMatch) {
+    assertLocalOwner(database, candidateMatch[1], nodeIdentity.nodeId)
     const input = parseIcepakCandidateInput(await readJsonBody(request))
     const started = await executions.startCandidate(candidateMatch[1], input)
     database.updateSkillRunStep(candidateMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id, kind: 'CANDIDATE' })
@@ -276,6 +327,7 @@ async function route(
   }
   const retryMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/retry$/iu)
   if (request.method === 'POST' && retryMatch) {
+    assertLocalOwner(database, retryMatch[1], nodeIdentity.nodeId)
     const input = parseExpectedVersionInput(await readJsonBody(request))
     const started = await executions.retryLatestRun(retryMatch[1], input.expectedVersion)
     database.updateSkillRunStep(retryMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id, retry: true })
@@ -309,6 +361,26 @@ async function route(
     return
   }
   writeJson(response, 404, { error: { code: 'NOT_FOUND', message: 'route not found' } })
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function assertLocalOwner(database: LocalDatabase, taskId: string, nodeId: string): void {
+  const task = database.getTask(taskId)
+  if (!task) throw new TaskNotFoundError(taskId)
+  if (task.ownerNodeId !== nodeId) throw new RequestError(403, 'NOT_TASK_OWNER', 'this node does not own the task')
+}
+
+function assertLocalWriteOrigin(request: IncomingMessage): void {
+  const origin = request.headers.origin
+  if (!origin) return
+  try {
+    const parsed = new URL(origin)
+    if (parsed.host === request.headers.host && parsed.protocol === 'http:') return
+  } catch { /* reject invalid origin */ }
+  throw new RequestError(403, 'ORIGIN_REJECTED', 'request origin does not match the local App')
 }
 
 async function serveWeb(response: ServerResponse, webRoot: string, pathname: string): Promise<void> {
@@ -406,6 +478,10 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof SkillConflictError) {
     writeJson(response, 409, { error: { code: 'SKILL_CONFLICT', message: error.message } })
+    return
+  }
+  if (error instanceof PeerConflictError) {
+    writeJson(response, 409, { error: { code: 'PEER_CONFLICT', message: error.message } })
     return
   }
   if (error instanceof TaskApprovalConflictError) {

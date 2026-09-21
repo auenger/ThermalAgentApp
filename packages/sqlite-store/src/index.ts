@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, createPublicKey, randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -26,6 +26,10 @@ import type {
   TaskRecord,
   ThermalVerdict,
   ApprovalStatus,
+  LeaseRecord,
+  PeerHeartbeat,
+  PeerIdentity,
+  PeerRecord,
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
 
@@ -66,6 +70,20 @@ export class TaskApprovalConflictError extends Error {
   }
 }
 
+export class PeerConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PeerConflictError'
+  }
+}
+
+export class LeaseConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LeaseConflictError'
+  }
+}
+
 export class LocalDatabase {
   readonly path: string
   private readonly db: DatabaseSync
@@ -89,6 +107,12 @@ export class LocalDatabase {
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS local_identity (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        node_id TEXT NOT NULL,
+        public_key TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS tasks (
@@ -172,6 +196,40 @@ export class LocalDatabase {
 
       CREATE INDEX IF NOT EXISTS attempts_status_heartbeat_idx
         ON attempts(status, heartbeat_at ASC);
+
+      CREATE TABLE IF NOT EXISTS peers (
+        node_id TEXT PRIMARY KEY,
+        public_key TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        trust_status TEXT NOT NULL,
+        plugin_status TEXT NOT NULL,
+        aedt_versions_json TEXT NOT NULL,
+        max_concurrent INTEGER NOT NULL,
+        active_attempts INTEGER NOT NULL,
+        last_seen_at TEXT,
+        paired_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS leases (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        executor_node_id TEXT NOT NULL REFERENCES peers(node_id),
+        epoch INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        renewed_at TEXT,
+        released_at TEXT,
+        revoke_reason TEXT,
+        UNIQUE(task_id, epoch)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS leases_one_active_per_task_idx
+        ON leases(task_id) WHERE status = 'ACTIVE';
+
+      CREATE INDEX IF NOT EXISTS leases_expiry_idx
+        ON leases(status, expires_at);
 
       CREATE TABLE IF NOT EXISTS attempt_artifacts (
         attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
@@ -267,6 +325,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (4, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (5, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -329,6 +390,245 @@ export class LocalDatabase {
     const bounded = Math.max(1, Math.min(500, Math.trunc(limit)))
     const rows = this.db.prepare('SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?').all(bounded) as SqliteRow[]
     return rows.map(decodeTask)
+  }
+
+  getLocalIdentity(): PeerIdentity | null {
+    const row = this.db.prepare('SELECT node_id, public_key FROM local_identity WHERE singleton = 1').get() as SqliteRow | undefined
+    return row ? { nodeId: String(row.node_id), publicKey: String(row.public_key), algorithm: 'Ed25519' } : null
+  }
+
+  bindLocalIdentity(identity: PeerIdentity): void {
+    validatePeerIdentity(identity)
+    const existing = this.getLocalIdentity()
+    if (existing && (existing.nodeId !== identity.nodeId || existing.publicKey !== identity.publicKey)) {
+      throw new PeerConflictError('local node identity does not match the persisted database owner')
+    }
+    if (!existing) {
+      this.db.prepare('INSERT OR IGNORE INTO local_identity(singleton, node_id, public_key) VALUES (1, ?, ?)')
+        .run(identity.nodeId, identity.publicKey)
+      const bound = this.getLocalIdentity()
+      if (bound?.nodeId !== identity.nodeId || bound.publicKey !== identity.publicKey) {
+        throw new PeerConflictError('local node identity changed while starting Core')
+      }
+    }
+  }
+
+  adoptLegacyLocalTasks(nodeId: string): number {
+    if (!/^node-[a-f0-9]{32}$/u.test(nodeId)) throw new Error('local node ID is invalid')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const tasks = (this.db.prepare("SELECT * FROM tasks WHERE owner_node_id = 'local-node'").all() as SqliteRow[]).map(decodeTask)
+      for (const task of tasks) {
+        const now = new Date().toISOString()
+        this.db.prepare(`UPDATE tasks SET owner_node_id = ?, executor_node_id = CASE WHEN executor_node_id = 'local-node' THEN ? ELSE executor_node_id END,
+          version = ?, updated_at = ? WHERE id = ? AND version = ?`)
+          .run(nodeId, nodeId, task.version + 1, now, task.id, task.version)
+        this.db.prepare(`UPDATE attempts SET executor_node_id = ? WHERE run_id IN (SELECT id FROM runs WHERE task_id = ?) AND executor_node_id = 'local-node'`)
+          .run(nodeId, task.id)
+        this.insertEvent({
+          id: randomUUID(), taskId: task.id, eventType: 'task.owner_identity_migrated',
+          fromStatus: task.executionStatus, toStatus: task.executionStatus, reason: 'legacy local-node identity replaced by persistent node identity',
+          payload: { previousOwnerNodeId: 'local-node', ownerNodeId: nodeId, previousVersion: task.version, version: task.version + 1 },
+          createdAt: now,
+        })
+      }
+      this.db.exec('COMMIT')
+      return tasks.length
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  trustPeer(identity: PeerIdentity, displayName: string, now = new Date()): PeerRecord {
+    validatePeerIdentity(identity)
+    const name = displayName.trim().slice(0, 100)
+    if (!name) throw new PeerConflictError('peer display name is required')
+    const existing = this.getPeer(identity.nodeId)
+    if (existing && existing.publicKey !== identity.publicKey) throw new PeerConflictError('peer public key changed')
+    const timestamp = now.toISOString()
+    this.db.prepare(`
+      INSERT INTO peers(node_id, public_key, display_name, trust_status, plugin_status,
+        aedt_versions_json, max_concurrent, active_attempts, last_seen_at, paired_at, revoked_at)
+      VALUES (?, ?, ?, 'TRUSTED', 'DETECTED', '[]', 0, 0, NULL, ?, NULL)
+      ON CONFLICT(node_id) DO UPDATE SET display_name = excluded.display_name,
+        trust_status = 'TRUSTED', plugin_status = 'DETECTED', aedt_versions_json = '[]',
+        max_concurrent = 0, active_attempts = 0, last_seen_at = NULL,
+        paired_at = excluded.paired_at, revoked_at = NULL
+    `).run(identity.nodeId, identity.publicKey, name, timestamp)
+    return this.getPeer(identity.nodeId) as PeerRecord
+  }
+
+  getPeer(nodeId: string): PeerRecord | null {
+    const row = this.db.prepare('SELECT * FROM peers WHERE node_id = ?').get(nodeId) as SqliteRow | undefined
+    return row ? decodePeer(row) : null
+  }
+
+  listPeers(): PeerRecord[] {
+    return (this.db.prepare('SELECT * FROM peers ORDER BY paired_at ASC').all() as SqliteRow[]).map(decodePeer)
+  }
+
+  recordPeerHeartbeat(nodeId: string, heartbeat: PeerHeartbeat, now = new Date()): PeerRecord {
+    const peer = this.getPeer(nodeId)
+    if (!peer || peer.trustStatus !== 'TRUSTED') throw new PeerConflictError('peer is not trusted')
+    if (!['READY', 'BUSY', 'DEGRADED', 'LAUNCHABLE', 'PROJECT_COMPATIBLE', 'NEEDS_CONFIG', 'DETECTED', 'NOT_INSTALLED'].includes(heartbeat.pluginStatus)) {
+      throw new PeerConflictError('peer plugin status is invalid')
+    }
+    if (!Number.isInteger(heartbeat.maxConcurrent) || heartbeat.maxConcurrent < 0 || heartbeat.maxConcurrent > 32 ||
+      !Number.isInteger(heartbeat.activeAttempts) || heartbeat.activeAttempts < 0 || heartbeat.activeAttempts > 32 ||
+      !Array.isArray(heartbeat.aedtVersions) || heartbeat.aedtVersions.length > 32 ||
+      heartbeat.aedtVersions.some(value => typeof value !== 'string' || value.length > 40)) {
+      throw new PeerConflictError('peer capacity heartbeat is invalid')
+    }
+    this.db.prepare(`
+      UPDATE peers SET plugin_status = ?, aedt_versions_json = ?, max_concurrent = ?,
+        active_attempts = ?, last_seen_at = ? WHERE node_id = ? AND trust_status = 'TRUSTED'
+    `).run(heartbeat.pluginStatus, JSON.stringify(heartbeat.aedtVersions), heartbeat.maxConcurrent,
+      heartbeat.activeAttempts, now.toISOString(), nodeId)
+    return this.getPeer(nodeId) as PeerRecord
+  }
+
+  listAvailablePeers(requiredAedtVersion?: string, now = new Date()): PeerRecord[] {
+    const staleBefore = now.getTime() - 30_000
+    return this.listPeers().filter(peer => peer.trustStatus === 'TRUSTED' && peer.pluginStatus === 'READY' &&
+      peer.lastSeenAt !== null && Date.parse(peer.lastSeenAt) >= staleBefore &&
+      Math.max(peer.activeAttempts, this.activeLeaseCount(peer.nodeId, now)) < peer.maxConcurrent &&
+      (!requiredAedtVersion || peer.aedtVersions.includes(requiredAedtVersion)))
+      .sort((left, right) => (left.activeAttempts / left.maxConcurrent) - (right.activeAttempts / right.maxConcurrent) || left.nodeId.localeCompare(right.nodeId))
+  }
+
+  getLease(id: string): LeaseRecord | null {
+    const row = this.db.prepare('SELECT * FROM leases WHERE id = ?').get(id) as SqliteRow | undefined
+    return row ? decodeLease(row) : null
+  }
+
+  listTaskLeases(taskId: string): LeaseRecord[] {
+    return (this.db.prepare('SELECT * FROM leases WHERE task_id = ? ORDER BY epoch ASC').all(taskId) as SqliteRow[]).map(decodeLease)
+  }
+
+  claimQueuedTaskLease(
+    taskId: string, executorNodeId: string, ownerNodeId: string,
+    expectedVersion: number, ttlMs: number, now = new Date(),
+  ): { task: TaskRecord; lease: LeaseRecord } {
+    if (!Number.isInteger(ttlMs) || ttlMs < 30_000 || ttlMs > 4 * 60 * 60_000) throw new LeaseConflictError('lease TTL is invalid')
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      if (!task) throw new TaskNotFoundError(taskId)
+      if (task.version !== expectedVersion) throw new VersionConflictError(expectedVersion, task.version)
+      if (task.ownerNodeId !== ownerNodeId) throw new LeaseConflictError('this node does not own the task')
+      if (task.executionStatus !== 'QUEUED') throw new LeaseConflictError('task must be QUEUED before leasing')
+      const peer = this.getPeer(executorNodeId)
+      const requiredAedtVersion = typeof task.requirementSnapshot.aedtVersion === 'string' ? task.requirementSnapshot.aedtVersion : undefined
+      if (!peer || !this.listAvailablePeers(requiredAedtVersion, now).some(item => item.nodeId === executorNodeId)) {
+        throw new LeaseConflictError('executor peer is not trusted, ready, fresh, or idle')
+      }
+      const activeCount = this.activeLeaseCount(executorNodeId, now)
+      if (Math.max(activeCount, peer.activeAttempts) >= peer.maxConcurrent) throw new LeaseConflictError('executor peer has no free capacity')
+      const epoch = Number((this.db.prepare('SELECT COALESCE(MAX(epoch), 0) AS epoch FROM leases WHERE task_id = ?')
+        .get(taskId) as SqliteRow).epoch) + 1
+      const issuedAt = now.toISOString()
+      const expiresAt = new Date(now.getTime() + ttlMs).toISOString()
+      const leaseId = randomUUID()
+      this.db.prepare(`
+        INSERT INTO leases(id, task_id, executor_node_id, epoch, status, issued_at, expires_at,
+          renewed_at, released_at, revoke_reason)
+        VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?, NULL, NULL, NULL)
+      `).run(leaseId, taskId, executorNodeId, epoch, issuedAt, expiresAt)
+      this.db.prepare(`
+        UPDATE tasks SET execution_status = 'LEASED', executor_node_id = ?, version = ?, updated_at = ?
+        WHERE id = ? AND version = ?
+      `).run(executorNodeId, task.version + 1, issuedAt, taskId, task.version)
+      this.insertEvent({
+        id: randomUUID(), taskId, eventType: 'task.lease_claimed', fromStatus: 'QUEUED', toStatus: 'LEASED',
+        reason: null, payload: { leaseId, epoch, executorNodeId, expiresAt }, createdAt: issuedAt,
+      })
+      this.db.exec('COMMIT')
+      return { task: this.getTask(taskId) as TaskRecord, lease: this.getLease(leaseId) as LeaseRecord }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  renewLease(leaseId: string, executorNodeId: string, epoch: number, ttlMs: number, now = new Date()): LeaseRecord {
+    if (!Number.isInteger(ttlMs) || ttlMs < 30_000 || ttlMs > 4 * 60 * 60_000) throw new LeaseConflictError('lease TTL is invalid')
+    const lease = this.getLease(leaseId)
+    if (!lease || lease.executorNodeId !== executorNodeId || lease.epoch !== epoch || lease.status !== 'ACTIVE' ||
+      Date.parse(lease.expiresAt) <= now.getTime() || this.getPeer(executorNodeId)?.trustStatus !== 'TRUSTED' ||
+      !this.isCurrentLease(leaseId, lease.taskId, executorNodeId, epoch, now)) throw new LeaseConflictError('lease is not current')
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString()
+    const updated = this.db.prepare(`
+      UPDATE leases SET expires_at = ?, renewed_at = ? WHERE id = ? AND status = 'ACTIVE' AND expires_at > ?
+    `).run(expiresAt, now.toISOString(), leaseId, now.toISOString())
+    if (Number(updated.changes) !== 1) throw new LeaseConflictError('lease was changed during renewal')
+    return this.getLease(leaseId) as LeaseRecord
+  }
+
+  isCurrentLease(leaseId: string, taskId: string, executorNodeId: string, epoch: number, now = new Date()): boolean {
+    const lease = this.getLease(leaseId)
+    const task = this.getTask(taskId)
+    return Boolean(lease && lease.taskId === taskId && lease.executorNodeId === executorNodeId &&
+      lease.epoch === epoch && lease.status === 'ACTIVE' && Date.parse(lease.expiresAt) > now.getTime() &&
+      this.getPeer(executorNodeId)?.trustStatus === 'TRUSTED' &&
+      task?.executorNodeId === executorNodeId && ['LEASED', 'TRANSFERRING', 'RUNNING', 'SYNCING_RESULTS'].includes(task.executionStatus))
+  }
+
+  reconcileLeases(now = new Date()): LeaseRecord[] {
+    const expired = (this.db.prepare(`
+      SELECT leases.* FROM leases JOIN peers ON peers.node_id = leases.executor_node_id
+      WHERE leases.status = 'ACTIVE' AND (leases.expires_at <= ? OR peers.trust_status = 'REVOKED')
+      ORDER BY leases.expires_at ASC
+    `).all(now.toISOString()) as SqliteRow[]).map(decodeLease)
+    for (const lease of expired) {
+      const revoked = this.getPeer(lease.executorNodeId)?.trustStatus === 'REVOKED'
+      this.endLease(lease.id, revoked ? 'REVOKED' : 'EXPIRED', now, revoked ? 'peer revoked' : 'lease expired')
+    }
+    return expired
+  }
+
+  revokePeer(nodeId: string, now = new Date()): PeerRecord {
+    const peer = this.getPeer(nodeId)
+    if (!peer) throw new PeerConflictError('peer was not found')
+    this.db.prepare(`UPDATE peers SET trust_status = 'REVOKED', revoked_at = ?, last_seen_at = NULL WHERE node_id = ?`)
+      .run(now.toISOString(), nodeId)
+    const active = (this.db.prepare(`SELECT id FROM leases WHERE executor_node_id = ? AND status = 'ACTIVE'`)
+      .all(nodeId) as SqliteRow[]).map(row => String(row.id))
+    for (const leaseId of active) this.endLease(leaseId, 'REVOKED', now, 'peer revoked')
+    return this.getPeer(nodeId) as PeerRecord
+  }
+
+  private endLease(id: string, status: 'EXPIRED' | 'REVOKED', now: Date, reason: string): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const lease = this.getLease(id)
+      if (!lease || lease.status !== 'ACTIVE') { this.db.exec('COMMIT'); return }
+      const task = this.getTask(lease.taskId)
+      this.db.prepare(`UPDATE leases SET status = ?, released_at = ?, revoke_reason = ? WHERE id = ? AND status = 'ACTIVE'`)
+        .run(status, now.toISOString(), reason, id)
+      if (task && task.executorNodeId === lease.executorNodeId && ['LEASED', 'TRANSFERRING', 'RUNNING', 'SYNCING_RESULTS'].includes(task.executionStatus)) {
+        const nextStatus: ExecutionStatus = ['RUNNING', 'SYNCING_RESULTS'].includes(task.executionStatus) ? 'ESCALATED' : 'QUEUED'
+        this.db.prepare(`
+          UPDATE tasks SET execution_status = ?, executor_node_id = NULL, version = ?, updated_at = ?
+          WHERE id = ? AND version = ?
+        `).run(nextStatus, task.version + 1, now.toISOString(), task.id, task.version)
+        this.insertEvent({
+          id: randomUUID(), taskId: task.id, eventType: `task.lease_${status.toLowerCase()}`,
+          fromStatus: task.executionStatus, toStatus: nextStatus, reason,
+          payload: { leaseId: id, epoch: lease.epoch, executorNodeId: lease.executorNodeId }, createdAt: now.toISOString(),
+        })
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  private activeLeaseCount(executorNodeId: string, now: Date): number {
+    return Number((this.db.prepare(`
+      SELECT COUNT(*) AS count FROM leases WHERE executor_node_id = ? AND status = 'ACTIVE' AND expires_at > ?
+    `).get(executorNodeId, now.toISOString()) as SqliteRow).count)
   }
 
   transitionTask(id: string, toStatus: ExecutionStatus, expectedVersion?: number, reason?: string): TaskRecord {
@@ -1060,6 +1360,44 @@ function decodeTask(row: SqliteRow): TaskRecord {
     version: Number(row.version),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  }
+}
+
+function validatePeerIdentity(identity: PeerIdentity): void {
+  if (identity.algorithm !== 'Ed25519' || !/^node-[a-f0-9]{32}$/u.test(identity.nodeId) ||
+    typeof identity.publicKey !== 'string' || identity.publicKey.length > 512) {
+    throw new PeerConflictError('peer identity is invalid')
+  }
+  try {
+    const bytes = Buffer.from(identity.publicKey, 'base64url')
+    const key = createPublicKey({ key: bytes, format: 'der', type: 'spki' })
+    const expected = `node-${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}`
+    if (key.asymmetricKeyType !== 'ed25519' || expected !== identity.nodeId) throw new Error('identity mismatch')
+  } catch {
+    throw new PeerConflictError('peer identity public key does not match its node ID')
+  }
+}
+
+function decodePeer(row: SqliteRow): PeerRecord {
+  return {
+    nodeId: String(row.node_id), algorithm: 'Ed25519', publicKey: String(row.public_key),
+    displayName: String(row.display_name), trustStatus: row.trust_status as PeerRecord['trustStatus'],
+    pluginStatus: row.plugin_status as PeerRecord['pluginStatus'],
+    aedtVersions: JSON.parse(String(row.aedt_versions_json)) as string[],
+    maxConcurrent: Number(row.max_concurrent), activeAttempts: Number(row.active_attempts),
+    lastSeenAt: row.last_seen_at === null ? null : String(row.last_seen_at),
+    pairedAt: String(row.paired_at), revokedAt: row.revoked_at === null ? null : String(row.revoked_at),
+  }
+}
+
+function decodeLease(row: SqliteRow): LeaseRecord {
+  return {
+    id: String(row.id), taskId: String(row.task_id), executorNodeId: String(row.executor_node_id),
+    epoch: Number(row.epoch), status: row.status as LeaseRecord['status'],
+    issuedAt: String(row.issued_at), expiresAt: String(row.expires_at),
+    renewedAt: row.renewed_at === null ? null : String(row.renewed_at),
+    releasedAt: row.released_at === null ? null : String(row.released_at),
+    revokeReason: row.revoke_reason === null ? null : String(row.revoke_reason),
   }
 }
 

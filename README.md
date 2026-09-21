@@ -29,8 +29,11 @@
 - 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
 - Skill Run、步骤证据与失败统计；启用 Skill 可先完成环境/工程检查再创建 Task，连续 3 次失败自动撤回并进入 `NEEDS_REPAIR`。
 - 独立 ReportLab PDF 插件：仅对已完成且人工接受的任务生成双语审计报告，并把报告作为 `REPORT` Artifact 关联到选中的 Attempt。App 和已配对的内网 Web 均可查看。
+- 每台 App 的持久 Ed25519 节点身份；Core 强制绑定新任务 Owner 并迁移旧 `local-node` 任务。“节点”页可在线下核对公钥后手动登记或撤销信任。SQLite 已有带 epoch 的单活租约和过期栅栏，但尚未连接远程传输。
 
-当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 对话式修订、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
+节点私钥保存在 App 数据目录 `identity/node-key.json`（非 Windows 系统权限为 `0600`），公钥指纹同时锚定在 SQLite。备份 App 数据时必须连同私钥一起备份；若密钥丢失或与数据库不一致，Core 会拒绝以新身份接管旧任务。
+
+当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 对话式修订、安装包和局域网节点调度。手动登记节点不会自动分配任务；未完成能力不会在界面中显示为可用。
 
 Windows 离线安装包还需要提供固定 Node `22.22.x` 运行时（供 DSH 使用）、带 ReportLab 的 Python 运行时，并将 PyAEDT/报告插件、DSH CLI 及其依赖放入 unpacked 资源。Desktop 已按这一目录边界解析路径，但仓库当前不伪装成已产出或验证过 Windows 安装包。
 

@@ -12,7 +12,7 @@
 - [x] 执行状态、热判定和审批状态分离。
 - [x] Icepak 插件 Manifest 和版本化 RPC 契约。
 - [x] Run 与 Attempt 本地执行契约、状态、心跳和结果选择。
-- [ ] Lease 和 Peer 协议完整定义。
+- [ ] Lease 和 Peer 网络协议完整定义（已有持久身份、信任登记、能力快照和租约栅栏基础）。
 - [x] Skill、Skill Version 和人工审核契约定义。
 
 ## 阶段 1：单机桌面闭环
@@ -57,7 +57,8 @@
 - [x] LAN 浏览器短时配对和 HttpOnly、SameSite 会话。
 - [x] 用户从本机 App 显式开启/停止独立 LAN Listener。
 - [x] 未配对 API/SSE 拒绝、写操作同源校验和配对失败限流。
-- [ ] 持久设备身份、撤销列表和细粒度访问权限。
+- [x] 持久 Ed25519 设备身份、本机手动信任登记与撤销；旧版 Owner 迁移。
+- [ ] 双向配对、网络挑战签名、细粒度访问权限。
 - [ ] TLS 证书或可信局域网证书方案。
 - [ ] Windows 防火墙引导。
 - [x] 基于 SSE 的 Task/活跃 Attempt 实时状态流。
@@ -65,9 +66,9 @@
 ## 阶段 4：去中心化计算节点
 
 - [ ] mDNS/UDP 节点发现。
-- [ ] 节点身份和配对。
-- [ ] 能力与负载心跳。
-- [ ] Owner、Executor、Attempt 和 Lease。
+- [x] 持久节点身份和本机手动信任登记；双向网络配对待实现。
+- [ ] 能力与负载网络心跳（已有持久快照、30 秒新鲜度和空闲选择逻辑）。
+- [ ] Owner、Executor、Attempt 和 Lease 远程协调（已有 Owner 绑定和原子 Lease/epoch/过期栅栏）。
 - [ ] Artifact 分块传输和断点续传。
 - [ ] 网络分区、租约超时和迟到结果处理。
 
@@ -105,5 +106,6 @@ pnpm dev:core
 - Electron 开发与 `app.asar`/unpacked 资源路径分离。
 - Windows 进程树终止命令和非 Windows 信号降级。
 - 已审批任务 PDF 报告 Gate、Run/Attempt、热证据、事件与 SHA-256 审计、幂等关联和下载；中文嵌入字体及逐页渲染检查。
+- 持久 Ed25519 节点身份、API Owner 防伪、旧任务迁移、手动信任/撤销、能力新鲜度与负载筛选、单活租约/epoch 栅栏及分区后的保守升级。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

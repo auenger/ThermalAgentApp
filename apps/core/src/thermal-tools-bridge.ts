@@ -15,6 +15,7 @@ export class ThermalToolsBridge {
     private readonly home: string,
     private readonly database: LocalDatabase,
     private readonly icepak: IcepakPluginPort,
+    private readonly nodeId: string,
   ) {}
 
   async start(): Promise<DshBridgeAddress> {
@@ -89,7 +90,7 @@ export class ThermalToolsBridge {
       const input = parseCreateTaskInput({
         title: value.title,
         description: value.description,
-        ownerNodeId: 'local-node',
+        ownerNodeId: this.nodeId,
         requirementSnapshot,
       })
       writeJson(response, 201, { task: this.database.createTask(createTask(input)) })

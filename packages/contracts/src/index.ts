@@ -168,6 +168,44 @@ export interface TaskRecord {
   updatedAt: string
 }
 
+export interface PeerIdentity {
+  nodeId: string
+  algorithm: 'Ed25519'
+  publicKey: string
+}
+
+export interface PeerRecord extends PeerIdentity {
+  displayName: string
+  trustStatus: 'TRUSTED' | 'REVOKED'
+  pluginStatus: PluginStatus
+  aedtVersions: string[]
+  maxConcurrent: number
+  activeAttempts: number
+  lastSeenAt: string | null
+  pairedAt: string
+  revokedAt: string | null
+}
+
+export interface PeerHeartbeat {
+  pluginStatus: PluginStatus
+  aedtVersions: string[]
+  maxConcurrent: number
+  activeAttempts: number
+}
+
+export interface LeaseRecord {
+  id: string
+  taskId: string
+  executorNodeId: string
+  epoch: number
+  status: 'ACTIVE' | 'EXPIRED' | 'RELEASED' | 'REVOKED'
+  issuedAt: string
+  expiresAt: string
+  renewedAt: string | null
+  releasedAt: string | null
+  revokeReason: string | null
+}
+
 export interface CreateTaskInput {
   title: string
   description: string

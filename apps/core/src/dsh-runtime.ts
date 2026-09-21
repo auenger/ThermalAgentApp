@@ -14,8 +14,9 @@ export class DshRuntime {
     private readonly home: string,
     database: LocalDatabase,
     icepak: IcepakPluginPort,
+    nodeId: string,
   ) {
-    this.bridge = new ThermalToolsBridge(home, database, icepak)
+    this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId)
   }
 
   getStatus(): DshStatus { return { ...this.status } }
@@ -59,4 +60,3 @@ export class DshRuntime {
     }
   }
 }
-

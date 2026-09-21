@@ -26,7 +26,7 @@ import {
   WeatherSunny20Regular,
   WeatherMoon20Regular,
 } from '@fluentui/react-icons'
-import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
+import type { IcepakEnvironmentProbe, IcepakProjectOperationResult, PeerIdentity, PeerRecord, SkillDetail, SkillRecord, TaskRecord } from '@thermal-agent/contracts'
 
 const brand: BrandVariants = {
   10: '#130903', 20: '#281006', 30: '#421706', 40: '#5c2009', 50: '#742b10',
@@ -114,7 +114,6 @@ const useStyles = makeStyles({
   section: { marginTop: '20px' },
   agentPanel: { height: 'calc(100dvh - 128px)', minHeight: '560px', overflow: 'hidden', ...shorthands.padding('0') },
   agentFrame: { width: '100%', height: '100%', border: 0, backgroundColor: tokens.colorNeutralBackground1 },
-  iconMuted: { color: tokens.colorNeutralForeground3 },
   mobileNav: {
     display: 'none',
     '@media (max-width: 900px)': {
@@ -214,7 +213,7 @@ export function App() {
             {page === 'agent' && <AgentWorkspace styles={styles} />}
             {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onChanged={refresh} />}
             {page === 'skills' && <SkillLibrary styles={styles} skills={skills} onChanged={refresh} />}
-            {page === 'nodes' && <Placeholder styles={styles} icon={<DesktopPulse20Regular />} title="当前只有本机节点" body="节点发现、设备配对和任务租约会在单机求解闭环稳定后启用。" />}
+            {page === 'nodes' && <NodeWorkspace styles={styles} />}
             {page === 'settings' && <><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} /></>}
           </div>
         </main>
@@ -480,7 +479,7 @@ function CreateTaskPanel({ styles, onCreated }: { styles: ReturnType<typeof useS
     try {
       const parsedTarget = targetTmaxC.trim() ? Number(targetTmaxC) : undefined
       if (parsedTarget !== undefined && !Number.isFinite(parsedTarget)) throw new Error('最高温度目标必须是数字')
-      const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, description, ownerNodeId: 'local-node', requirementSnapshot: { projectPath, aedtVersion: '2024.2', cores: 4, ...(parsedTarget === undefined ? {} : { targetTmaxC: parsedTarget }) } }) })
+      const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, description, requirementSnapshot: { projectPath, aedtVersion: '2024.2', cores: 4, ...(parsedTarget === undefined ? {} : { targetTmaxC: parsedTarget }) } }) })
       if (!response.ok) { const body = await response.json() as { error?: { message?: string } }; throw new Error(body.error?.message ?? '任务未创建') }
       setTitle(''); setDescription(''); setProjectPath(''); setTargetTmaxC(''); await onCreated()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '任务未创建') }
@@ -555,6 +554,63 @@ function ResultItem({ styles, label, value }: { styles: ReturnType<typeof useSty
   return <div className={styles.resultItem}><div className={styles.details}>{label}</div><div className={styles.resultValue}>{value}</div></div>
 }
 
-function Placeholder({ styles, icon, title, body }: { styles: ReturnType<typeof useStyles>; icon: JSX.Element; title: string; body: string }) {
-  return <div className={styles.panel}><div className={styles.empty}><div className={styles.placeholder}><span className={styles.iconMuted}>{icon}</span><h2>{title}</h2><p>{body}</p></div></div></div>
+function NodeWorkspace({ styles }: { styles: ReturnType<typeof useStyles> }) {
+  const [local, setLocal] = useState<PeerIdentity | null>(null)
+  const [peers, setPeers] = useState<PeerRecord[]>([])
+  const [displayName, setDisplayName] = useState('')
+  const [nodeId, setNodeId] = useState('')
+  const [publicKey, setPublicKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const refresh = useCallback(async () => {
+    try {
+      const identityResponse = await fetch('/api/nodes/local')
+      const identityBody = await identityResponse.json() as { node?: PeerIdentity; error?: { message?: string } }
+      if (!identityResponse.ok || !identityBody.node) throw new Error(identityBody.error?.message ?? '本机身份读取失败')
+      setLocal(identityBody.node)
+      if (!isLanClient) {
+        const peerResponse = await fetch('/api/nodes/peers')
+        const peerBody = await peerResponse.json() as { peers?: PeerRecord[]; error?: { message?: string } }
+        if (!peerResponse.ok || !peerBody.peers) throw new Error(peerBody.error?.message ?? '可信节点读取失败')
+        setPeers(peerBody.peers)
+      }
+      setError('')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '节点读取失败') }
+  }, [])
+  useEffect(() => { void refresh() }, [refresh])
+
+  async function pair(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError('')
+    try {
+      const response = await fetch('/api/nodes/peers', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ displayName, nodeId: nodeId.trim(), publicKey: publicKey.trim() }),
+      })
+      const body = await response.json() as { error?: { message?: string } }
+      if (!response.ok) throw new Error(body.error?.message ?? '节点登记失败')
+      setDisplayName(''); setNodeId(''); setPublicKey(''); await refresh()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '节点登记失败') }
+    finally { setBusy(false) }
+  }
+
+  async function revoke(peer: PeerRecord) {
+    setBusy(true); setError('')
+    try {
+      const response = await fetch(`/api/nodes/peers/${peer.nodeId}/revoke`, { method: 'POST' })
+      const body = await response.json() as { error?: { message?: string } }
+      if (!response.ok) throw new Error(body.error?.message ?? '节点撤销失败')
+      await refresh()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '节点撤销失败') }
+    finally { setBusy(false) }
+  }
+
+  return <>
+    <div className={styles.intro}><div><h1 className={styles.title}>计算节点</h1><p className={styles.subtitle}>每台 App 有独立且持久的 Ed25519 身份。手动登记只建立信任记录；自动发现、加密传输和跨机求解尚未启用。</p></div></div>
+    <section className={styles.settingsGrid}>
+      <div className={styles.panel}><h2 className={styles.panelTitle}><DesktopPulse20Regular />本机身份</h2>{local ? <div className={styles.resultGrid} style={{ gridTemplateColumns: '1fr' }}><ResultItem styles={styles} label="Node ID / 指纹" value={local.nodeId} /><ResultItem styles={styles} label="公钥（可在另一台 App 手动登记）" value={local.publicKey} /></div> : <Spinner label="正在读取本机身份" />}</div>
+      <div className={styles.panel}><h2 className={styles.panelTitle}>可信节点登记</h2>{isLanClient ? <p className={styles.placeholder}>节点信任只能在运行 App 的本机电脑上管理。</p> : <><p className={styles.details}>请通过可信的线下方式核对对方 Node ID 与公钥。登记后仍不会自动分配任务；远程执行须待加密传输和双向验证完成。</p><form className={styles.form} onSubmit={pair}><Field label="设备名称" required><Input value={displayName} onChange={(_, data) => setDisplayName(data.value)} /></Field><Field label="对方 Node ID" required><Input value={nodeId} onChange={(_, data) => setNodeId(data.value)} /></Field><Field label="对方公钥" required><Input value={publicKey} onChange={(_, data) => setPublicKey(data.value)} /></Field><Button type="submit" appearance="primary" disabled={busy || !displayName.trim() || !nodeId.trim() || !publicKey.trim()}>登记可信节点</Button></form></>}</div>
+    </section>
+    {!isLanClient && <div className={styles.panel} style={{ marginTop: 16 }}><h2 className={styles.panelTitle}>已登记节点</h2>{peers.length ? <div className={styles.skillList}>{peers.map(peer => <div key={peer.nodeId} className={styles.statusRow}><div><strong>{peer.displayName}</strong><div className={styles.details}>{peer.nodeId} · {peer.pluginStatus} · {peer.lastSeenAt ?? '尚无能力心跳'}</div></div><div className={styles.headerActions}><Badge color={peer.trustStatus === 'TRUSTED' ? 'success' : 'danger'}>{peer.trustStatus}</Badge>{peer.trustStatus === 'TRUSTED' && <Button size="small" disabled={busy} onClick={() => void revoke(peer)}>撤销信任</Button>}</div></div>)}</div> : <p className={styles.placeholder}>还没有登记其他计算节点。</p>}</div>}
+    {error && <p className={styles.error}>{error}</p>}
+  </>
 }
