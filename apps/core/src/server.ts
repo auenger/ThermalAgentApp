@@ -1,16 +1,17 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { parseCreateTaskInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
+import { parseCreateTaskInput, parseIcepakProjectOperationInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
-import { IcepakPluginClient } from './icepak-plugin-client.js'
+import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 
 export interface CoreAppOptions {
   home: string
-  pluginClient?: IcepakPluginClient
+  pluginClient?: IcepakPluginPort
   webRoot?: string
 }
 
@@ -30,7 +31,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   const server = createServer((request, response) => {
-    void route(request, response, database, pluginClient, webRoot).catch(error => writeError(response, error))
+    void route(request, response, database, pluginClient, webRoot, home).catch(error => writeError(response, error))
   })
 
   return {
@@ -51,8 +52,9 @@ async function route(
   request: IncomingMessage,
   response: ServerResponse,
   database: LocalDatabase,
-  pluginClient: IcepakPluginClient,
+  pluginClient: IcepakPluginPort,
   webRoot: string,
+  home: string,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/api/health') {
@@ -86,6 +88,18 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname === '/api/plugins/icepak/probe') {
     writeJson(response, 200, { probe: await pluginClient.probeEnvironment() })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/inspect') {
+    const input = parseIcepakProjectOperationInput(await readJsonBody(request))
+    const outputDir = join(home, 'runs', 'icepak', randomUUID())
+    writeJson(response, 200, { result: await pluginClient.inspectProject({ ...input, outputDir }) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/fan-check') {
+    const input = parseIcepakProjectOperationInput(await readJsonBody(request))
+    const outputDir = join(home, 'runs', 'icepak', randomUUID())
+    writeJson(response, 200, { result: await pluginClient.fanCheck({ ...input, outputDir }) })
     return
   }
   if (request.method === 'GET' && !url.pathname.startsWith('/api/')) {

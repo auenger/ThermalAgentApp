@@ -96,6 +96,45 @@ export interface IcepakEnvironmentProbe {
   diagnostics: string[]
 }
 
+export interface IcepakProjectOperationInput {
+  projectPath: string
+  version?: string
+  design?: string
+  setup?: string
+  cores?: number
+  nonGraphical?: boolean
+  expectedProfile?: Record<string, unknown>
+  fanSpeedRatio?: number
+  flowConvergenceCriterion?: number
+  baselineMetrics?: Record<string, unknown>
+  minImprovementC?: number
+}
+
+export interface IcepakProjectOperationResult {
+  status: 'ok'
+  mode: 'inspect' | 'fan-check' | 'solve' | 'fan-solve'
+  sourceProject: string
+  workingProject: string
+  inputSha256: string
+  project: {
+    name: string
+    aedtVersion: string
+    activeDesign: string
+    designs: string[]
+    setups: string[]
+    boundaries: Array<Record<string, unknown>>
+    nativeComponents: Array<Record<string, unknown>>
+    monitors: string[]
+    objects: string[]
+  }
+  validation: { verified: boolean; checks: string[] }
+  fanAction?: Record<string, unknown>
+  solve?: Record<string, unknown>
+  metrics?: Record<string, unknown>
+  artifacts?: Record<string, unknown>
+  comparison?: Record<string, unknown>
+}
+
 export interface PluginManifest {
   id: string
   name: string
@@ -164,5 +203,47 @@ export function parseTaskTransitionInput(value: unknown): TaskTransitionInput {
     status: value.status,
     expectedVersion: value.expectedVersion === undefined ? undefined : Number(value.expectedVersion),
     reason: typeof value.reason === 'string' ? value.reason.trim().slice(0, 500) : undefined,
+  }
+}
+
+export function parseIcepakProjectOperationInput(value: unknown): IcepakProjectOperationInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  const projectPath = requiredText(value.projectPath, 'projectPath', 4_096)
+  if (!projectPath.toLowerCase().endsWith('.aedt')) throw new Error('projectPath must reference an .aedt file')
+  if (value.expectedProfile !== undefined && !isObject(value.expectedProfile)) {
+    throw new Error('expectedProfile must be an object')
+  }
+  if (value.fanSpeedRatio !== undefined) {
+    const ratio = Number(value.fanSpeedRatio)
+    if (!Number.isFinite(ratio) || ratio <= 1 || ratio > 1.5) {
+      throw new Error('fanSpeedRatio must be greater than 1.0 and at most 1.5')
+    }
+  }
+  if (value.cores !== undefined && (!Number.isInteger(value.cores) || Number(value.cores) < 1)) {
+    throw new Error('cores must be a positive integer')
+  }
+  if (value.flowConvergenceCriterion !== undefined) {
+    const criterion = Number(value.flowConvergenceCriterion)
+    if (!Number.isFinite(criterion) || criterion <= 0) throw new Error('flowConvergenceCriterion must be positive')
+  }
+  if (value.baselineMetrics !== undefined && !isObject(value.baselineMetrics)) {
+    throw new Error('baselineMetrics must be an object')
+  }
+  if (value.minImprovementC !== undefined) {
+    const threshold = Number(value.minImprovementC)
+    if (!Number.isFinite(threshold) || threshold < 0) throw new Error('minImprovementC must not be negative')
+  }
+  return {
+    projectPath,
+    version: typeof value.version === 'string' && value.version.trim() ? value.version.trim().slice(0, 50) : undefined,
+    design: typeof value.design === 'string' && value.design.trim() ? value.design.trim().slice(0, 200) : undefined,
+    setup: typeof value.setup === 'string' && value.setup.trim() ? value.setup.trim().slice(0, 200) : undefined,
+    cores: value.cores === undefined ? undefined : Number(value.cores),
+    nonGraphical: value.nonGraphical !== false,
+    expectedProfile: value.expectedProfile as Record<string, unknown> | undefined,
+    fanSpeedRatio: value.fanSpeedRatio === undefined ? undefined : Number(value.fanSpeedRatio),
+    flowConvergenceCriterion: value.flowConvergenceCriterion === undefined ? undefined : Number(value.flowConvergenceCriterion),
+    baselineMetrics: value.baselineMetrics as Record<string, unknown> | undefined,
+    minImprovementC: value.minImprovementC === undefined ? undefined : Number(value.minImprovementC),
   }
 }

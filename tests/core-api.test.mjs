@@ -69,3 +69,63 @@ test('Core exposes conservative Icepak environment evidence through the plugin b
   assert.equal(body.probe.protocolVersion, '1.0.0')
   assert.notEqual(body.probe.status, 'READY')
 })
+
+test('Core owns Icepak run directories and delegates project operations only through the plugin port', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'thermal-agent-project-api-'))
+  const calls = []
+  const pluginClient = {
+    async probeEnvironment() { throw new Error('not used') },
+    async inspectProject(input) {
+      calls.push({ method: 'inspect', input })
+      return {
+        status: 'ok', mode: 'inspect', sourceProject: input.projectPath,
+        workingProject: join(input.outputDir, 'Project1.aedt'), inputSha256: 'a'.repeat(64),
+        project: { name: 'Project1', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: ['IcepakDesign1'], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: ['Chip1'], objects: [] },
+        validation: { verified: true, checks: [] },
+      }
+    },
+    async fanCheck(input) {
+      calls.push({ method: 'fan-check', input })
+      return {
+        status: 'ok', mode: 'fan-check', sourceProject: input.projectPath,
+        workingProject: join(input.outputDir, 'Project1.aedt'), inputSha256: 'a'.repeat(64),
+        project: { name: 'Project1', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: [], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: [], objects: [] },
+        validation: { verified: true, checks: [] }, fanAction: { verified: true },
+      }
+    },
+  }
+  const app = createCoreApp({ home, pluginClient })
+  app.server.listen(0, '127.0.0.1')
+  await new Promise(resolve => app.server.once('listening', resolve))
+  t.after(async () => {
+    await app.close()
+    await rm(home, { recursive: true, force: true })
+  })
+  const address = app.server.address()
+  assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}`
+
+  const inspectResponse = await fetch(`${base}/api/plugins/icepak/inspect`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: 'C:\\models\\Project1.aedt', version: '2024.2' }),
+  })
+  assert.equal(inspectResponse.status, 200)
+  const inspect = await inspectResponse.json()
+  assert.equal(inspect.result.project.activeDesign, 'IcepakDesign1')
+  assert.match(calls[0].input.outputDir, /runs[/\\]icepak[/\\][0-9a-f-]+$/u)
+
+  const fanResponse = await fetch(`${base}/api/plugins/icepak/fan-check`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: 'C:\\models\\Project1.aedt', fanSpeedRatio: 1.1 }),
+  })
+  assert.equal(fanResponse.status, 200)
+  assert.equal(calls[1].method, 'fan-check')
+  assert.equal(calls[1].input.fanSpeedRatio, 1.1)
+
+  const invalidResponse = await fetch(`${base}/api/plugins/icepak/fan-check`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: 'C:\\models\\Project1.aedt', fanSpeedRatio: 2 }),
+  })
+  assert.equal(invalidResponse.status, 400)
+  assert.equal(calls.length, 2)
+})

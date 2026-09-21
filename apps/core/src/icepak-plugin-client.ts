@@ -1,12 +1,25 @@
 import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { IcepakEnvironmentProbe, RpcResponse } from '@thermal-agent/contracts'
+import type {
+  IcepakEnvironmentProbe,
+  IcepakProjectOperationInput,
+  IcepakProjectOperationResult,
+  RpcResponse,
+} from '@thermal-agent/contracts'
 
 export interface IcepakPluginClientOptions {
   python?: string
   pluginRoot?: string
   timeoutMs?: number
+}
+
+export interface IcepakPluginPort {
+  probeEnvironment(): Promise<IcepakEnvironmentProbe>
+  inspectProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
+  fanCheck(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
+  solveProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
+  fanSolve(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
 }
 
 export class IcepakPluginClient {
@@ -28,7 +41,23 @@ export class IcepakPluginClient {
     return this.call('health')
   }
 
-  async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+  async inspectProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult> {
+    return this.call('inspect_project', input, 10 * 60_000) as Promise<IcepakProjectOperationResult>
+  }
+
+  async fanCheck(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult> {
+    return this.call('fan_check', input, 10 * 60_000) as Promise<IcepakProjectOperationResult>
+  }
+
+  async solveProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult> {
+    return this.call('solve_project', input, 4 * 60 * 60_000) as Promise<IcepakProjectOperationResult>
+  }
+
+  async fanSolve(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult> {
+    return this.call('fan_solve', input, 4 * 60 * 60_000) as Promise<IcepakProjectOperationResult>
+  }
+
+  async call(method: string, params: object = {}, timeoutMs = this.timeoutMs): Promise<unknown> {
     const id = randomUUID()
     const child = spawn(this.python, ['-m', 'thermal_icepak_plugin'], {
       env: {
@@ -40,16 +69,24 @@ export class IcepakPluginClient {
     })
     let stdout = ''
     let stderr = ''
+    let stdoutOverflow = false
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', chunk => { stdout = (stdout + chunk).slice(-1_000_000) })
+    child.stdout.on('data', chunk => {
+      if (stdoutOverflow) return
+      stdout += chunk
+      if (Buffer.byteLength(stdout, 'utf8') > 64 * 1024 * 1024) {
+        stdoutOverflow = true
+        child.kill('SIGKILL')
+      }
+    })
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-20_000) })
 
     const response = await new Promise<RpcResponse>((resolveResponse, reject) => {
       const timer = setTimeout(() => {
         child.kill('SIGKILL')
         reject(new Error(`Icepak plugin ${method} timed out`))
-      }, this.timeoutMs)
+      }, timeoutMs)
       timer.unref()
       child.once('error', error => {
         clearTimeout(timer)
@@ -57,6 +94,10 @@ export class IcepakPluginClient {
       })
       child.once('close', code => {
         clearTimeout(timer)
+        if (stdoutOverflow) {
+          reject(new Error(`Icepak plugin ${method} response exceeded 64 MB`))
+          return
+        }
         const line = stdout.trim().split(/\r?\n/u).filter(Boolean).at(-1)
         if (!line) {
           reject(new Error(`Icepak plugin exited without a response (${code}): ${stderr.trim().slice(-500)}`))

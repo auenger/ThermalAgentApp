@@ -60,6 +60,14 @@ def probe_environment() -> dict[str, object]:
         "selectedVersion": versions[-1] if versions else None,
         "pyaedtAvailable": pyaedt_available,
         "licenseStatus": "UNKNOWN",
-        "capabilities": ["environment_probe", "health"],
+        "capabilities": [
+            "environment_probe",
+            "health",
+            "project_inspect",
+            "fan_check",
+            "baseline_solve",
+            "fan_solve",
+            "convergence_evidence",
+        ],
         "diagnostics": diagnostics,
     }

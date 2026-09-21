@@ -23,10 +23,10 @@
 - [x] Core 同源发布 React Web。
 - [x] Electron 桌面启动入口。
 - [x] Icepak 插件进程健康检查和保守环境探测。
-- [ ] 从旧项目迁移通用 AEDT 工程检查逻辑。
-- [ ] 从旧项目迁移 Baseline 真实求解。
-- [ ] 从旧项目迁移 Monitor 和收敛证据采集。
-- [ ] 从旧项目迁移风扇候选动作与回读。
+- [x] 从旧项目迁移通用 AEDT 工程检查逻辑。
+- [x] 从旧项目迁移 Baseline PyAEDT 求解代码路径（待 Windows 真实回归）。
+- [x] 从旧项目迁移温度 Monitor、原生残差和收敛证据采集（待 Windows 真实回归）。
+- [x] 从旧项目迁移风扇动作、写后回读及候选求解代码路径（待任务协调器接入）。
 - [ ] 求解子进程 heartbeat、取消和恢复。
 - [ ] Artifact 与 Task/Run/Attempt 关联。
 - [ ] PDF 报告迁移。
@@ -76,5 +76,10 @@ pnpm dev:core
 - Core API 创建和转换 Task。
 - Web 构建及 Core 静态发布。
 - Icepak 插件协议和非 Windows 环境探测。
+- AEDT 工程副本隔离、工程元数据、能力配置校验。
+- 曲线风扇相似定律缩放、更新和写后回读验证。
+- Baseline/风扇候选求解、摄氏温度标准化及逐 Monitor 对比。
+- 原生残差、Monitor 稳定性、反向流和求解正常结束证据解析。
+- Core 为 Icepak 操作分配运行目录并通过插件端口调用。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。
