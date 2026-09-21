@@ -18,6 +18,7 @@ import { ReportConflictError, ReportManager } from './report-manager.js'
 import { NodeIdentity } from './node-identity.js'
 import { PeerDiscovery, type PeerDiscoveryOptions } from './peer-discovery.js'
 import { PeerAuth, PeerAuthError } from './peer-auth.js'
+import { PeerSecureChannel, PeerSecureError } from './peer-secure-channel.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -86,6 +87,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   }
   const discovery = new PeerDiscovery(nodeIdentity, database, capabilityHeartbeat, options.discoveryOptions)
   const peerAuth = new PeerAuth(nodeIdentity, database)
+  const peerSecure = new PeerSecureChannel(nodeIdentity, database)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -96,7 +98,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -110,6 +112,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       clearInterval(leaseSweep)
       await discovery.stop()
       await lanPublisher.stop()
+      peerSecure.close()
       eventStream.close()
       await new Promise<void>((resolveClose, reject) => {
         if (!server.listening) { resolveClose(); return }
@@ -137,6 +140,7 @@ async function route(
   lanPublisher: LanPublisher,
   discovery: PeerDiscovery,
   peerAuth: PeerAuth,
+  peerSecure: PeerSecureChannel,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -148,6 +152,19 @@ async function route(
   }
   if (request.method === 'POST' && url.pathname === '/api/peer/v1/challenge') {
     writeJson(response, 200, { response: peerAuth.acceptChallenge(await readJsonBody(request, 8_192)) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/peer/v1/session') {
+    writeJson(response, 200, { answer: peerSecure.accept(await readJsonBody(request, 8_192)) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/peer/v1/message') {
+    const decrypted = peerSecure.decrypt(await readJsonBody(request, 400_000))
+    let message: unknown
+    try { message = JSON.parse(decrypted.plaintext.toString('utf8')) as unknown }
+    catch { throw new PeerSecureError('INVALID_MESSAGE', 'peer message plaintext is not JSON') }
+    if (!isObject(message) || message.operation !== 'ping') throw new PeerSecureError('OPERATION_DENIED', 'peer operation is not enabled')
+    writeJson(response, 200, { message: peerSecure.encrypt(decrypted.sessionId, Buffer.from(JSON.stringify({ operation: 'pong', nodeId: nodeIdentity.nodeId }))) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/nodes/local') {
@@ -192,6 +209,15 @@ async function route(
     writeJson(response, 200, { verification: await peerAuth.verifyDiscovered(peer) })
     return
   }
+  const connectPeerMatch = url.pathname.match(/^\/api\/nodes\/peers\/(node-[a-f0-9]{32})\/connect$/iu)
+  if (request.method === 'POST' && connectPeerMatch) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'peer secure connection is local-only')
+    assertLocalWriteOrigin(request)
+    const peer = discovery.status().discovered.find(item => item.identity.nodeId === connectPeerMatch[1])
+    if (!peer) throw new RequestError(409, 'PEER_NOT_DISCOVERED', 'peer is not currently discovered')
+    writeJson(response, 200, { connection: await peerSecure.connect(peer) })
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/events') {
     eventStream.subscribe(response)
     return
@@ -215,6 +241,7 @@ async function route(
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'LAN publishing can only be managed from the local App')
     await discovery.stop()
     await lanPublisher.stop()
+    peerSecure.close()
     writeJson(response, 200, { lan: lanPublisher.status(false) })
     return
   }
@@ -536,6 +563,10 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PeerSecureError) {
+    writeJson(response, 401, { error: { code: error.code, message: error.message } })
+    return
+  }
   if (error instanceof PeerAuthError) {
     writeJson(response, 401, { error: { code: error.code, message: error.message } })
     return

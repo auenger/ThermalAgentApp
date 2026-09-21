@@ -70,7 +70,7 @@ export class LanPublisher {
       await this.pair(request, response)
       return
     }
-    if (request.method === 'POST' && url.pathname === '/api/peer/v1/challenge') {
+    if (request.method === 'POST' && (url.pathname === '/api/peer/v1/challenge' || url.pathname === '/api/peer/v1/session')) {
       const remote = request.socket.remoteAddress ?? 'unknown'
       const now = Date.now()
       if (this.peerAttempts.size > 1_024) {
@@ -85,6 +85,10 @@ export class LanPublisher {
         writeJson(response, 429, { error: { code: 'PEER_RATE_LIMITED', message: 'too many peer challenges' } })
         return
       }
+      this.application(request, response)
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/peer/v1/message') {
       this.application(request, response)
       return
     }

@@ -193,6 +193,9 @@ export interface PeerHeartbeat {
   activeAttempts: number
 }
 
+export const PEER_SECURE_PROTOCOL = 'thermal-agent-secure-peer-v1' as const
+export const PEER_SECURE_MAX_PLAINTEXT_BYTES = 256 * 1024
+
 export interface LeaseRecord {
   id: string
   taskId: string
