@@ -535,6 +535,72 @@ export class LocalDatabase {
     }
   }
 
+  retryRun(runId: string, expectedTaskVersion: number): { run: RunRecord; attempt: AttemptRecord; task: TaskRecord } {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const runRow = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as SqliteRow | undefined
+      if (!runRow) throw new Error(`run ${runId} was not found`)
+      const run = decodeRun(runRow)
+      if (!['FAILED', 'CANCELLED'].includes(run.status)) throw new Error('run must be failed or cancelled before retry')
+      const task = this.getTask(run.taskId)
+      if (!task) throw new TaskNotFoundError(run.taskId)
+      if (task.version !== expectedTaskVersion) throw new VersionConflictError(expectedTaskVersion, task.version)
+      if (!['FAILED', 'CANCELLED'].includes(task.executionStatus)) throw new Error('task must be failed or cancelled before retry')
+      const attempts = this.listRunAttempts(runId)
+      if (attempts.length >= 3) throw new Error('run exceeds the maximum of 3 attempts')
+      const previous = attempts.at(-1)
+      if (!previous || !['FAILED', 'CANCELLED', 'INTERRUPTED'].includes(previous.status)) {
+        throw new Error('run must have a terminal failed attempt before retry')
+      }
+      if (!previous.inputArtifactSha256) throw new Error('retry requires an immutable input artifact')
+      const now = new Date().toISOString()
+      const attempt: AttemptRecord = {
+        ...previous,
+        id: randomUUID(),
+        status: 'QUEUED',
+        progressStage: null,
+        outputArtifactSha256: null,
+        startedAt: null,
+        heartbeatAt: null,
+        finishedAt: null,
+        errorCode: null,
+        errorMessage: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      this.db.prepare(`
+        INSERT INTO attempts(
+          id, run_id, executor_node_id, status, plugin_id, plugin_version,
+          parameters_json, progress_stage, input_artifact_sha256, output_artifact_sha256,
+          started_at, heartbeat_at, finished_at, error_code, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, 'QUEUED', ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+      `).run(attempt.id, runId, attempt.executorNodeId, attempt.pluginId, attempt.pluginVersion,
+        JSON.stringify(attempt.parameters), attempt.inputArtifactSha256, now, now)
+      this.db.prepare("UPDATE runs SET status = 'PLANNED', selected_attempt_id = NULL, updated_at = ? WHERE id = ?")
+        .run(now, runId)
+      const taskVersion = task.version + 1
+      this.db.prepare(`
+        UPDATE tasks SET execution_status = 'QUEUED', thermal_verdict = 'PENDING',
+          version = ?, updated_at = ? WHERE id = ? AND version = ?
+      `).run(taskVersion, now, task.id, task.version)
+      this.insertEvent({
+        id: randomUUID(), taskId: task.id, eventType: 'run.retry_queued',
+        fromStatus: task.executionStatus, toStatus: 'QUEUED', reason: '用户显式重试失败的 Run',
+        payload: { runId, previousAttemptId: previous.id, attemptId: attempt.id, attemptNumber: attempts.length + 1 },
+        createdAt: now,
+      })
+      this.db.exec('COMMIT')
+      return {
+        run: this.getRun(runId) as RunRecord,
+        attempt: this.getAttempt(attempt.id) as AttemptRecord,
+        task: this.getTask(task.id) as TaskRecord,
+      }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   getRun(id: string): RunRecord | null {
     const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as SqliteRow | undefined
     return row ? decodeRun(row) : null

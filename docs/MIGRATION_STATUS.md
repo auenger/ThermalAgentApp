@@ -31,7 +31,7 @@
 - [x] 从旧项目迁移风扇动作、写后回读及一次受审批的候选求解协调。
 - [x] 本地求解 Attempt heartbeat、用户取消和 Core 重启中断识别。
 - [x] Windows 进程树强制终止（`taskkill /T /F`，待真实 AEDT 回归）。
-- [ ] 失败 Attempt 的可恢复重试策略。
+- [x] 失败/取消 Run 的显式可恢复重试，复用输入 Artifact 且最多 3 次 Attempt。
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
 - [ ] PDF 报告迁移。
@@ -92,6 +92,7 @@ pnpm dev:core
 - 原生残差、Monitor 稳定性、反向流和求解正常结束证据解析。
 - Core 为 Icepak 操作分配运行目录并通过插件端口调用。
 - Baseline 后台执行、输入快照、进度 heartbeat、取消和结果回收。
+- Baseline 失败后的显式重试、不可变输入复用和 Attempt 上限。
 - DSH preset 解析、Host 启停/重启和一次性 token 认证页面。
 - DSH Agent 实例暴露 13 个工具，其中 5 个为受控散热工具。
 - Thermal Tools Bridge 鉴权、Task 草稿和 Icepak 只读操作。

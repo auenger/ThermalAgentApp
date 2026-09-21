@@ -142,6 +142,8 @@ export interface TaskApprovalDecisionInput {
   reason?: string
 }
 
+export interface ExpectedVersionInput { expectedVersion: number }
+
 export interface TaskEvent {
   id: string
   taskId: string
@@ -355,6 +357,14 @@ export function parseTaskApprovalDecisionInput(value: unknown): TaskApprovalDeci
     expectedVersion: value.expectedVersion === undefined ? undefined : Number(value.expectedVersion),
     reason: typeof value.reason === 'string' ? value.reason.trim().slice(0, 500) : undefined,
   }
+}
+
+export function parseExpectedVersionInput(value: unknown): ExpectedVersionInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  if (!Number.isInteger(value.expectedVersion) || Number(value.expectedVersion) < 1) {
+    throw new Error('expectedVersion must be a positive integer')
+  }
+  return { expectedVersion: Number(value.expectedVersion) }
 }
 
 export function parseIcepakProjectOperationInput(value: unknown): IcepakProjectOperationInput {

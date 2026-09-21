@@ -173,3 +173,46 @@ test('approved fan candidate reuses baseline evidence and returns for final revi
   assert.deepEqual(database.listTaskRuns(task.id).map(run => run.kind), ['BASELINE', 'CANDIDATE'])
   assert.equal(database.resolveTaskApproval(task.id, 'APPROVED', candidateReview.version).executionStatus, 'COMPLETED')
 })
+
+test('explicit retry creates a bounded new Attempt from the immutable input', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-agent-retry-'))
+  const database = new LocalDatabase(join(root, 'thermal.db'))
+  const artifacts = new ArtifactStore(join(root, 'artifacts'))
+  const source = join(root, 'Project1.aedt')
+  await writeFile(source, 'retry-source')
+  let calls = 0
+  const plugin = {
+    probeEnvironment: unused, inspectProject: unused, fanCheck: unused, fanSolve: unused,
+    async solveProject(input) {
+      calls += 1
+      assert.equal(await readFile(input.projectPath, 'utf8'), 'retry-source')
+      if (calls === 1) throw new Error('simulated AEDT interruption')
+      const artifactDir = join(input.outputDir, 'artifacts')
+      await mkdir(artifactDir, { recursive: true })
+      const solved = join(artifactDir, 'Project1.aedt')
+      await writeFile(solved, 'retry-solved')
+      return {
+        status: 'ok', mode: 'solve', sourceProject: input.projectPath, workingProject: input.projectPath, inputSha256: 'unused',
+        project: { name: 'Project1', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: [], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: [], objects: [] },
+        validation: { verified: true, checks: [] }, metrics: { tmaxC: 80, converged: true, solverNormalCompletion: true },
+        artifacts: { projectPath: solved },
+      }
+    },
+  }
+  const manager = new IcepakExecutionManager(root, database, artifacts, plugin)
+  t.after(async () => { await manager.close(); database.close(); await rm(root, { recursive: true, force: true }) })
+  const task = database.createTask(createTask({ title: 'Retry', description: '', ownerNodeId: 'local-node', requirementSnapshot: { targetTmaxC: 90 } }))
+  database.transitionTask(task.id, 'READY', 1)
+  const first = await manager.startBaseline(task.id, { projectPath: source })
+  const failed = await waitFor(() => database.getTask(task.id)?.executionStatus === 'FAILED' && database.getTask(task.id), 'first attempt did not fail')
+  assert.equal(database.getAttempt(first.attempt.id)?.status, 'FAILED')
+
+  const retry = await manager.retryLatestRun(task.id, failed.version)
+  const reviewed = await waitFor(
+    () => database.getAttempt(retry.attempt.id)?.status === 'SUCCEEDED' && database.getTask(task.id)?.executionStatus === 'WAITING_FOR_APPROVAL' && database.getTask(task.id),
+    'retry did not complete',
+  )
+  assert.equal(reviewed.thermalVerdict, 'PASS')
+  assert.equal(database.listRunAttempts(first.run.id).length, 2)
+  assert.equal(calls, 2)
+})

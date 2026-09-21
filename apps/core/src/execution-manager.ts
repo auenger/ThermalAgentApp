@@ -119,6 +119,55 @@ export class IcepakExecutionManager {
     }
   }
 
+  async retryLatestRun(taskId: string, expectedVersion: number): Promise<StartedExecution> {
+    const task = this.database.getTask(taskId)
+    if (!task) throw new Error(`task ${taskId} was not found`)
+    if (!['FAILED', 'CANCELLED'].includes(task.executionStatus)) throw new Error('task must be failed or cancelled before retry')
+    const run = this.database.listTaskRuns(taskId).at(-1)
+    if (!run || !['FAILED', 'CANCELLED'].includes(run.status)) throw new Error('task must have a failed or cancelled latest Run')
+    const previous = this.database.listRunAttempts(run.id).at(-1)
+    if (!previous?.inputArtifactSha256) throw new Error('retry requires an immutable input artifact')
+    const inputArtifact = this.database.getArtifact(previous.inputArtifactSha256)
+    if (!inputArtifact) throw new Error('retry requires the stored input artifact metadata')
+    const retryRoot = join(this.home, 'runs', `retry-${Date.now()}`)
+    const stagedProject = await this.artifacts.materialize(
+      previous.inputArtifactSha256, join(retryRoot, 'input', inputArtifact.originalName),
+    )
+    let baselineMetrics: Record<string, unknown> | undefined
+    if (run.kind === 'CANDIDATE') {
+      const baselineAttemptId = previous.parameters.baselineAttemptId
+      if (typeof baselineAttemptId !== 'string') throw new Error('candidate retry requires its Baseline attempt identity')
+      const resultArtifact = this.database.listAttemptArtifacts(baselineAttemptId).find(item => item.role === 'SOLVER_RESULT')
+      if (!resultArtifact) throw new Error('candidate retry requires Baseline result evidence')
+      const baseline = JSON.parse(await readFile(this.artifacts.resolveArtifact(resultArtifact.sha256), 'utf8')) as IcepakProjectOperationResult
+      if (!baseline.metrics || typeof baseline.metrics !== 'object') throw new Error('candidate retry requires Baseline metrics')
+      baselineMetrics = baseline.metrics
+    }
+    const retried = this.database.retryRun(run.id, expectedVersion)
+    this.database.linkAttemptArtifact({
+      attemptId: retried.attempt.id, sha256: previous.inputArtifactSha256,
+      role: 'INPUT_PROJECT', createdAt: new Date().toISOString(),
+    })
+    this.database.transitionAttempt(retried.attempt.id, 'STARTING', { progressStage: 'plugin_starting' })
+    this.database.transitionTask(taskId, 'RUNNING', retried.task.version, '失败 Run 已由用户显式重试')
+    const pluginInput = {
+      ...previous.parameters,
+      expectedVersion: undefined,
+      baselineAttemptId: undefined,
+      projectPath: stagedProject,
+      ...(baselineMetrics ? { baselineMetrics } : {}),
+      outputDir: join(this.home, 'runs', retried.attempt.id, 'plugin'),
+      nonGraphical: true,
+    } as IcepakProjectOperationInput & { outputDir: string }
+    const controller = new AbortController()
+    const promise = run.kind === 'CANDIDATE'
+      ? this.executeCandidate(taskId, retried.attempt.id, pluginInput, controller)
+      : this.executeBaseline(taskId, retried.attempt.id, pluginInput, controller)
+    this.active.set(retried.attempt.id, { controller, promise })
+    void promise.finally(() => this.active.delete(retried.attempt.id))
+    return { run: retried.run, attempt: this.database.getAttempt(retried.attempt.id) as AttemptRecord }
+  }
+
   cancel(attemptId: string): void {
     const execution = this.active.get(attemptId)
     if (!execution) throw new Error(`attempt ${attemptId} is not active in this process`)
