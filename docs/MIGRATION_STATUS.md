@@ -23,6 +23,7 @@
 - [x] Local Core HTTP API。
 - [x] Core 同源发布 React Web。
 - [x] Electron 桌面启动入口。
+- [x] Electron 单实例与托盘后台生命周期：关闭窗口不退出 App 或终止 Core，托盘可重新打开工作台并显式退出（待 Windows 桌面实测，锁屏/RDP 场景仍未验证）。
 - [x] Desktop 独占 loopback 端口及开发/packaged 资源路径解析。
 - [x] Icepak 插件进程健康检查、轻量安装识别、本机显式启动/释放独立 AEDT 会话，以及经用户单独授权的真实求解能力验证入口。
 - [x] 从旧项目迁移通用 AEDT 工程检查逻辑。
@@ -104,6 +105,7 @@ pnpm dev:core
 - Skill 草稿证据门槛、幂等提取、并发审核和发布文件权限边界。
 - Skill 驱动 Task、环境/工程前置检查、步骤证据和连续失败自动撤回。
 - Electron 开发与 `app.asar`/unpacked 资源路径分离。
+- Electron 托盘图标 PNG 结构、单实例启动与关窗留后台代码路径已实现；实际系统托盘和后台真实 Icepak 求解仍待 Windows GUI 验收。
 - Windows 进程树终止命令和非 Windows 信号降级。
 - 已审批任务 PDF 报告 Gate、Run/Attempt、热证据、事件与 SHA-256 审计、幂等关联和下载；中文嵌入字体及逐页渲染检查。
 - 持久 Ed25519 节点身份、API Owner 防伪、旧任务迁移、手动信任/撤销、能力新鲜度与负载筛选、单活租约/epoch 栅栏及分区后的保守升级。

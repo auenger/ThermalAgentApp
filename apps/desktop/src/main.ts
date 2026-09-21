@@ -1,13 +1,16 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, dialog, nativeTheme } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, Tray } from 'electron'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { resolveDesktopRuntimePaths, validatePackagedRuntime } from './runtime-paths.js'
 import { terminateProcessTree } from '@thermal-agent/process-control'
+import { createTrayIconPng } from './tray-icon.js'
 
 let coreOrigin = ''
 let window: BrowserWindow | undefined
+let tray: Tray | undefined
 let coreProcess: ChildProcess | undefined
+let creatingWindow: Promise<void> | undefined
 
 async function availablePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
@@ -72,33 +75,85 @@ function startCore(): void {
   coreProcess.stderr?.on('data', data => process.stderr.write(data))
 }
 
-async function createWindow(): Promise<void> {
-  coreOrigin = `http://127.0.0.1:${await availablePort()}`
-  startCore()
-  await waitForCore()
-  window = new BrowserWindow({
-    width: 1380,
-    height: 900,
-    minWidth: 960,
-    minHeight: 680,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1f1f1f' : '#f4f4f4',
-    title: 'Thermal Agent',
-    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
-  })
-  window.setMenuBarVisibility(false)
-  await window.loadURL(coreOrigin)
+async function showWindow(): Promise<void> {
+  if (window && !window.isDestroyed()) {
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+    return
+  }
+  if (creatingWindow) return creatingWindow
+  creatingWindow = (async () => {
+    if (!coreOrigin) {
+      coreOrigin = `http://127.0.0.1:${await availablePort()}`
+      startCore()
+    }
+    await waitForCore()
+    const next = new BrowserWindow({
+      width: 1380,
+      height: 900,
+      minWidth: 960,
+      minHeight: 680,
+      backgroundColor: nativeTheme.shouldUseDarkColors ? '#1f1f1f' : '#f4f4f4',
+      title: 'Thermal Agent',
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    })
+    window = next
+    next.on('closed', () => { if (window === next) window = undefined })
+    next.setMenuBarVisibility(false)
+    try {
+      await next.loadURL(coreOrigin)
+      if (!next.isDestroyed()) next.show()
+    } catch (error) {
+      if (!next.isDestroyed()) next.destroy()
+      throw error
+    }
+  })().finally(() => { creatingWindow = undefined })
+  return creatingWindow
 }
 
-app.whenReady().then(createWindow).catch(error => {
-  console.error(error)
-  dialog.showErrorBox('Thermal Agent 无法启动', error instanceof Error ? error.message : String(error))
+function openWindow(): void {
+  void showWindow().catch(error => {
+    console.error(error)
+    dialog.showErrorBox('Thermal Agent 工作台无法打开', error instanceof Error ? error.message : String(error))
+  })
+}
+
+function createTray(): void {
+  const icon = nativeImage.createFromBuffer(createTrayIconPng())
+  if (icon.isEmpty()) throw new Error('托盘图标无法加载')
+  tray = new Tray(icon)
+  tray.setToolTip('Thermal Agent · 后台任务运行中')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开工作台', click: openWindow },
+    { type: 'separator' },
+    { label: '退出应用', click: () => app.quit() },
+  ]))
+  tray.on('double-click', openWindow)
+}
+
+if (!app.requestSingleInstanceLock()) {
   app.quit()
-})
+} else {
+  app.on('second-instance', openWindow)
+  app.whenReady().then(async () => {
+    createTray()
+    await showWindow()
+  }).catch(error => {
+    console.error(error)
+    dialog.showErrorBox('Thermal Agent 无法启动', error instanceof Error ? error.message : String(error))
+    app.quit()
+  })
+}
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  // The Core, DSH Host and any active Icepak task keep running in the tray.
 })
 
+app.on('activate', openWindow)
+
 app.on('before-quit', () => {
+  tray?.destroy()
   if (coreProcess) terminateProcessTree(coreProcess)
 })

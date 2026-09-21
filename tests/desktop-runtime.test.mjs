@@ -3,9 +3,25 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
+import { inflateSync } from 'node:zlib'
 import test from 'node:test'
 import { resolveDesktopRuntimePaths, validatePackagedRuntime } from '../apps/desktop/dist/runtime-paths.js'
+import { createTrayIconPng } from '../apps/desktop/dist/tray-icon.js'
 const { verifyBundle } = createRequire(import.meta.url)('../scripts/verify-electron-bundle.cjs')
+
+test('desktop tray icon is a visible, self-contained PNG', () => {
+  const png = createTrayIconPng()
+  assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a')
+  assert.equal(png.readUInt32BE(16), 32)
+  assert.equal(png.readUInt32BE(20), 32)
+  const idatOffset = png.indexOf(Buffer.from('IDAT'))
+  assert.ok(idatOffset > 0)
+  const image = inflateSync(png.subarray(idatOffset + 4, idatOffset + 4 + png.readUInt32BE(idatOffset - 4)))
+  const pixel = (x, y) => image.subarray(y * 129 + 1 + x * 4, y * 129 + 5 + x * 4)
+  assert.equal(pixel(0, 0)[3], 0)
+  assert.deepEqual([...pixel(16, 16)], [255, 146, 62, 255])
+  assert.deepEqual([...pixel(7, 16)], [28, 51, 76, 255])
+})
 
 test('desktop development paths resolve from the workspace instead of process cwd', () => {
   const appPath = resolve('/workspace/ThermalAgentApp/apps/desktop')
