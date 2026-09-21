@@ -66,10 +66,10 @@
 ## 阶段 4：去中心化计算节点
 
 - [x] 显式 LAN 发布下的签名 UDP 组播节点发现、30 秒时效与重放防护（待 Windows 双机和防火墙验收）。
-- [x] 持久节点身份、本机手动信任登记、双向签名身份握手及短时 X25519/AES-GCM 加密通道；加密 ping、Offer、租约续期与当前租约授权的输入分块读取已验证，自动配对和结果 Artifact 操作待实现。
+- [x] 持久节点身份、本机手动信任登记、双向签名身份握手及短时 X25519/AES-GCM 加密通道；加密 ping、Offer、租约续期与当前租约授权的输入下载、结果上传原语已验证，自动配对待实现。
 - [ ] 可用于自动调度的真实 Icepak 能力心跳（签名 UDP 心跳、持久快照、30 秒新鲜度和负载选择已接通；显式深度探测可证明 `LAUNCHABLE`，但求解许可证、项目兼容性和自动刷新仍未验证，因此不会宣告 `READY` 或容量）。
 - [ ] Owner、Executor、Attempt 和 Lease 远程协调（已有 Owner 绑定、原子 Lease/epoch/过期栅栏、加密续租、Owner 显式派单、默认关闭的 Executor 持久收件箱和受租约约束的自动输入暂存；自动排队调度、Icepak 远程求解与结果同步未接线）。
-- [ ] Artifact 分块传输和断点续传（已把 Owner 到 Executor 的租约授权输入分块拉取、部分文件续传和完整 SHA 校验接入持久收件箱；结果回传、自动排队调度和 Windows 双机验证待完成）。
+- [ ] Artifact 分块传输和断点续传（输入自动暂存与结果上传原语已实现租约校验、部分文件续传和 SHA 校验；结果上传尚未接入远程求解流程，自动调度、空间管理和 Windows 双机验证待完成）。
 - [ ] 网络分区、租约超时和迟到结果处理。
 
 ## 当前验证命令
@@ -115,5 +115,6 @@ pnpm dev:core
 - Executor 远程接单默认关闭，可经本机“计算节点”页或 API 显式开启；可信 Owner 的加密 Baseline Offer 需通过本机 Icepak READY/能力/版本、空闲槽位与目标节点校验，SQLite 按 Attempt 幂等保存并展示收件记录。
 - Owner 可通过本机 Task API/UI 从签名发现的 READY 空闲节点中显式派发 Baseline：输入快照、Run/Attempt/Artifact/QUEUED 原子准备、租约领取、加密 Offer、失败重发及未执行旧租约的 epoch 更新均有双 App 测试。
 - Executor 收到 Offer 后会在可信 Owner 被发现时自动续租并拉取输入，支持中断续传和完整 SHA 校验；`remote_jobs` 用 Lease ID/epoch 栅栏进入 `INPUT_READY`。测试覆盖租约过期后新 epoch 再验输入。此阶段仍不启动远程 Icepak 或同步结果，也没有后台自动排队调度。
+- Executor 到 Owner 的结果分块上传原语已实现：加密会话、定期续租、可恢复部分文件、最终 SHA 校验、当前 Lease/epoch 与最新 Attempt 校验、SQLite 原子关联及重复确认。双 App 测试覆盖损坏文件、错误节点/epoch、终止 Attempt 和部分块恢复。尚未从 `INPUT_READY` 自动运行 Icepak，也未实现结果 Manifest 与最终状态判定，因此不能视为远程求解闭环。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

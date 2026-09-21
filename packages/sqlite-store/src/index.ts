@@ -1239,6 +1239,37 @@ export class LocalDatabase {
     return record
   }
 
+  linkLeasedResultArtifact(
+    ownerNodeId: string, executorNodeId: string, taskId: string, attemptId: string,
+    leaseId: string, epoch: number, artifact: ArtifactRecord,
+    role: 'SOLVED_PROJECT' | 'SOLVER_RESULT' | 'CONVERGENCE_EVIDENCE' | 'LOG',
+  ): AttemptArtifactRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const task = this.getTask(taskId)
+      const attempt = this.getAttempt(attemptId)
+      const run = attempt ? this.getRun(attempt.runId) : null
+      if (!task || task.ownerNodeId !== ownerNodeId || !run || run.taskId !== taskId ||
+        attempt?.executorNodeId !== executorNodeId ||
+        !['QUEUED', 'STARTING', 'RUNNING'].includes(attempt.status) ||
+        this.listTaskRuns(taskId).at(-1)?.id !== run.id ||
+        this.listRunAttempts(run.id).at(-1)?.id !== attemptId ||
+        !this.isCurrentLease(leaseId, taskId, executorNodeId, epoch)) {
+        throw new LeaseConflictError('result artifact is not authorized by the current attempt lease')
+      }
+      const conflicting = this.listAttemptArtifacts(attemptId).find(item => item.role === role && item.sha256 !== artifact.sha256)
+      if (conflicting) throw new PeerConflictError(`attempt already has a different ${role} artifact`)
+      this.upsertArtifact(artifact)
+      const record: AttemptArtifactRecord = { attemptId, sha256: artifact.sha256, role, createdAt: new Date().toISOString() }
+      this.linkAttemptArtifact(record)
+      this.db.exec('COMMIT')
+      return record
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   listAttemptArtifacts(attemptId: string): AttemptArtifactRecord[] {
     const rows = this.db.prepare(`
       SELECT attempt_id, sha256, role, created_at

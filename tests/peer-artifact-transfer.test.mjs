@@ -86,6 +86,34 @@ test('executor resumes encrypted input transfer only for its current task lease'
     error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
   await assert.rejects(service.readLeasedInput(executorIdentity.nodeId, { ...reference, epoch: reference.epoch + 1, offset: 0 }),
     error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
+  const resultData = Buffer.alloc(PEER_ARTIFACT_CHUNK_BYTES * 2 + 19, 37)
+  const resultArtifact = await executorArtifacts.putBytes(resultData, 'solved.aedt')
+  executorDb.upsertArtifact(resultArtifact)
+  const resultReference = { ...reference, sha256: resultArtifact.sha256, sizeBytes: resultArtifact.sizeBytes,
+    originalName: resultArtifact.originalName, mediaType: resultArtifact.mediaType }
+  const resultPartRoot = join(owner.artifacts.root, 'tmp', 'peer-results')
+  await mkdir(resultPartRoot, { recursive: true })
+  await writeFile(join(resultPartRoot, `${attempt.id}-SOLVED_PROJECT-${resultArtifact.sha256}.part`),
+    resultData.subarray(0, 100_000))
+  await assert.rejects(service.receiveResultChunk('node-' + 'a'.repeat(32), {
+    operation: 'artifact.result.chunk', ...resultReference, role: 'SOLVED_PROJECT', offset: 0,
+    data: resultData.subarray(0, PEER_ARTIFACT_CHUNK_BYTES).toString('base64url'), eof: false,
+  }), error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
+  await receiver.uploadLeasedResult(ownerPeer, resultReference, 'SOLVED_PROJECT', channel)
+  assert.deepEqual(await readFile(owner.artifacts.resolveArtifact(resultArtifact.sha256)), resultData)
+  assert.equal(owner.database.listAttemptArtifacts(attempt.id).filter(item => item.role === 'SOLVED_PROJECT').length, 1)
+  await receiver.uploadLeasedResult(ownerPeer, resultReference, 'SOLVED_PROJECT', channel)
+  assert.equal(owner.database.listAttemptArtifacts(attempt.id).filter(item => item.role === 'SOLVED_PROJECT').length, 1)
+  await assert.rejects(service.receiveResultChunk(executorIdentity.nodeId, {
+    operation: 'artifact.result.chunk', ...resultReference, epoch: lease.epoch + 1, role: 'SOLVER_RESULT',
+    offset: 0, data: 'AA', eof: false,
+  }), error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
+  const badSha = 'f'.repeat(64)
+  await assert.rejects(service.receiveResultChunk(executorIdentity.nodeId, {
+    operation: 'artifact.result.chunk', ...resultReference, sha256: badSha, sizeBytes: 1, role: 'SOLVER_RESULT',
+    offset: 0, data: 'AA', eof: true,
+  }), error => error instanceof PeerArtifactError && error.code === 'HASH_MISMATCH')
+  assert.equal(owner.database.listAttemptArtifacts(attempt.id).filter(item => item.role === 'SOLVER_RESULT').length, 0)
   assert.equal(owner.database.getRun(run.id)?.taskId, task.id)
   owner.database.transitionAttempt(attempt.id, 'STARTING')
   owner.database.transitionAttempt(attempt.id, 'FAILED', { errorCode: 'TEST_FAILED' })
@@ -96,4 +124,7 @@ test('executor resumes encrypted input transfer only for its current task lease'
     error => error instanceof PeerLeaseError && error.code === 'LEASE_NOT_AUTHORIZED')
   await assert.rejects(service.readLeasedInput(executorIdentity.nodeId, { ...reference, offset: 0 }),
     error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
+  await assert.rejects(service.receiveResultChunk(executorIdentity.nodeId, {
+    operation: 'artifact.result.chunk', ...resultReference, role: 'LOG', offset: 0, data: 'AA', eof: false,
+  }), error => error instanceof PeerArtifactError && error.code === 'ARTIFACT_NOT_AUTHORIZED')
 })

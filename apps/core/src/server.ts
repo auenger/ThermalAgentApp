@@ -184,6 +184,8 @@ async function route(
       reply = { operation: 'pong', nodeId: nodeIdentity.nodeId }
     } else if (isObject(message) && message.operation === 'artifact.input.chunk') {
       reply = await peerArtifacts.readLeasedInput(decrypted.peerNodeId, message)
+    } else if (isObject(message) && message.operation === 'artifact.result.chunk') {
+      reply = await peerArtifacts.receiveResultChunk(decrypted.peerNodeId, message)
     } else if (isObject(message) && message.operation === 'lease.renew') {
       reply = peerLeases.renewForExecutor(decrypted.peerNodeId, message)
     } else if (isObject(message) && message.operation === 'task.baseline.offer') {

@@ -6,6 +6,7 @@ import type { ArtifactStore } from '@thermal-agent/artifact-store'
 import type { ArtifactRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import { PeerSecureChannel } from './peer-secure-channel.js'
+import { PeerLeaseControl } from './peer-lease-control.js'
 import type { DiscoveredPeer } from './peer-discovery.js'
 
 export const PEER_ARTIFACT_CHUNK_BYTES = 128 * 1024
@@ -32,12 +33,23 @@ export interface InputChunk {
   mediaType: string
 }
 
+export interface LeasedResultChunk extends LeasedInputReference {
+  operation: 'artifact.result.chunk'
+  role: 'SOLVED_PROJECT' | 'SOLVER_RESULT' | 'CONVERGENCE_EVIDENCE' | 'LOG'
+  offset: number
+  data: string
+  eof: boolean
+  originalName: string
+  mediaType: string
+}
+
 export class PeerArtifactError extends Error {
   constructor(readonly code: string, message: string) { super(message) }
 }
 
 export class PeerArtifactTransfer {
   private readonly activeDownloads = new Set<string>()
+  private readonly activeUploads = new Set<string>()
   constructor(
     private readonly localNodeId: string,
     private readonly database: LocalDatabase,
@@ -80,6 +92,127 @@ export class PeerArtifactTransfer {
       sizeBytes: artifact.sizeBytes, offset: input.offset,
       data: data.toString('base64url'), eof: input.offset + data.byteLength === artifact.sizeBytes,
       originalName: artifact.originalName, mediaType: artifact.mediaType,
+    }
+  }
+
+  async receiveResultChunk(peerNodeId: string, value: unknown): Promise<{ operation: 'artifact.result.chunk.accepted'; offset: number; complete: boolean; sha256: string }> {
+    const chunk = parseResultChunk(value)
+    const key = `${chunk.attemptId}-${chunk.role}-${chunk.sha256}`
+    if (this.activeUploads.has(key)) throw new PeerArtifactError('TRANSFER_BUSY', 'this result artifact is being written')
+    this.activeUploads.add(key)
+    try {
+      this.assertResultLease(peerNodeId, chunk)
+      const completed = this.database.listAttemptArtifacts(chunk.attemptId).some(item => item.role === chunk.role && item.sha256 === chunk.sha256)
+      if (completed) {
+        const artifact = this.database.getArtifact(chunk.sha256)
+        if (!artifact || artifact.sizeBytes !== chunk.sizeBytes) throw new PeerArtifactError('ARTIFACT_CHANGED', 'linked result metadata is inconsistent')
+        return { operation: 'artifact.result.chunk.accepted', offset: chunk.sizeBytes, complete: true, sha256: chunk.sha256 }
+      }
+      const partialRoot = join(this.artifacts.root, 'tmp', 'peer-results')
+      await mkdir(partialRoot, { recursive: true })
+      const partialPath = join(partialRoot, `${key}.part`)
+      const handle = await open(partialPath, 'a')
+      await handle.close()
+      let offset = (await stat(partialPath)).size
+      if (offset > chunk.sizeBytes) throw new PeerArtifactError('INVALID_PARTIAL', 'partial result exceeds declared size')
+      if (chunk.offset < offset) {
+        const current = await open(partialPath, 'r')
+        try {
+          const existing = Buffer.alloc(Math.min(chunk.data.byteLength, offset - chunk.offset))
+          const { bytesRead } = await current.read(existing, 0, existing.length, chunk.offset)
+          if (bytesRead !== existing.length || !existing.equals(chunk.data.subarray(0, existing.length))) {
+            throw new PeerArtifactError('CHUNK_CONFLICT', 'replayed result chunk differs from stored data')
+          }
+          if (chunk.data.byteLength > existing.length) {
+            await appendFile(partialPath, chunk.data.subarray(existing.length))
+            offset = chunk.offset + chunk.data.byteLength
+          }
+        } finally { await current.close() }
+      } else if (chunk.offset === offset) {
+        if (chunk.data.byteLength) await appendFile(partialPath, chunk.data)
+        offset += chunk.data.byteLength
+      } else throw new PeerArtifactError('INVALID_OFFSET', `expected offset ${offset}`)
+      this.assertResultLease(peerNodeId, chunk)
+      if (!chunk.eof || offset !== chunk.sizeBytes) {
+        return { operation: 'artifact.result.chunk.accepted', offset, complete: false, sha256: chunk.sha256 }
+      }
+      const hash = createHash('sha256')
+      for await (const part of createReadStream(partialPath)) hash.update(part)
+      if (hash.digest('hex') !== chunk.sha256) {
+        await unlink(partialPath)
+        throw new PeerArtifactError('HASH_MISMATCH', 'uploaded result artifact hash does not match')
+      }
+      this.assertResultLease(peerNodeId, chunk)
+      const artifact = await this.artifacts.importFile(partialPath, chunk.originalName, chunk.mediaType)
+      if (artifact.sha256 !== chunk.sha256 || artifact.sizeBytes !== chunk.sizeBytes) {
+        throw new PeerArtifactError('HASH_MISMATCH', 'stored result artifact differs from declared content')
+      }
+      try {
+        this.database.linkLeasedResultArtifact(this.localNodeId, peerNodeId, chunk.taskId, chunk.attemptId,
+          chunk.leaseId, chunk.epoch, artifact, chunk.role)
+      } catch {
+        throw new PeerArtifactError('ARTIFACT_NOT_AUTHORIZED', 'result was not linked: attempt lease changed or role conflicts')
+      }
+      await unlink(partialPath)
+      return { operation: 'artifact.result.chunk.accepted', offset, complete: true, sha256: chunk.sha256 }
+    } finally { this.activeUploads.delete(key) }
+  }
+
+  async uploadLeasedResult(
+    owner: DiscoveredPeer, reference: LeasedInputReference,
+    role: LeasedResultChunk['role'], channel: PeerSecureChannel, signal?: AbortSignal,
+  ): Promise<void> {
+    const input = parseReference({ ...reference, offset: 0 })
+    const artifact = this.database.getArtifact(input.sha256)
+    if (!artifact || artifact.sizeBytes !== input.sizeBytes) throw new PeerArtifactError('ARTIFACT_NOT_FOUND', 'local result artifact is unavailable')
+    const path = this.artifacts.resolveArtifact(input.sha256)
+    const hash = createHash('sha256')
+    for await (const part of createReadStream(path)) hash.update(part)
+    if (hash.digest('hex') !== input.sha256) throw new PeerArtifactError('HASH_MISMATCH', 'local result artifact changed before upload')
+    const handle = await open(path, 'r')
+    try {
+      if ((await handle.stat()).size !== input.sizeBytes) throw new PeerArtifactError('ARTIFACT_CHANGED', 'local result size changed')
+      const connection = await channel.connect(owner)
+      let offset = 0
+      let renewedAt = 0
+      while (true) {
+        if (signal?.aborted) throw new PeerArtifactError('TRANSFER_CANCELLED', 'result upload was stopped')
+        if (Date.now() - renewedAt > 20_000) {
+          await PeerLeaseControl.renewOnOwner(owner, channel, input.leaseId, input.epoch)
+          renewedAt = Date.now()
+        }
+        const size = Math.min(PEER_ARTIFACT_CHUNK_BYTES, input.sizeBytes - offset)
+        const bytes = Buffer.alloc(size)
+        const { bytesRead } = await handle.read(bytes, 0, size, offset)
+        if (bytesRead !== size) throw new PeerArtifactError('ARTIFACT_CHANGED', 'local result was truncated during upload')
+        const response = await channel.request(owner, connection.sessionId, {
+          operation: 'artifact.result.chunk', ...input, role, offset, data: bytes.toString('base64url'),
+          eof: offset + size === input.sizeBytes, originalName: reference.originalName ?? artifact.originalName,
+          mediaType: reference.mediaType ?? artifact.mediaType,
+        })
+        if (!isObject(response) || response.operation !== 'artifact.result.chunk.accepted' ||
+          response.sha256 !== input.sha256 || !Number.isSafeInteger(response.offset) ||
+          Number(response.offset) < offset + size || Number(response.offset) > input.sizeBytes ||
+          typeof response.complete !== 'boolean') {
+          throw new PeerArtifactError('INVALID_ACK', 'owner returned an inconsistent result upload acknowledgement')
+        }
+        offset = Number(response.offset)
+        if (response.complete && offset === input.sizeBytes) return
+        if (offset === input.sizeBytes) throw new PeerArtifactError('INVALID_ACK', 'owner did not commit the complete result artifact')
+      }
+    } finally { await handle.close() }
+  }
+
+  private assertResultLease(peerNodeId: string, reference: LeasedInputReference): void {
+    const task = this.database.getTask(reference.taskId)
+    const attempt = this.database.getAttempt(reference.attemptId)
+    const run = attempt ? this.database.getRun(attempt.runId) : null
+    if (!task || task.ownerNodeId !== this.localNodeId || !run || run.taskId !== task.id ||
+      attempt?.executorNodeId !== peerNodeId || !['QUEUED', 'STARTING', 'RUNNING'].includes(attempt.status) ||
+      this.database.listTaskRuns(task.id).at(-1)?.id !== run.id ||
+      this.database.listRunAttempts(run.id).at(-1)?.id !== attempt.id ||
+      !this.database.isCurrentLease(reference.leaseId, task.id, peerNodeId, reference.epoch)) {
+      throw new PeerArtifactError('ARTIFACT_NOT_AUTHORIZED', 'result artifact is not authorized by the current attempt lease')
     }
   }
 
@@ -165,5 +298,26 @@ function parseChunk(value: unknown): Omit<InputChunk, 'data'> & { data: Buffer }
   const data = Buffer.from(value.data, 'base64url')
   return { operation: 'artifact.input.chunk.result', sha256: value.sha256, sizeBytes: Number(value.sizeBytes),
     offset: Number(value.offset), data, eof: value.eof, originalName: value.originalName, mediaType: value.mediaType }
+}
+function parseResultChunk(value: unknown): Omit<LeasedResultChunk, 'data'> & { data: Buffer } {
+  const reference = parseReference(value)
+  if (!isObject(value) || value.operation !== 'artifact.result.chunk' ||
+    !['SOLVED_PROJECT', 'SOLVER_RESULT', 'CONVERGENCE_EVIDENCE', 'LOG'].includes(String(value.role)) ||
+    typeof value.data !== 'string' || value.data.length > 180_000 ||
+    typeof value.eof !== 'boolean' || typeof value.originalName !== 'string' ||
+    value.originalName.length < 1 || value.originalName.length > 255 || value.originalName.includes('\0') ||
+    typeof value.mediaType !== 'string' || value.mediaType.length > 200 ||
+    !/^[a-zA-Z0-9-]{1,80}$/u.test(reference.attemptId) ||
+    reference.sizeBytes > 100 * 1024 * 1024 * 1024) {
+    throw new PeerArtifactError('INVALID_CHUNK', 'result chunk metadata is invalid')
+  }
+  const data = Buffer.from(value.data, 'base64url')
+  if (data.byteLength > PEER_ARTIFACT_CHUNK_BYTES || reference.offset + data.byteLength > reference.sizeBytes ||
+    value.eof !== (reference.offset + data.byteLength === reference.sizeBytes) ||
+    (!value.eof && data.byteLength === 0)) {
+    throw new PeerArtifactError('INVALID_CHUNK', 'result chunk size or completion flag is invalid')
+  }
+  return { ...reference, operation: 'artifact.result.chunk', role: value.role as LeasedResultChunk['role'],
+    data, eof: value.eof, originalName: value.originalName, mediaType: value.mediaType }
 }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) }
