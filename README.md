@@ -28,17 +28,19 @@
 - Token 保护的 Thermal Tools Bridge，以及任务、Icepak 探测和工程检查工具。
 - 以完成任务证据为来源的 Skill 草稿、人工审核、版本记录和 DSH `SKILL.md` 发布/撤回。
 - Skill Run、步骤证据与失败统计；启用 Skill 可先完成环境/工程检查再创建 Task，连续 3 次失败自动撤回并进入 `NEEDS_REPAIR`。
+- 独立 ReportLab PDF 插件：仅对已完成且人工接受的任务生成双语审计报告，并把报告作为 `REPORT` Artifact 关联到选中的 Attempt。App 和已配对的内网 Web 均可查看。
 
 当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 对话式修订、安装包和局域网节点调度。未完成能力不会在界面中显示为可用。
 
-Windows 离线安装包还需要提供固定 Node `22.22.x` 运行时（供 DSH 使用），并将 PyAEDT 插件、DSH CLI 及其依赖放入 unpacked 资源。Desktop 已按这一目录边界解析路径，但仓库当前不伪装成已产出或验证过 Windows 安装包。
+Windows 离线安装包还需要提供固定 Node `22.22.x` 运行时（供 DSH 使用）、带 ReportLab 的 Python 运行时，并将 PyAEDT/报告插件、DSH CLI 及其依赖放入 unpacked 资源。Desktop 已按这一目录边界解析路径，但仓库当前不伪装成已产出或验证过 Windows 安装包。
 
 ## 本地运行
 
-要求 Node.js `^22.19.0` 或 `>=24`、pnpm 11，以及用于 Icepak 插件开发检查的 Python 3。DSH CLI 使用 `import.meta.main`，Node 22.13 会静默跳过入口，因此不能作为运行环境。
+要求 Node.js `^22.19.0` 或 `>=24`、pnpm 11、Python 3 和 uv（安装报告插件依赖及执行其测试）。DSH CLI 使用 `import.meta.main`，Node 22.13 会静默跳过入口，因此不能作为运行环境。
 
 ```sh
 pnpm install
+uv sync --project plugins/report-reportlab
 pnpm test
 pnpm dev:core
 ```
@@ -52,6 +54,9 @@ THERMAL_AGENT_PORT
 THERMAL_AGENT_DSH_CLI
 THERMAL_AGENT_NODE_BIN
 THERMAL_AGENT_DSH_PLUGIN
+THERMAL_REPORT_PLUGIN_ROOT
+THERMAL_REPORT_PYTHON
+REPORT_FONT_PATH
 ```
 
 局域网绑定不会默认开启。在本机“设置 → 局域网发布”显式开启后，静态配对页可访问，但 API 与 SSE 必须先完成短时码配对；管理 Listener 和查看配对码仍只允许本机。当前为受信任内网 HTTP 模式，尚未完成 TLS 证书与持久设备身份，不应暴露到公网或不可信 Wi-Fi。
@@ -61,6 +66,8 @@ THERMAL_AGENT_DSH_PLUGIN
 “Agent”页面嵌入本机 DSH 对话。Agent 可以通过自然语言创建 Task 草稿、读取任务证据、探测 Icepak 和检查工程，但工具层不提供直接启动 Baseline 的能力；需求确认和昂贵求解必须回到 App 操作。
 
 完成任务只有在存在成功 Attempt，且输入工程、求解工程和结构化结果 Artifact 齐全时，才能沉淀为 Skill 草稿。草稿不会进入 DSH；用户在“技能”页面审核启用后才发布到本机工作区，停用会撤回发布文件。
+
+已完成且人工接受的任务可从“任务”页面生成/查看 PDF。报告分开呈现执行状态、热判定与审批状态，列出 Run/Attempt、温度与收敛证据、任务事件及 Artifact SHA-256；报告本身也会进入 Artifact Store。报告是证据归档，不是工程签字。Windows 运行时需附带 ReportLab/PyPDF 与可嵌入的 CJK 字体（可用 `REPORT_FONT_PATH` 指定）。
 
 ## 目录
 
@@ -73,6 +80,7 @@ packages/domain/           Task 状态机和领域规则
 packages/sqlite-store/     SQLite migration 与 Repository
 packages/artifact-store/   本地内容寻址文件存储
 plugins/icepak-pyaedt/     独立 Python Icepak 插件
+plugins/report-reportlab/  独立 Python PDF 报告插件
 plugins/dsh-thermal/       DSH 散热工具插件
 docs/adr/                  架构决策记录
 tests/                     跨包集成测试

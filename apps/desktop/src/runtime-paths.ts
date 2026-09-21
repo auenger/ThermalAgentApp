@@ -6,6 +6,8 @@ export interface DesktopRuntimePaths {
   coreEntry: string
   webRoot: string
   icepakPluginRoot: string
+  reportPluginRoot: string
+  reportPython?: string
   dshPlugin: string
   dshCli?: string
   nodeBin?: string
@@ -27,6 +29,7 @@ export function resolveDesktopRuntimePaths(options: {
       coreEntry: join(appRoot, 'apps', 'core', 'dist', 'cli.js'),
       webRoot: join(appRoot, 'apps', 'web', 'dist'),
       icepakPluginRoot: join(appRoot, 'plugins', 'icepak-pyaedt', 'python'),
+      reportPluginRoot: join(appRoot, 'plugins', 'report-reportlab', 'python'),
       dshPlugin: join(appRoot, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
       nodeBin: options.nodeOverride,
       workingDirectory: appRoot,
@@ -37,11 +40,14 @@ export function resolveDesktopRuntimePaths(options: {
   const unpackedRoot = join(options.resourcesPath, 'app.asar.unpacked')
   const packagedNode = join(options.resourcesPath, 'node', platform === 'win32' ? 'node.exe' : 'bin/node')
   const dshCli = join(unpackedRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  const reportPython = join(options.resourcesPath, 'python', platform === 'win32' ? 'python.exe' : 'bin/python')
   return {
     appRoot,
     coreEntry: join(appRoot, 'apps', 'core', 'dist', 'cli.js'),
     webRoot: join(appRoot, 'apps', 'web', 'dist'),
     icepakPluginRoot: join(unpackedRoot, 'plugins', 'icepak-pyaedt', 'python'),
+    reportPluginRoot: join(unpackedRoot, 'plugins', 'report-reportlab', 'python'),
+    reportPython: existsSync(reportPython) ? reportPython : undefined,
     dshPlugin: join(unpackedRoot, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
     dshCli: existsSync(dshCli) ? dshCli : undefined,
     nodeBin: options.nodeOverride ?? (existsSync(packagedNode) ? packagedNode : undefined),

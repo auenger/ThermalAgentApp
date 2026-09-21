@@ -357,7 +357,7 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline' | 'candidate' | 'retry' | 'skill' | 'approve' | 'reject') {
+  async function act(kind: 'confirm' | 'baseline' | 'candidate' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
     setBusy(true); setError('')
     try {
       const response = kind === 'confirm'
@@ -368,11 +368,14 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
             ? await fetch(`/api/tasks/${task.id}/runs/candidate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: task.version, fanSpeedRatio: 1.1, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4, minImprovementC: 0.5 }) })
           : kind === 'retry'
             ? await fetch(`/api/tasks/${task.id}/runs/retry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: task.version }) })
+          : kind === 'report'
+            ? await fetch(`/api/tasks/${task.id}/report`, { method: 'POST' })
           : kind === 'skill'
             ? await fetch(`/api/tasks/${task.id}/skill-draft`, { method: 'POST' })
             : await fetch(`/api/tasks/${task.id}/approval`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: kind === 'approve' ? 'APPROVED' : 'REJECTED', expectedVersion: task.version, reason: kind === 'approve' ? '用户复核并接受求解证据' : '用户拒绝当前结果并升级人工处理' }) })
       const body = await response.json() as { error?: { message?: string } }
       if (!response.ok) throw new Error(body.error?.message ?? '操作未完成')
+      if (kind === 'report') window.open(`/api/tasks/${task.id}/report`, '_blank', 'noopener,noreferrer')
       await onChanged()
     } catch (reason) { setError(reason instanceof Error ? reason.message : '操作未完成') }
     finally { setBusy(false) }
@@ -380,7 +383,7 @@ function TaskAction({ styles, task, onChanged }: { styles: ReturnType<typeof use
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'READY') return <div><Button size="small" appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '启动 Baseline'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'WAITING_FOR_APPROVAL') return <div><div className={styles.headerActions}><Button size="small" appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button>{task.thermalVerdict === 'FAIL' && <Button size="small" disabled={busy} onClick={() => void act('candidate')}>批准风扇 +10%</Button>}<Button size="small" disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
-  if (task.executionStatus === 'COMPLETED') return <div><Button size="small" disabled={busy} onClick={() => void act('skill')}>{busy ? '提取中' : '沉淀 Skill 草稿'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
+  if (task.executionStatus === 'COMPLETED') return <div><div className={styles.headerActions}><Button size="small" disabled={busy} onClick={() => void act('report')}>{busy ? '生成中' : '查看 PDF 报告'}</Button><Button size="small" disabled={busy} onClick={() => void act('skill')}>沉淀 Skill 草稿</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'FAILED' || task.executionStatus === 'CANCELLED') return <div><Button size="small" disabled={busy} onClick={() => void act('retry')}>{busy ? '重试中' : '重试最近 Run'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
   return <span className={styles.details}>{task.executionStatus === 'RUNNING' ? '后台求解中' : '无可用操作'}</span>
 }

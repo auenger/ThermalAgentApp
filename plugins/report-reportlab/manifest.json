@@ -1,0 +1,7 @@
+{
+  "id": "report-reportlab",
+  "version": "0.1.0",
+  "protocolVersion": "1.0.0",
+  "entrypoint": "python -m thermal_report_plugin",
+  "capabilities": ["render-task-report", "embedded-cjk-font"]
+}

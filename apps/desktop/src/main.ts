@@ -57,6 +57,8 @@ function startCore(): void {
       THERMAL_AGENT_PORT: port,
       THERMAL_AGENT_WEB_ROOT: paths.webRoot,
       THERMAL_ICEPAK_PLUGIN_ROOT: paths.icepakPluginRoot,
+      THERMAL_REPORT_PLUGIN_ROOT: paths.reportPluginRoot,
+      ...(paths.reportPython ? { THERMAL_REPORT_PYTHON: paths.reportPython } : {}),
       THERMAL_AGENT_DSH_PLUGIN: paths.dshPlugin,
       ...(paths.dshCli ? { THERMAL_AGENT_DSH_CLI: paths.dshCli } : {}),
       ...(paths.nodeBin ? { THERMAL_AGENT_NODE_BIN: paths.nodeBin } : {}),

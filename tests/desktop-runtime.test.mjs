@@ -33,6 +33,7 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   assert.equal(paths.dshCli, dshCli)
   assert.equal(paths.nodeBin, nodeBin)
   assert.equal(paths.icepakPluginRoot, join(unpacked, 'plugins', 'icepak-pyaedt', 'python'))
+  assert.equal(paths.reportPluginRoot, join(unpacked, 'plugins', 'report-reportlab', 'python'))
   assert.equal(paths.dshPlugin, join(unpacked, 'plugins', 'dsh-thermal', 'dist', 'index.js'))
   assert.match(paths.coreEntry, /app\.asar[/\\]apps[/\\]core[/\\]dist[/\\]cli\.js$/u)
 })

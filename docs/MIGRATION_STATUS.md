@@ -34,7 +34,7 @@
 - [x] 失败/取消 Run 的显式可恢复重试，复用输入 Artifact 且最多 3 次 Attempt。
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
-- [ ] PDF 报告迁移。
+- [x] ReportLab PDF 插件、已审批任务的报告生成/下载、Artifact 关联与中英文字体/渲染验收（待 Windows 离线打包和真实工程报告复核）。
 - [ ] Windows 安装包和真实 AEDT 验收。
 
 ## 阶段 2：DSH Agent
@@ -104,5 +104,6 @@ pnpm dev:core
 - Skill 驱动 Task、环境/工程前置检查、步骤证据和连续失败自动撤回。
 - Electron 开发与 `app.asar`/unpacked 资源路径分离。
 - Windows 进程树终止命令和非 Windows 信号降级。
+- 已审批任务 PDF 报告 Gate、Run/Attempt、热证据、事件与 SHA-256 审计、幂等关联和下载；中文嵌入字体及逐页渲染检查。
 
 GUI smoke 脚本为 `pnpm smoke:gui`。当前无可用桌面会话的执行环境中 Electron 未进入 ready 状态，因此需要在 Windows 或有桌面会话的开发机继续验证。

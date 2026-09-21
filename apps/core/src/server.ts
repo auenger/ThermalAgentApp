@@ -13,12 +13,15 @@ import { DshRuntime } from './dsh-runtime.js'
 import { SkillPublisher } from './skill-publisher.js'
 import { CoreEventStream } from './event-stream.js'
 import { LanPublisher } from './lan-publisher.js'
+import { ReportClient, type ReportPort } from './report-client.js'
+import { ReportConflictError, ReportManager } from './report-manager.js'
 
 export interface CoreAppOptions {
   home: string
   pluginClient?: IcepakPluginPort
   webRoot?: string
   startAgentRuntime?: boolean
+  reportClient?: ReportPort
 }
 
 export interface CoreApp {
@@ -38,12 +41,13 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const agentRuntime = new DshRuntime(home, database, pluginClient)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   const eventStream = new CoreEventStream(database)
+  const reports = new ReportManager(home, database, artifacts, options.reportClient ?? new ReportClient())
   if (options.startAgentRuntime !== false) void agentRuntime.start()
   const webRoot = resolve(options.webRoot ?? process.env.THERMAL_AGENT_WEB_ROOT ?? 'apps/web/dist')
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, pluginClient, executions, agentRuntime, skillPublisher, eventStream, lanPublisher, webRoot, home).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, webRoot, home).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -70,10 +74,12 @@ async function route(
   request: IncomingMessage,
   response: ServerResponse,
   database: LocalDatabase,
+  artifacts: ArtifactStore,
   pluginClient: IcepakPluginPort,
   executions: IcepakExecutionManager,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
+  reports: ReportManager,
   eventStream: CoreEventStream,
   lanPublisher: LanPublisher,
   webRoot: string,
@@ -205,6 +211,25 @@ async function route(
       })),
     }))
     writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id), skillRun: database.getSkillRunForTask(task.id) })
+    return
+  }
+  const reportMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/report$/iu)
+  if (request.method === 'POST' && reportMatch) {
+    writeJson(response, 201, { report: await reports.createTaskReport(reportMatch[1]) })
+    return
+  }
+  if (request.method === 'GET' && reportMatch) {
+    const report = reports.getTaskReport(reportMatch[1])
+    if (!report) throw new RequestError(404, 'REPORT_NOT_FOUND', 'task report has not been generated')
+    const data = await readFile(artifacts.resolveArtifact(report.artifact.sha256))
+    response.writeHead(200, {
+      'Content-Type': 'application/pdf',
+      'Content-Length': String(data.length),
+      'Content-Disposition': `inline; filename="${report.artifact.originalName.replaceAll('"', '')}"`,
+      'Cache-Control': 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
+    })
+    response.end(data)
     return
   }
   const transitionMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/transitions$/iu)
@@ -385,6 +410,10 @@ function writeError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof TaskApprovalConflictError) {
     writeJson(response, 409, { error: { code: 'TASK_APPROVAL_CONFLICT', message: error.message } })
+    return
+  }
+  if (error instanceof ReportConflictError) {
+    writeJson(response, 409, { error: { code: 'REPORT_CONFLICT', message: error.message } })
     return
   }
   if (error instanceof InvalidTaskTransitionError) {
