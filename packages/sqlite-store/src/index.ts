@@ -406,6 +406,9 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (11, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (12, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
@@ -416,6 +419,7 @@ export class LocalDatabase {
     this.ensureColumn('remote_jobs', 'solved_sha256', 'TEXT')
     this.ensureColumn('remote_jobs', 'result_sha256', 'TEXT')
     this.ensureColumn('remote_jobs', 'convergence_sha256', 'TEXT')
+    this.ensureColumn('remote_jobs', 'failure_notification_status', 'TEXT')
     this.ensureColumn('peers', 'free_disk_bytes', 'INTEGER')
   }
 
@@ -771,7 +775,7 @@ export class LocalDatabase {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
-  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'solvedSha256' | 'resultSha256' | 'convergenceSha256' | 'errorCode' | 'errorMessage' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
+  acceptRemoteJob(input: Omit<RemoteJobRecord, 'status' | 'solvedSha256' | 'resultSha256' | 'convergenceSha256' | 'errorCode' | 'errorMessage' | 'failureNotificationStatus' | 'createdAt' | 'updatedAt'>): RemoteJobRecord {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const existing = this.getRemoteJob(input.attemptId)
@@ -790,7 +794,8 @@ export class LocalDatabase {
           this.db.prepare(`
             UPDATE remote_jobs SET lease_id = ?, epoch = ?, status = 'OFFERED',
               solved_sha256 = NULL, result_sha256 = NULL, convergence_sha256 = NULL,
-              error_code = NULL, error_message = NULL, updated_at = ? WHERE attempt_id = ?
+              error_code = NULL, error_message = NULL, failure_notification_status = NULL,
+              updated_at = ? WHERE attempt_id = ?
           `).run(input.leaseId, input.epoch, new Date().toISOString(), input.attemptId)
         }
         this.db.exec('COMMIT')
@@ -835,9 +840,10 @@ export class LocalDatabase {
     }
     if (!allowed[from].includes(to)) throw new PeerConflictError(`remote job transition ${from} -> ${to} is invalid`)
     const updated = this.db.prepare(`
-      UPDATE remote_jobs SET status = ?, error_code = ?, error_message = ?, updated_at = ?
+      UPDATE remote_jobs SET status = ?, error_code = ?, error_message = ?, failure_notification_status = ?, updated_at = ?
       WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status = ?
     `).run(to, error?.code?.slice(0, 100) ?? null, error?.message?.slice(0, 2_000) ?? null,
+      to === 'FAILED' && from === 'RUNNING' ? 'PENDING' : null,
       new Date().toISOString(), attemptId, leaseId, epoch, from)
     if (Number(updated.changes) !== 1) throw new PeerConflictError('remote job was changed or its lease is stale')
     return this.getRemoteJob(attemptId) as RemoteJobRecord
@@ -864,6 +870,15 @@ export class LocalDatabase {
       WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status IN ('OFFERED', 'TRANSFERRING', 'INPUT_READY', 'SYNCING_RESULTS')
     `).run(code.slice(0, 100), message.slice(0, 2_000), new Date().toISOString(), attemptId, leaseId, epoch)
     if (Number(updated.changes) !== 1) throw new PeerConflictError('remote job was changed or its lease is stale')
+  }
+
+  markRemoteFailureNotification(attemptId: string, leaseId: string, epoch: number,
+    status: 'ACKED' | 'EXPIRED'): RemoteJobRecord {
+    const changed = this.db.prepare(`UPDATE remote_jobs SET failure_notification_status = ?
+      WHERE attempt_id = ? AND lease_id = ? AND epoch = ? AND status = 'FAILED'
+        AND failure_notification_status = 'PENDING'`).run(status, attemptId, leaseId, epoch)
+    if (Number(changed.changes) !== 1) throw new PeerConflictError('remote failure notification is stale')
+    return this.getRemoteJob(attemptId) as RemoteJobRecord
   }
 
   claimQueuedTaskLease(
@@ -2013,6 +2028,8 @@ function decodeRemoteJob(row: SqliteRow): RemoteJobRecord {
     convergenceSha256: row.convergence_sha256 === null || row.convergence_sha256 === undefined ? null : String(row.convergence_sha256),
     errorCode: row.error_code === null || row.error_code === undefined ? null : String(row.error_code),
     errorMessage: row.error_message === null || row.error_message === undefined ? null : String(row.error_message),
+    failureNotificationStatus: row.failure_notification_status === null || row.failure_notification_status === undefined
+      ? null : row.failure_notification_status as RemoteJobRecord['failureNotificationStatus'],
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   }
 }

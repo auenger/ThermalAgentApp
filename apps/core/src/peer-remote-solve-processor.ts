@@ -12,6 +12,7 @@ import { provesIcepakSolve } from './icepak-readiness.js'
 
 const RENEW_INTERVAL_MS = 20_000
 const RETRY_DELAY_MS = 10_000
+const FAILURE_NOTIFY_WINDOW_MS = 5 * 60_000
 
 export class PeerRemoteSolveProcessor {
   private timer?: NodeJS.Timeout
@@ -46,21 +47,46 @@ export class PeerRemoteSolveProcessor {
   }
 
   wake(): void {
-    if (this.stopped || this.active || !this.database.remoteExecutionEnabled()) return
-    const job = this.database.listRemoteJobs().find(item =>
-      ['INPUT_READY', 'SYNCING_RESULTS'].includes(item.status) &&
+    if (this.stopped || this.active) return
+    const jobs = this.database.listRemoteJobs()
+    for (const item of jobs.filter(candidate => candidate.status === 'FAILED' && candidate.failureNotificationStatus === 'PENDING')) {
+      if (Date.now() - Date.parse(item.updatedAt) >= FAILURE_NOTIFY_WINDOW_MS) {
+        try { this.database.markRemoteFailureNotification(item.attemptId, item.leaseId, item.epoch, 'EXPIRED') }
+        catch { /* a newer state won */ }
+      }
+    }
+    const failed = jobs.find(item => item.status === 'FAILED' && item.failureNotificationStatus === 'PENDING' &&
+      Date.now() - Date.parse(item.updatedAt) < FAILURE_NOTIFY_WINDOW_MS &&
       (this.retryAfter.get(item.attemptId) ?? 0) <= Date.now())
+    const job = failed ?? (this.database.remoteExecutionEnabled() ? jobs.find(item =>
+      ['INPUT_READY', 'SYNCING_RESULTS'].includes(item.status) &&
+      (this.retryAfter.get(item.attemptId) ?? 0) <= Date.now()) : undefined)
     if (!job) return
     const owner = this.discovery.status().discovered.find(peer =>
       peer.trusted && peer.identity.nodeId === job.ownerNodeId)
     if (!owner) return
     const controller = new AbortController()
     this.controller = controller
-    this.active = this.process(job, owner, controller).finally(() => {
+    this.active = (failed ? this.notifyFailure(job, owner) : this.process(job, owner, controller)).finally(() => {
       this.active = undefined
       this.controller = undefined
       this.wake()
     })
+  }
+
+  private async notifyFailure(job: RemoteJobRecord, owner: DiscoveredPeer): Promise<void> {
+    try {
+      const response = await this.send(owner, { operation: 'task.baseline.fail', ...jobReference(job),
+        code: job.errorCode ?? 'REMOTE_SOLVE_FAILED',
+        message: (job.errorMessage ?? 'remote Icepak solve failed').slice(0, 2_000) })
+      if (!isObject(response) || response.operation !== 'task.baseline.failed' || response.attemptId !== job.attemptId) {
+        throw new Error('Owner did not acknowledge the remote failure')
+      }
+      this.database.markRemoteFailureNotification(job.attemptId, job.leaseId, job.epoch, 'ACKED')
+      this.retryAfter.delete(job.attemptId)
+    } catch {
+      this.retryAfter.set(job.attemptId, Date.now() + RETRY_DELAY_MS)
+    }
   }
 
   async close(): Promise<void> {
@@ -176,14 +202,11 @@ export class PeerRemoteSolveProcessor {
       const current = this.database.getRemoteJob(job.attemptId)
       if (!current || current.leaseId !== job.leaseId || current.epoch !== job.epoch) return
       if (current.status === 'RUNNING') {
-        try {
-          await this.send(owner, { operation: 'task.baseline.fail', ...jobReference(job),
-            code: controller.signal.aborted ? 'REMOTE_SOLVE_CANCELLED' : 'REMOTE_SOLVE_FAILED',
-            message: cause.message.slice(0, 2_000) || 'remote solve failed' })
-        } catch { /* Owner will reconcile an expired lease if unavailable */ }
+        const code = controller.signal.aborted ? 'REMOTE_SOLVE_CANCELLED' : 'REMOTE_SOLVE_FAILED'
         try {
           this.database.transitionRemoteJob(job.attemptId, job.leaseId, job.epoch, 'RUNNING', 'FAILED',
-            { code: 'REMOTE_SOLVE_FAILED', message: cause.message })
+            { code, message: cause.message.slice(0, 2_000) || 'remote solve failed' })
+          await this.notifyFailure(this.database.getRemoteJob(job.attemptId) as RemoteJobRecord, owner)
         } catch { /* newer lease won */ }
       } else if (current.status === 'INPUT_READY' || current.status === 'SYNCING_RESULTS') {
         this.retryAfter.set(job.attemptId, Date.now() + RETRY_DELAY_MS)

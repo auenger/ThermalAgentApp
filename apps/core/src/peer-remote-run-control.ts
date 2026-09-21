@@ -106,6 +106,20 @@ export class PeerRemoteRunControl {
       typeof value.message !== 'string' || !value.message.trim() || value.message.length > 2_000) {
       throw new PeerRemoteRunError('INVALID_RUN_REQUEST', 'remote failure details are invalid')
     }
+    const task = this.database.getTask(reference.taskId)
+    const attempt = this.database.getAttempt(reference.attemptId)
+    const run = attempt ? this.database.getRun(attempt.runId) : null
+    const lease = this.database.getLease(reference.leaseId)
+    if (task?.executionStatus === 'FAILED' && attempt?.status === 'FAILED' && run?.status === 'FAILED' &&
+      run.kind === 'BASELINE' && run.taskId === task.id &&
+      attempt.errorCode === value.code && attempt.errorMessage === value.message && lease?.status === 'RELEASED' &&
+      task.ownerNodeId === this.localNodeId && attempt.executorNodeId === peerNodeId &&
+      lease.taskId === task.id && lease.executorNodeId === peerNodeId && lease.epoch === reference.epoch &&
+      this.database.getPeer(peerNodeId)?.trustStatus === 'TRUSTED' &&
+      this.database.listTaskRuns(task.id).at(-1)?.id === run.id &&
+      this.database.listRunAttempts(run.id).at(-1)?.id === attempt.id) {
+      return { operation: 'task.baseline.failed', attemptId: reference.attemptId }
+    }
     try {
       this.database.failLeasedRemoteBaseline(this.localNodeId, peerNodeId, reference.taskId,
         reference.attemptId, reference.leaseId, reference.epoch, value.code, value.message)

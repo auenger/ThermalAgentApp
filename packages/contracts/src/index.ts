@@ -229,6 +229,7 @@ export interface RemoteJobRecord {
   convergenceSha256: string | null
   errorCode: string | null
   errorMessage: string | null
+  failureNotificationStatus: 'PENDING' | 'ACKED' | 'EXPIRED' | null
   createdAt: string
   updatedAt: string
 }

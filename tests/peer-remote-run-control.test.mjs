@@ -107,6 +107,12 @@ test('Owner finalizes only current leased Baseline after verified remote evidenc
   assert.equal(owner.database.getTask(failedTask.id).executionStatus, 'FAILED')
   assert.equal(owner.database.getAttempt(failedRun.attempt.id).errorCode, 'ICEPAK_SOLVE_FAILED')
   assert.equal(owner.database.getLease(failedLease.id).status, 'RELEASED')
+  assert.equal((await channel.request(ownerPeer, sessionId, { operation: 'task.baseline.fail', ...failedReference,
+    code: 'ICEPAK_SOLVE_FAILED', message: 'mock solver failure' })).operation, 'task.baseline.failed')
+  await assert.rejects(channel.request(ownerPeer, sessionId, { operation: 'task.baseline.fail', ...failedReference,
+    code: 'OTHER_FAILURE', message: 'late conflicting failure' }), error => error.code === 'PEER_REJECTED')
+  await assert.rejects(channel.request(ownerPeer, sessionId, { operation: 'task.baseline.fail', ...failedReference,
+    code: 'ICEPAK_SOLVE_FAILED', message: 'late conflicting details' }), error => error.code === 'PEER_REJECTED')
 
   const expiredTask = owner.database.createTask(createTask({ title: 'Expired remote run', description: '',
     ownerNodeId: owner.nodeIdentity.nodeId, requirementSnapshot: {} }))
