@@ -17,7 +17,7 @@
 - Core SSE 状态流，桌面与 Web 可自动更新 Task 和活跃 Attempt 状态。
 - 默认关闭的独立 LAN Listener；本机显式开启后，远端浏览器必须用 8 位短时码换取 HttpOnly、SameSite 会话。
 - Desktop 为每次 App 会话分配独占 loopback 端口，并区分开发目录与 `app.asar`/unpacked 运行资源。
-- Desktop 单实例与托盘后台：关闭工作台窗口不会终止 Core，托盘可重新打开；真实 Windows 长任务不中断仍待验收。
+- Desktop 单实例与托盘后台：关闭工作台窗口不会终止 Core，托盘可重新打开；Core 异常退出会有限次退避重启。真实 Windows 长任务不中断与恢复仍待验收。
 - Icepak 插件 Manifest、stdio JSON 协议、轻量安装识别与显式独立会话启动探测（`LAUNCHABLE` 不等于求解许可证可用）。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。

@@ -23,7 +23,7 @@
 - [x] Local Core HTTP API。
 - [x] Core 同源发布 React Web。
 - [x] Electron 桌面启动入口。
-- [x] Electron 单实例与托盘后台生命周期：关闭窗口不退出 App 或终止 Core，托盘可重新打开工作台并显式退出（待 Windows 桌面实测，锁屏/RDP 场景仍未验证）。
+- [x] Electron 单实例与托盘后台生命周期：关闭窗口不退出 App 或终止 Core，托盘可重新打开工作台并显式退出；Core 异常退出后最多 3 次退避重启并刷新 UI（待 Windows 桌面实测，锁屏/RDP 场景仍未验证）。
 - [x] Desktop 独占 loopback 端口及开发/packaged 资源路径解析。
 - [x] Icepak 插件进程健康检查、轻量安装识别、本机显式启动/释放独立 AEDT 会话，以及经用户单独授权的真实求解能力验证入口。
 - [x] 从旧项目迁移通用 AEDT 工程检查逻辑。

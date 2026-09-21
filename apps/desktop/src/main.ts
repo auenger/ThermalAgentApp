@@ -3,13 +3,13 @@ import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, Tray } from
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { resolveDesktopRuntimePaths, validatePackagedRuntime } from './runtime-paths.js'
-import { terminateProcessTree } from '@thermal-agent/process-control'
 import { createTrayIconPng } from './tray-icon.js'
+import { CoreProcessSupervisor, type CoreProcessState } from './core-process-supervisor.js'
 
 let coreOrigin = ''
 let window: BrowserWindow | undefined
 let tray: Tray | undefined
-let coreProcess: ChildProcess | undefined
+let coreSupervisor: CoreProcessSupervisor | undefined
 let creatingWindow: Promise<void> | undefined
 
 async function availablePort(): Promise<number> {
@@ -44,14 +44,14 @@ async function waitForCore(timeoutMs = 15_000): Promise<void> {
   throw new Error('本地 Core 启动超时')
 }
 
-function startCore(): void {
+function spawnCore(): ChildProcess {
   const paths = resolveDesktopRuntimePaths({
     appPath: app.getAppPath(), resourcesPath: process.resourcesPath, packaged: app.isPackaged,
     nodeOverride: process.env.THERMAL_AGENT_NODE_BIN,
   })
   if (app.isPackaged) validatePackagedRuntime(paths)
   const port = new URL(coreOrigin).port
-  coreProcess = spawn(process.execPath, [paths.coreEntry], {
+  const coreProcess = spawn(process.execPath, [paths.coreEntry], {
     cwd: paths.workingDirectory,
     env: {
       ...process.env,
@@ -73,9 +73,26 @@ function startCore(): void {
   })
   coreProcess.stdout?.on('data', data => process.stdout.write(data))
   coreProcess.stderr?.on('data', data => process.stderr.write(data))
+  return coreProcess
+}
+
+function onCoreState(state: CoreProcessState, detail?: string): void {
+  if (state === 'restarting') {
+    console.error(`Thermal Agent Core is restarting: ${detail ?? 'unexpected exit'}`)
+    tray?.setToolTip('Thermal Agent · 后台服务正在恢复')
+  } else if (state === 'restarted') {
+    void waitForCore().then(() => {
+      tray?.setToolTip('Thermal Agent · 后台任务运行中')
+      if (window && !window.isDestroyed()) window.reload()
+    }).catch(error => { console.error('Core restart health check failed', error) })
+  } else {
+    console.error(`Thermal Agent Core stopped after repeated failures: ${detail ?? ''}`)
+    tray?.setToolTip('Thermal Agent · 后台服务已停止，打开工作台可重试')
+  }
 }
 
 async function showWindow(): Promise<void> {
+  coreSupervisor?.start()
   if (window && !window.isDestroyed()) {
     if (window.isMinimized()) window.restore()
     window.show()
@@ -86,7 +103,8 @@ async function showWindow(): Promise<void> {
   creatingWindow = (async () => {
     if (!coreOrigin) {
       coreOrigin = `http://127.0.0.1:${await availablePort()}`
-      startCore()
+      coreSupervisor = new CoreProcessSupervisor(spawnCore, onCoreState)
+      coreSupervisor.start()
     }
     await waitForCore()
     const next = new BrowserWindow({
@@ -155,5 +173,5 @@ app.on('activate', openWindow)
 
 app.on('before-quit', () => {
   tray?.destroy()
-  if (coreProcess) terminateProcessTree(coreProcess)
+  coreSupervisor?.stop()
 })
