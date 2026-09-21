@@ -35,12 +35,12 @@
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
 - [x] ReportLab PDF 插件、已审批任务的报告生成/下载、Artifact 关联与中英文字体/渲染验收（待 Windows 离线打包和真实工程报告复核）。
-- [ ] Windows 安装包和真实 AEDT 验收。
+- [ ] Windows 安装包和真实 AEDT 验收（已有 electron-builder NSIS 配置、运行时预检及 Desktop 缺件拒启；尚无 Windows 构建/安装证据）。
 
 ## 阶段 2：DSH Agent
 
 - [x] 固定 DSH `0.1.5-rc.2` 并验证真实 Web Host。
-- [ ] DSH 随 Windows 安装包的离线打包验证。
+- [ ] DSH 随 Windows 安装包的离线打包验证（打包资源与 Node 版本预检已配置，尚无实际安装运行证据）。
 - [x] DSH Host、认证 URL、工作区和原生 Session 持久化接入。
 - [x] Loopback + Bearer Token 的 Thermal Tools Bridge。
 - [x] 自然语言创建 Task 草稿、读取任务、环境探测和工程检查工具。

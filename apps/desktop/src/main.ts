@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, nativeTheme } from 'electron'
+import { app, BrowserWindow, dialog, nativeTheme } from 'electron'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
-import { resolveDesktopRuntimePaths } from './runtime-paths.js'
+import { resolveDesktopRuntimePaths, validatePackagedRuntime } from './runtime-paths.js'
 import { terminateProcessTree } from '@thermal-agent/process-control'
 
 let coreOrigin = ''
@@ -46,6 +46,7 @@ function startCore(): void {
     appPath: app.getAppPath(), resourcesPath: process.resourcesPath, packaged: app.isPackaged,
     nodeOverride: process.env.THERMAL_AGENT_NODE_BIN,
   })
+  if (app.isPackaged) validatePackagedRuntime(paths)
   const port = new URL(coreOrigin).port
   coreProcess = spawn(process.execPath, [paths.coreEntry], {
     cwd: paths.workingDirectory,
@@ -57,6 +58,7 @@ function startCore(): void {
       THERMAL_AGENT_PORT: port,
       THERMAL_AGENT_WEB_ROOT: paths.webRoot,
       THERMAL_ICEPAK_PLUGIN_ROOT: paths.icepakPluginRoot,
+      ...(paths.icepakPython ? { THERMAL_ICEPAK_PYTHON: paths.icepakPython } : {}),
       THERMAL_REPORT_PLUGIN_ROOT: paths.reportPluginRoot,
       ...(paths.reportPython ? { THERMAL_REPORT_PYTHON: paths.reportPython } : {}),
       THERMAL_AGENT_DSH_PLUGIN: paths.dshPlugin,
@@ -89,6 +91,7 @@ async function createWindow(): Promise<void> {
 
 app.whenReady().then(createWindow).catch(error => {
   console.error(error)
+  dialog.showErrorBox('Thermal Agent 无法启动', error instanceof Error ? error.message : String(error))
   app.quit()
 })
 

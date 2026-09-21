@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { createRequire } from 'node:module'
 import test from 'node:test'
-import { resolveDesktopRuntimePaths } from '../apps/desktop/dist/runtime-paths.js'
+import { resolveDesktopRuntimePaths, validatePackagedRuntime } from '../apps/desktop/dist/runtime-paths.js'
+const { verifyBundle } = createRequire(import.meta.url)('../scripts/verify-electron-bundle.cjs')
 
 test('desktop development paths resolve from the workspace instead of process cwd', () => {
   const appPath = resolve('/workspace/ThermalAgentApp/apps/desktop')
@@ -32,8 +34,28 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   })
   assert.equal(paths.dshCli, dshCli)
   assert.equal(paths.nodeBin, nodeBin)
+  assert.equal(paths.icepakPython, undefined)
   assert.equal(paths.icepakPluginRoot, join(unpacked, 'plugins', 'icepak-pyaedt', 'python'))
   assert.equal(paths.reportPluginRoot, join(unpacked, 'plugins', 'report-reportlab', 'python'))
   assert.equal(paths.dshPlugin, join(unpacked, 'plugins', 'dsh-thermal', 'dist', 'index.js'))
+  assert.equal(paths.workingDirectory, resources)
   assert.match(paths.coreEntry, /app\.asar[/\\]apps[/\\]core[/\\]dist[/\\]cli\.js$/u)
+  assert.throws(() => validatePackagedRuntime(paths), /Python.*DSH thermal plugin.*Icepak plugin.*PDF report plugin/u)
+
+  const python = join(resources, 'python', 'python.exe')
+  const dshPlugin = paths.dshPlugin
+  const icepakMain = join(paths.icepakPluginRoot, 'thermal_icepak_plugin', '__main__.py')
+  const reportMain = join(paths.reportPluginRoot, 'thermal_report_plugin', '__main__.py')
+  for (const path of [python, dshPlugin, icepakMain, reportMain]) {
+    await mkdir(join(path, '..'), { recursive: true })
+    await writeFile(path, '')
+  }
+  const complete = resolveDesktopRuntimePaths({
+    appPath: join(resources, 'app.asar'), resourcesPath: resources, packaged: true, platform: 'win32',
+  })
+  assert.equal(complete.icepakPython, python)
+  assert.doesNotThrow(() => validatePackagedRuntime(complete))
+  assert.throws(() => verifyBundle(root), /Electron application/u)
+  await writeFile(join(resources, 'app.asar'), '')
+  assert.doesNotThrow(() => verifyBundle(root))
 })

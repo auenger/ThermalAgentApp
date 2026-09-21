@@ -8,6 +8,7 @@ export interface DesktopRuntimePaths {
   icepakPluginRoot: string
   reportPluginRoot: string
   reportPython?: string
+  icepakPython?: string
   dshPlugin: string
   dshCli?: string
   nodeBin?: string
@@ -48,9 +49,23 @@ export function resolveDesktopRuntimePaths(options: {
     icepakPluginRoot: join(unpackedRoot, 'plugins', 'icepak-pyaedt', 'python'),
     reportPluginRoot: join(unpackedRoot, 'plugins', 'report-reportlab', 'python'),
     reportPython: existsSync(reportPython) ? reportPython : undefined,
+    icepakPython: existsSync(reportPython) ? reportPython : undefined,
     dshPlugin: join(unpackedRoot, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
     dshCli: existsSync(dshCli) ? dshCli : undefined,
     nodeBin: options.nodeOverride ?? (existsSync(packagedNode) ? packagedNode : undefined),
-    workingDirectory: appRoot,
+    workingDirectory: options.resourcesPath,
   }
+}
+
+export function validatePackagedRuntime(paths: DesktopRuntimePaths): void {
+  const required: Array<[string, string | undefined]> = [
+    ['Node.js', paths.nodeBin],
+    ['Python', paths.reportPython],
+    ['DSH CLI', paths.dshCli],
+    ['DSH thermal plugin', paths.dshPlugin],
+    ['Icepak plugin', join(paths.icepakPluginRoot, 'thermal_icepak_plugin', '__main__.py')],
+    ['PDF report plugin', join(paths.reportPluginRoot, 'thermal_report_plugin', '__main__.py')],
+  ]
+  const missing = required.filter(([, path]) => !path || !existsSync(path)).map(([name]) => name)
+  if (missing.length > 0) throw new Error(`安装包缺少内置运行时：${missing.join('、')}。请重新安装完整的 Thermal Agent App。`)
 }

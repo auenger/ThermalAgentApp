@@ -1,0 +1,34 @@
+appId: com.thermalagent.desktop
+productName: Thermal Agent
+directories:
+  output: release
+asar: true
+afterPack: ./scripts/verify-electron-bundle.cjs
+asarUnpack:
+  - node_modules/**
+  - plugins/**
+files:
+  - package.json
+  - apps/desktop/dist/**
+  - apps/core/dist/**
+  - apps/web/dist/**
+  - packages/*/dist/**
+  - plugins/dsh-thermal/dist/**
+  - plugins/icepak-pyaedt/python/**
+  - plugins/report-reportlab/python/**
+  - node_modules/**
+extraResources:
+  - from: packaging/windows-runtime/node
+    to: node
+  - from: packaging/windows-runtime/python
+    to: python
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  artifactName: Thermal-Agent-${version}-Windows-x64.${ext}

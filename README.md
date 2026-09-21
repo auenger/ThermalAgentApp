@@ -17,7 +17,7 @@
 - Core SSE 状态流，桌面与 Web 可自动更新 Task 和活跃 Attempt 状态。
 - 默认关闭的独立 LAN Listener；本机显式开启后，远端浏览器必须用 8 位短时码换取 HttpOnly、SameSite 会话。
 - Desktop 为每次 App 会话分配独占 loopback 端口，并区分开发目录与 `app.asar`/unpacked 运行资源。
-- Icepak 插件 Manifest、stdio JSON 协议和保守环境探测。
+- Icepak 插件 Manifest、stdio JSON 协议、轻量安装识别与显式独立会话启动探测（`LAUNCHABLE` 不等于求解许可证可用）。
 - 从旧 Windows Worker 抽取的 AEDT 工程检查、能力配置校验、Baseline/风扇求解、温度指标和收敛证据逻辑。
 - Run/Attempt 后台执行、输入快照、heartbeat、取消以及结果 Artifact 关联。
 - Windows `taskkill /T /F` 进程树回收边界，用于取消 PyAEDT/AEDT、停止 DSH 和退出 Desktop。
@@ -36,7 +36,7 @@
 
 当前还没有完成 Windows 真实 AEDT 回归验收、通用候选策略、Skill 对话式修订、安装包和局域网节点调度。手动登记节点不会自动分配任务；未完成能力不会在界面中显示为可用。
 
-Windows 离线安装包还需要提供固定 Node `22.22.x` 运行时（供 DSH 使用）、带 ReportLab 的 Python 运行时，并将 PyAEDT/报告插件、DSH CLI 及其依赖放入 unpacked 资源。Desktop 已按这一目录边界解析路径，但仓库当前不伪装成已产出或验证过 Windows 安装包。
+Windows 安装包构建配置和资源预检已加入；构建仍需在 Windows x64 主机准备内置 Node `22.22.x` 或兼容更新版，以及带 PyAEDT、ReportLab、pypdf 的 Python 运行时。Desktop 打包后若缺少内置运行时会拒绝启动，避免悄悄依赖用户系统环境。尚未产出或验收真实 Windows 安装包，详情见 [Windows 打包说明](./docs/WINDOWS_PACKAGING.md)。
 
 ## 本地运行
 
