@@ -4,6 +4,8 @@
 
 本文件记录从 `suzhousanre` 向 Thermal Agent App 的实际迁移进度。只有已经存在代码和验证证据的项目才能标记完成。
 
+2026-09-21 的交接总结、测试结果和人工回归步骤见 [阶段总结与本地手动回归](./MIGRATION_HANDOFF_2026-09-21.md)。
+
 ## 阶段 0：契约和架构边界
 
 - [x] 新项目和 pnpm workspace。
