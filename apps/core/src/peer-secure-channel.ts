@@ -176,7 +176,7 @@ export class PeerSecureChannel {
     }
   }
 
-  async connect(peer: DiscoveredPeer): Promise<{ nodeId: string; expiresAt: string }> {
+  async connect(peer: DiscoveredPeer): Promise<{ nodeId: string; sessionId: string; expiresAt: string }> {
     const seenAt = Date.parse(peer.lastSeenAt)
     if (!peer.trusted || !Number.isFinite(seenAt) || Math.abs(Date.now() - seenAt) > CLOCK_WINDOW_MS ||
       isIP(peer.address) === 0 || !Number.isInteger(peer.servicePort) || peer.servicePort < 1 || peer.servicePort > 65_535) {
@@ -200,7 +200,20 @@ export class PeerSecureChannel {
     if (!isObject(payload) || payload.operation !== 'pong' || payload.nodeId !== peer.identity.nodeId) {
       throw new PeerSecureError('INVALID_MESSAGE', 'peer did not confirm the encrypted session')
     }
-    return { nodeId: peer.identity.nodeId, expiresAt }
+    return { nodeId: peer.identity.nodeId, sessionId, expiresAt }
+  }
+
+  async request(peer: DiscoveredPeer, sessionId: string, payload: object): Promise<unknown> {
+    const address = peer.address.includes(':') ? `[${peer.address}]` : peer.address
+    const request = this.encrypt(sessionId, bytes(payload))
+    const response = await postPeerJson(`http://${address}:${peer.servicePort}/api/peer/v1/message`, request)
+    if (!isObject(response)) throw new PeerSecureError('INVALID_RESPONSE', 'encrypted peer response is invalid')
+    const decrypted = this.decrypt(response.message)
+    if (decrypted.peerNodeId !== peer.identity.nodeId || decrypted.sessionId !== sessionId) {
+      throw new PeerSecureError('INVALID_RESPONSE', 'encrypted peer response identity does not match')
+    }
+    try { return JSON.parse(decrypted.plaintext.toString('utf8')) as unknown }
+    catch { throw new PeerSecureError('INVALID_RESPONSE', 'encrypted peer response plaintext is invalid') }
   }
 
   close(): void {

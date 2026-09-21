@@ -19,6 +19,7 @@ import { NodeIdentity } from './node-identity.js'
 import { PeerDiscovery, type PeerDiscoveryOptions } from './peer-discovery.js'
 import { PeerAuth, PeerAuthError } from './peer-auth.js'
 import { PeerSecureChannel, PeerSecureError } from './peer-secure-channel.js'
+import { PeerArtifactError, PeerArtifactTransfer } from './peer-artifact-transfer.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
@@ -88,6 +89,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const discovery = new PeerDiscovery(nodeIdentity, database, capabilityHeartbeat, options.discoveryOptions)
   const peerAuth = new PeerAuth(nodeIdentity, database)
   const peerSecure = new PeerSecureChannel(nodeIdentity, database)
+  const peerArtifacts = new PeerArtifactTransfer(nodeIdentity.nodeId, database, artifacts)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
@@ -98,7 +100,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -141,6 +143,7 @@ async function route(
   discovery: PeerDiscovery,
   peerAuth: PeerAuth,
   peerSecure: PeerSecureChannel,
+  peerArtifacts: PeerArtifactTransfer,
   webRoot: string,
   home: string,
   nodeIdentity: NodeIdentity,
@@ -163,8 +166,15 @@ async function route(
     let message: unknown
     try { message = JSON.parse(decrypted.plaintext.toString('utf8')) as unknown }
     catch { throw new PeerSecureError('INVALID_MESSAGE', 'peer message plaintext is not JSON') }
-    if (!isObject(message) || message.operation !== 'ping') throw new PeerSecureError('OPERATION_DENIED', 'peer operation is not enabled')
-    writeJson(response, 200, { message: peerSecure.encrypt(decrypted.sessionId, Buffer.from(JSON.stringify({ operation: 'pong', nodeId: nodeIdentity.nodeId }))) })
+    let reply: object
+    if (isObject(message) && message.operation === 'ping') {
+      reply = { operation: 'pong', nodeId: nodeIdentity.nodeId }
+    } else if (isObject(message) && message.operation === 'artifact.input.chunk') {
+      reply = await peerArtifacts.readLeasedInput(decrypted.peerNodeId, message)
+    } else {
+      throw new PeerSecureError('OPERATION_DENIED', 'peer operation is not enabled')
+    }
+    writeJson(response, 200, { message: peerSecure.encrypt(decrypted.sessionId, Buffer.from(JSON.stringify(reply))) })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/nodes/local') {
@@ -215,7 +225,8 @@ async function route(
     assertLocalWriteOrigin(request)
     const peer = discovery.status().discovered.find(item => item.identity.nodeId === connectPeerMatch[1])
     if (!peer) throw new RequestError(409, 'PEER_NOT_DISCOVERED', 'peer is not currently discovered')
-    writeJson(response, 200, { connection: await peerSecure.connect(peer) })
+    const connection = await peerSecure.connect(peer)
+    writeJson(response, 200, { connection: { nodeId: connection.nodeId, expiresAt: connection.expiresAt } })
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/events') {
@@ -563,6 +574,11 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PeerArtifactError) {
+    writeJson(response, error.code === 'ARTIFACT_NOT_AUTHORIZED' || error.code === 'LEASE_EXPIRED' ? 403 : 409,
+      { error: { code: error.code, message: error.message } })
+    return
+  }
   if (error instanceof PeerSecureError) {
     writeJson(response, 401, { error: { code: error.code, message: error.message } })
     return
