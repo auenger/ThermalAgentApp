@@ -6,7 +6,6 @@ dist/
 coverage/
 release/
 packaging/windows-runtime/
-/assets/icepak/Project1.aedt
 *.log
 __pycache__/
 *.pyc

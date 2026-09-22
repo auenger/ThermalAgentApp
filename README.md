@@ -48,7 +48,7 @@
 
 当前还没有完成 Windows 真实 AEDT 与双机回归验收、基于仿真证据的通用候选策略排序、可执行流程 Skill 的对话式修订和安装包验收。当前策略 Skill 的关键词预筛不是物理诊断结论。自动派单需要用户单独授权，且仅选择已信任、近期 `READY`、版本/容量匹配的节点；模拟通过不等于生产可用。
 
-Windows 安装包构建配置和隔离资源预检已加入；构建仍需在 Windows x64 主机准备内置 Node `22.22.x` 或兼容更新版，以及带 PyAEDT、ReportLab、pypdf 的 Python 运行时。预检和插件启动均不依赖用户的 `PYTHONPATH`；Desktop 打包后若缺少内置运行时会拒绝启动。尚未产出或验收真实 Windows 安装包。由于远端是公开仓库，来源于用户工程的 `assets/icepak/Project1.aedt` 暂不提交；Windows 构建机需通过经授权的私有渠道单独取得该文件并放回原路径。
+Windows 安装包构建配置和隔离资源预检已加入；构建仍需在 Windows x64 主机准备内置 Node `22.22.x` 或兼容更新版，以及带 PyAEDT、ReportLab、pypdf 的 Python 运行时。预检和插件启动均不依赖用户的 `PYTHONPATH`；Desktop 打包后若缺少内置运行时会拒绝启动。尚未产出或验收真实 Windows 安装包。用户已确认 `assets/icepak/Project1.aedt` 可作为公开测试工程随源码提交，并会打入 App 安装包用于环境自检；客户任务仍须上传并检查自己的模型。
 
 ## 本地运行
 

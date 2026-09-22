@@ -1,6 +1,6 @@
 # Windows 安装包构建与验收
 
-当前仅有构建配置和静态预检，尚未完成真实 Windows 安装包验收。构建必须在 Windows x64 主机进行；原生依赖不能用 macOS 的 `node_modules` 直接交叉打包。代码仓库 `https://github.com/auenger/ThermalAgentApp.git` 为公开仓库；来源于用户工程的 `assets/icepak/Project1.aedt` 暂被 Git 忽略，不随公开源码分发。Windows 构建者须通过经授权的私有渠道单独取得该文件；不能将其上传为公开 Issue、Release 附件或 Git 提交。
+当前仅有构建配置和静态预检，尚未完成真实 Windows 安装包验收。构建必须在 Windows x64 主机进行；原生依赖不能用 macOS 的 `node_modules` 直接交叉打包。代码仓库 `https://github.com/auenger/ThermalAgentApp.git` 为公开仓库。用户已确认 `assets/icepak/Project1.aedt` 是可公开分发的测试工程，随源码提交并由安装包带入；这不代表客户模型也可公开。
 
 2026-09-21 在 macOS x86_64 执行 `pnpm package:win`：TypeScript 与 Web 构建通过，随后 `verify-windows-runtime.mjs` 按预期拒绝非 Windows x64 构建机，未生成 NSIS 安装包。该机器也没有 `packaging/windows-runtime/` 下的 Windows Node/Python 资源，仓库尚未配置远程 Windows CI。下一次打包需在 Windows x64 主机按下述步骤准备资源后重新执行；此记录不是安装或 AEDT 验收证据。
 
@@ -13,7 +13,7 @@
 3. 准备 `packaging/windows-runtime/python/python.exe` 及完整的 Windows x64 Python 3.10+ 运行目录。在该内置解释器中安装与 Windows AEDT 匹配的 PyAEDT、`reportlab>=4.2,<5`、`pypdf>=5,<7`。如果使用 Python embeddable distribution，需确保其 `._pth` 配置启用所需 `site-packages`。预检以 `python -I` 运行，并要求第三方模块实际从待打包 Python 目录加载；依赖构建机用户 site-packages 或 `PYTHONPATH` 会失败。
    DSH 作为 App 的直接依赖随 `node_modules` 打包，配套的散热 Agent 插件也随包提供；用户不需要另行安装 DSH。构建前和 `afterPack` 均校验 DSH CLI、包文件与插件。
 4. 目标用户机器仍需有合法 AEDT/Icepak 安装及相应许可证；安装包不会内置 Ansys 产品或许可证。报告字体优先使用 Windows 系统中的可嵌入中文字体，也可设置 `REPORT_FONT_PATH`。
-5. 安装包会携带 `assets/icepak/Project1.aedt` 作为三级环境自检的固定示例（SHA-256：`c8b1282d07bce6f0d29cfcba6deecf8b7736f66fc6cd026ad726933b3cd003d7`）。来源为用户提供的工程文件；对外分发前须确认该工程的传播授权及模型脱敏情况。自检只在本机识别到 AEDT/PyAEDT 且独立会话可启动时，在副本上打开工程，不会自动求解，也不能证明任意客户工程兼容。
+5. 安装包会携带 `assets/icepak/Project1.aedt` 作为三级环境自检的固定示例（SHA-256：`c8b1282d07bce6f0d29cfcba6deecf8b7736f66fc6cd026ad726933b3cd003d7`）。这是用户批准公开分发的测试工程。自检只在本机识别到 AEDT/PyAEDT 且独立会话可启动时，在副本上打开工程，不会自动求解，也不能证明任意客户工程兼容。
 6. 品牌图标统一源自 `assets/brand/logo.svg`（由用户提供的 `TuLing/dist/favicon.svg` 复制）。Web、桌面窗口、托盘和 NSIS 安装程序分别使用随包的 SVG、PNG 和 ICO 派生文件；打包预检会校验运行时图标存在。
 
 `packaging/windows-runtime/` 被 Git 忽略，不会把第三方可执行文件提交进仓库。构建者需自行核对二进制来源、许可条款、校验和及软件物料清单。
@@ -31,7 +31,7 @@ pnpm install --frozen-lockfile
 pnpm test
 ```
 
-不要复制 macOS 的 `node_modules`、`.venv` 或构建产物。随后放置待随包分发的 Windows x64 Node 运行时到 `packaging/windows-runtime/node/node.exe`；放置完整、可独立运行的 Python 3.10+ 目录到 `packaging/windows-runtime/python/`，其 `python.exe` 在 `-I` 隔离模式下必须能从该目录加载 `ansys.aedt.core`、`reportlab` 和 `pypdf`。用户机器的系统 Python 或 `PYTHONPATH` 不能代替这些内置资源。若从 Git 获取的源码不含 `assets/icepak/Project1.aedt`，须通过已授权的私有渠道将经脱敏的工程放在该路径，不能用空文件占位；预期 SHA-256 见上文。
+不要复制 macOS 的 `node_modules`、`.venv` 或构建产物。随后放置待随包分发的 Windows x64 Node 运行时到 `packaging/windows-runtime/node/node.exe`；放置完整、可独立运行的 Python 3.10+ 目录到 `packaging/windows-runtime/python/`，其 `python.exe` 在 `-I` 隔离模式下必须能从该目录加载 `ansys.aedt.core`、`reportlab` 和 `pypdf`。用户机器的系统 Python 或 `PYTHONPATH` 不能代替这些内置资源。仓库已包含测试工程 `assets/icepak/Project1.aedt`，克隆后校验其 SHA-256 即可；不要用空文件替代。
 
 这三个前置路径可以先检查：
 
@@ -42,7 +42,7 @@ Test-Path assets/icepak/Project1.aedt
 Get-FileHash assets/icepak/Project1.aedt -Algorithm SHA256
 ```
 
-三项都存在、示例工程校验和符合已授权版本后，再运行下方打包命令。若 Python 探测失败，先修复内置目录中的依赖安装及 `._pth`/`site-packages`，不要通过安装到构建机用户目录绕过预检。
+三项都存在、示例工程校验和符合上述值后，再运行下方打包命令。若 Python 探测失败，先修复内置目录中的依赖安装及 `._pth`/`site-packages`，不要通过安装到构建机用户目录绕过预检。
 
 ## 构建
 
