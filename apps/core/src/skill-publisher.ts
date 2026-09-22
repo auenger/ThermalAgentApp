@@ -10,6 +10,7 @@ export class SkillPublisher {
   }
 
   publish(skill: SkillDetail): string {
+    if (skill.kind === 'OPTIMIZATION') throw new Error('built-in optimization guidance cannot be published as a solved workflow')
     const directory = resolve(this.root, `thermal-${skill.key}`)
     if (!directory.startsWith(`${this.root}${sep}`)) throw new Error('skill publish path is invalid')
     const target = join(directory, 'SKILL.md')

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { prepareDshProfile } from './dsh-profile.js'
 import { bindDshWorkspace } from './dsh-workspace.js'
@@ -90,7 +90,7 @@ export class DshHost {
     if (generation !== this.generation || this.closed) return
     mkdirSync(this.home, { recursive: true })
     mkdirSync(this.workspace, { recursive: true })
-    bindDshWorkspace(this.home, this.workspace)
+    const workspaceId = bindDshWorkspace(this.home, this.workspace)
     const patch = prepareDshProfile(this.home, this.pluginPath)
     const node = process.env.THERMAL_AGENT_NODE_BIN || process.execPath
     const runAsNode = node === process.execPath && Boolean(process.versions.electron)
@@ -102,6 +102,8 @@ export class DshHost {
         DSH_HOME: this.home,
         THERMAL_AGENT_BRIDGE_URL: this.bridge.url,
         THERMAL_AGENT_BRIDGE_TOKEN: this.bridge.token,
+        THERMAL_AGENT_WORKSPACE_ID: workspaceId,
+        THERMAL_AGENT_WORKSPACE_DIR: realpathSync(this.workspace),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,

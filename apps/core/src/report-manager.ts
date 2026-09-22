@@ -4,6 +4,7 @@ import type { ArtifactRecord, AttemptArtifactRecord, AttemptRecord, RunRecord } 
 import { ArtifactStore } from '@thermal-agent/artifact-store'
 import { LocalDatabase, TaskNotFoundError } from '@thermal-agent/sqlite-store'
 import type { ReportPort } from './report-client.js'
+import { TaskWorkspace } from './task-workspace.js'
 
 export class ReportConflictError extends Error {}
 
@@ -14,13 +15,14 @@ export interface TaskReportRecord {
 
 export class ReportManager {
   private readonly pending = new Map<string, Promise<TaskReportRecord>>()
+  private readonly workspace: TaskWorkspace
 
   constructor(
     private readonly home: string,
     private readonly database: LocalDatabase,
     private readonly artifacts: ArtifactStore,
     private readonly reporter: ReportPort,
-  ) {}
+  ) { this.workspace = new TaskWorkspace(home) }
 
   getTaskReport(taskId: string): TaskReportRecord | null {
     const selected = this.selectedAttempt(taskId)
@@ -53,7 +55,7 @@ export class ReportManager {
       if (!roles.has(role)) throw new ReportConflictError(`selected attempt is missing ${role} evidence`)
     }
     const runs = await Promise.all(this.database.listTaskRuns(taskId).map(async run => this.hydrateRun(run)))
-    const outputDir = join(this.home, 'runs', 'reports', taskId)
+    const outputDir = join(this.workspace.ensure(taskId), 'reports')
     await mkdir(outputDir, { recursive: true })
     const outputPath = join(outputDir, `${taskId}.pdf`)
     await this.reporter.renderTaskReport({

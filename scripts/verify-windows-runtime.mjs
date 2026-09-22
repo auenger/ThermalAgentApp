@@ -38,10 +38,15 @@ export function verifyWindowsRuntime(root = resolve(import.meta.dirname, '..')) 
     node: join(root, 'packaging', 'windows-runtime', 'node', 'node.exe'),
     python: join(root, 'packaging', 'windows-runtime', 'python', 'python.exe'),
     dsh: join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    dshPackage: join(root, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
     dshPlugin: join(root, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
     core: join(root, 'apps', 'core', 'dist', 'cli.js'),
     web: join(root, 'apps', 'web', 'dist', 'index.html'),
     icepak: join(root, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', '__main__.py'),
+    sampleProject: join(root, 'assets', 'icepak', 'Project1.aedt'),
+    windowIcon: join(root, 'assets', 'brand', 'app.png'),
+    trayIcon: join(root, 'assets', 'brand', 'tray.png'),
+    installerIcon: join(root, 'assets', 'brand', 'app.ico'),
     report: join(root, 'plugins', 'report-reportlab', 'python', 'thermal_report_plugin', '__main__.py'),
   }
   const missing = Object.entries(paths).filter(([, path]) => !existsSync(path)).map(([name]) => name)

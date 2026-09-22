@@ -8,7 +8,7 @@ interface WorkspaceStore {
   tables: { workspaces: Record<string, { path: string; title: string; sessionIds: string[]; createdAt: string; updatedAt: string }> }
 }
 
-export function bindDshWorkspace(dshHome: string, selectedPath: string): void {
+export function bindDshWorkspace(dshHome: string, selectedPath: string): string {
   const path = realpathSync(selectedPath)
   const storageDir = join(dshHome, 'storages')
   const storagePath = join(storageDir, 'workspace.json')
@@ -36,10 +36,11 @@ export function bindDshWorkspace(dshHome: string, selectedPath: string): void {
     records[workspaceId].title = basename(path) || path
     records[workspaceId].updatedAt = now
   }
-  value.global.workspaceIds = [workspaceId, ...value.global.workspaceIds.filter(id => id !== workspaceId)]
+  // The App owns the DSH workspace selection; stale workspaces are not selectable.
+  value.global.workspaceIds = [workspaceId]
   value.global.initialized = true
   const temporary = `${storagePath}.tmp`
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
   renameSync(temporary, storagePath)
+  return workspaceId
 }
-

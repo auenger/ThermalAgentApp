@@ -6,6 +6,9 @@ export interface DesktopRuntimePaths {
   coreEntry: string
   webRoot: string
   icepakPluginRoot: string
+  sampleProjectPath: string
+  windowIconPath: string
+  trayIconPath: string
   reportPluginRoot: string
   reportPython?: string
   icepakPython?: string
@@ -30,6 +33,9 @@ export function resolveDesktopRuntimePaths(options: {
       coreEntry: join(appRoot, 'apps', 'core', 'dist', 'cli.js'),
       webRoot: join(appRoot, 'apps', 'web', 'dist'),
       icepakPluginRoot: join(appRoot, 'plugins', 'icepak-pyaedt', 'python'),
+      sampleProjectPath: join(appRoot, 'assets', 'icepak', 'Project1.aedt'),
+      windowIconPath: join(appRoot, 'assets', 'brand', 'app.png'),
+      trayIconPath: join(appRoot, 'assets', 'brand', 'tray.png'),
       reportPluginRoot: join(appRoot, 'plugins', 'report-reportlab', 'python'),
       dshPlugin: join(appRoot, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
       nodeBin: options.nodeOverride,
@@ -47,6 +53,9 @@ export function resolveDesktopRuntimePaths(options: {
     coreEntry: join(appRoot, 'apps', 'core', 'dist', 'cli.js'),
     webRoot: join(appRoot, 'apps', 'web', 'dist'),
     icepakPluginRoot: join(unpackedRoot, 'plugins', 'icepak-pyaedt', 'python'),
+    sampleProjectPath: join(options.resourcesPath, 'icepak-sample', 'Project1.aedt'),
+    windowIconPath: join(options.resourcesPath, 'brand', 'app.png'),
+    trayIconPath: join(options.resourcesPath, 'brand', 'tray.png'),
     reportPluginRoot: join(unpackedRoot, 'plugins', 'report-reportlab', 'python'),
     reportPython: existsSync(reportPython) ? reportPython : undefined,
     icepakPython: existsSync(reportPython) ? reportPython : undefined,
@@ -64,6 +73,9 @@ export function validatePackagedRuntime(paths: DesktopRuntimePaths): void {
     ['DSH CLI', paths.dshCli],
     ['DSH thermal plugin', paths.dshPlugin],
     ['Icepak plugin', join(paths.icepakPluginRoot, 'thermal_icepak_plugin', '__main__.py')],
+    ['Icepak sample project', paths.sampleProjectPath],
+    ['window icon', paths.windowIconPath],
+    ['tray icon', paths.trayIconPath],
     ['PDF report plugin', join(paths.reportPluginRoot, 'thermal_report_plugin', '__main__.py')],
   ]
   const missing = required.filter(([, path]) => !path || !existsSync(path)).map(([name]) => name)

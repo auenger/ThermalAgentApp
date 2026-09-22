@@ -8,6 +8,57 @@ import { SkillPublisher } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 import { LocalDatabase, VersionConflictError } from '@thermal-agent/sqlite-store'
 
+test('six built-in optimization Skills are durable advisory guidance, not executable workflows', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-optimization-skills-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'thermal.db')
+  const first = new LocalDatabase(path)
+  const seeded = first.listSkills().filter(skill => skill.kind === 'OPTIMIZATION')
+  assert.equal(seeded.length, 6)
+  assert.deepEqual(seeded.map(skill => first.getSkill(skill.id).version.definition.optimization.priority), [1, 2, 3, 4, 5, 6])
+  assert.equal(first.getSkill(seeded[4].id).version.definition.optimization.applicability, 'CUSTOMER_RECOMMENDATION')
+  assert.throws(() => first.reviewSkill(seeded[0].id, 'DISABLED', 'tester', seeded[0].updatedAt, null), /built-in optimization/u)
+  const task = createTask({ title: '试验', description: '', ownerNodeId: 'local', requirementSnapshot: {} })
+  assert.throws(() => first.createTaskFromSkill(seeded[0].id, task, {}), /advisory/u)
+  first.close()
+  const reopened = new LocalDatabase(path)
+  t.after(() => reopened.close())
+  assert.equal(reopened.listSkills().filter(skill => skill.kind === 'OPTIMIZATION').length, 6)
+})
+
+test('advisory Skill creation and edits keep immutable versions and reject stale updates', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-custom-skill-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'thermal.db')
+  const database = new LocalDatabase(path)
+  const base = database.getSkill(database.listSkills().find(skill => skill.key === 'optimization-01-tim').id)
+  const input = { name: '机箱回流隔离', description: '检查热风回流', guidance: {
+    ...base.version.definition.optimization, priority: 7, mechanism: '热风回流',
+    diagnosticBasis: '入口空气温度高于环境', measure: '隔离进出风路径', expectedTemperatureDrop: '待模型验证',
+    keywords: ['回流', '热风'],
+  } }
+  const created = database.createOptimizationSkill(input, 'app')
+  assert.equal(created.kind, 'OPTIMIZATION')
+  assert.equal(created.activeVersion, 1)
+  const updated = database.updateOptimizationSkill(created.id, { ...input, name: '系统热风回流隔离', expectedVersion: 1, changeSummary: '明确系统边界' })
+  assert.equal(updated.activeVersion, 2)
+  assert.equal(updated.name, '系统热风回流隔离')
+  assert.throws(() => database.updateOptimizationSkill(created.id, { ...input, expectedVersion: 1, changeSummary: '过期修改' }), /changed by another operation/u)
+  const revisedBuiltin = database.updateOptimizationSkill(base.id, {
+    name: base.name, description: base.description, guidance: { ...base.version.definition.optimization, constraints: '增加装配公差核验' },
+    expectedVersion: 1, changeSummary: '完善装配约束',
+  })
+  assert.equal(revisedBuiltin.activeVersion, 2)
+  assert.throws(() => database.createTaskFromSkill(created.id, createTask({ title: '测试', description: '', ownerNodeId: 'local', requirementSnapshot: {} }), {}), /advisory/u)
+  database.close()
+  const reopened = new LocalDatabase(path)
+  t.after(() => reopened.close())
+  assert.equal(reopened.getSkill(created.id).activeVersion, 2)
+  assert.equal(reopened.listSkills().filter(skill => skill.kind === 'OPTIMIZATION').length, 7)
+  assert.equal(reopened.getSkill(base.id).activeVersion, 2)
+  assert.equal(reopened.getSkill(base.id).version.definition.optimization.constraints, '增加装配公差核验')
+})
+
 test('SQLite persists task transitions and immutable event history', async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-agent-sqlite-'))
   t.after(() => rm(root, { recursive: true, force: true }))

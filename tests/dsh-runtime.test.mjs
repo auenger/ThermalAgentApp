@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import {
   DshHost,
+  createCoreApp,
   ThermalToolsBridge,
   parseDshReadyUrl,
   prepareDshProfile,
@@ -97,6 +99,37 @@ test('pinned DSH web Host reaches ready with its live profile', async t => {
   assert.equal(response.status, 200)
 })
 
+test('local Core DSH sessions can be created, listed and archived without losing workspace scope', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-sessions-'))
+  const app = createCoreApp({ home: root, pluginClient: {
+    probeEnvironment: async () => ({ status: 'NOT_INSTALLED', platform: process.platform, aedtVersions: [], capabilities: [], diagnostics: [] }),
+  } })
+  await new Promise(resolveListen => app.server.listen(0, '127.0.0.1', resolveListen))
+  t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }) })
+  const address = app.server.address()
+  assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}`
+  const deadline = Date.now() + 20_000
+  let ready = false
+  while (Date.now() < deadline) {
+    const status = (await (await fetch(`${base}/api/agent/status`)).json()).agent
+    if (status.phase === 'failed') assert.fail(status.detail)
+    if (status.phase === 'ready') { ready = true; break }
+    await new Promise(resolveWait => setTimeout(resolveWait, 150))
+  }
+  assert.ok(ready, 'DSH did not become ready')
+  const createdResponse = await fetch(`${base}/api/agent/sessions`, { method: 'POST' })
+  assert.equal(createdResponse.status, 201)
+  const { sessionId } = await createdResponse.json()
+  assert.match(sessionId, /^session-[0-9a-f-]{36}$/iu)
+  const listed = await (await fetch(`${base}/api/agent/sessions`)).json()
+  assert.ok(listed.sessions.some(item => item.sessionId === sessionId))
+  const archived = await fetch(`${base}/api/agent/sessions/${sessionId}/archive`, { method: 'POST' })
+  assert.equal(archived.status, 200)
+  const after = await (await fetch(`${base}/api/agent/sessions`)).json()
+  assert.ok(!after.sessions.some(item => item.sessionId === sessionId))
+})
+
 test('DSH thermal bridge is token-protected and exposes only controlled Core operations', async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-bridge-'))
   const database = new LocalDatabase(join(root, 'thermal.db'))
@@ -115,7 +148,41 @@ test('DSH thermal bridge is token-protected and exposes only controlled Core ope
   })
   assert.equal(new URL(address.url).hostname, '127.0.0.1')
   assert.equal((await fetch(`${address.url}/v1/tasks`)).status, 401)
+  assert.equal((await fetch(`${address.url}/v1/optimization/recommendations`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requirement: '风扇风量不足' }),
+  })).status, 401)
   const headers = { Authorization: `Bearer ${address.token}`, 'Content-Type': 'application/json' }
+  const recommendationsResponse = await fetch(`${address.url}/v1/optimization/recommendations`, {
+    method: 'POST', headers, body: JSON.stringify({ requirement: '风扇风量不足，检查散热器' }),
+  })
+  assert.equal(recommendationsResponse.status, 200)
+  const recommendations = (await recommendationsResponse.json()).recommendations
+  assert.equal(recommendations.length, 6)
+  assert.equal(recommendations.find(item => item.key === 'optimization-04-fan-selection').suggested, true)
+  assert.ok(recommendations.every(item => item.evidenceStatus === 'UNVERIFIED'))
+  const createSkillResponse = await fetch(`${address.url}/v1/optimization/skills/create`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: '热风回流隔离', description: '检查回流', guidance: {
+      ...recommendations[0].guidance, priority: 7, mechanism: '热风回流', diagnosticBasis: '入口温度异常',
+      measure: '隔离风道', expectedTemperatureDrop: '待模型验证', constraints: '客户结构需确认', keywords: '热风回流,回流',
+    } }),
+  })
+  assert.equal(createSkillResponse.status, 201)
+  const newSkill = (await createSkillResponse.json()).skill
+  assert.equal(newSkill.activeVersion, 1)
+  const editSkillResponse = await fetch(`${address.url}/v1/optimization/skills/update`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ skillId: newSkill.id, expectedVersion: 1, changeSummary: '完善描述', name: '系统热风回流隔离',
+      description: '检查热风回流', guidance: newSkill.version.definition.optimization }),
+  })
+  assert.equal(editSkillResponse.status, 200)
+  assert.equal((await editSkillResponse.json()).skill.activeVersion, 2)
+  const agentRecommendations = await fetch(`${address.url}/v1/optimization/recommendations`, {
+    method: 'POST', headers, body: JSON.stringify({ requirement: '需要解决热风回流' }),
+  })
+  assert.equal((await agentRecommendations.json()).recommendations.find(item => item.skillId === newSkill.id).suggested, true)
+  const executableSkills = await fetch(`${address.url}/v1/skills`, { headers })
+  assert.deepEqual((await executableSkills.json()).skills, [])
   const createdResponse = await fetch(`${address.url}/v1/tasks`, {
     method: 'POST', headers,
     body: JSON.stringify({ title: '自然语言散热任务', description: '检查 Project1 并建立基线', projectPath: 'C:\\models\\Project1.aedt', targetTmaxC: 85 }),
@@ -124,6 +191,33 @@ test('DSH thermal bridge is token-protected and exposes only controlled Core ope
   const created = await createdResponse.json()
   assert.equal(created.task.executionStatus, 'DRAFT')
   assert.equal(created.task.requirementSnapshot.source, 'dsh-natural-language')
+  assert.equal(created.task.requirementSnapshot.intakeVersion, 2)
+  assert.equal(created.task.requirementSnapshot.planConfirmed, false)
+  assert.deepEqual(created.task.requirementSnapshot.optimizationHypotheses, [
+    { skillKey: 'optimization-01-tim', matchedSignals: [], evidenceStatus: 'UNVERIFIED' },
+  ])
+  assert.equal(created.task.requirementSnapshot.taskWorkspacePath, join(root, 'workspace', 'tasks', created.task.id))
+  const modelBytes = Buffer.from('uploaded-cad-model')
+  const attachmentSha = createHash('sha256').update(modelBytes).digest('hex')
+  const attachmentDir = join(root, 'dsh', 'attachments', 'v1', 'files', attachmentSha.slice(0, 2), attachmentSha)
+  await mkdir(attachmentDir, { recursive: true })
+  await writeFile(join(attachmentDir, 'housing.step'), modelBytes)
+  const uploadedResponse = await fetch(`${address.url}/v1/tasks`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ title: '对话上传 CAD', description: '先整理几何与工况', sourceSessionId: 'session-1',
+      uploadedFiles: [{ attachmentId: `sha256:${attachmentSha}`, name: 'housing.step', bytes: modelBytes.length }] }),
+  })
+  assert.equal(uploadedResponse.status, 201)
+  const uploaded = (await uploadedResponse.json()).task
+  assert.equal(uploaded.requirementSnapshot.modelKind, 'CAD')
+  assert.equal(uploaded.requirementSnapshot.sourceSessionId, 'session-1')
+  assert.equal(uploaded.requirementSnapshot.conversationAttachments.length, 1)
+  assert.deepEqual(await readFile(uploaded.requirementSnapshot.cadSourcePath), modelBytes)
+  assert.ok(uploaded.requirementSnapshot.cadSourcePath.startsWith(join(root, 'workspace', 'tasks', uploaded.id)))
+  const badResponse = await fetch(`${address.url}/v1/tasks`, { method: 'POST', headers,
+    body: JSON.stringify({ title: '错误附件', uploadedFiles: [{ attachmentId: `sha256:${'0'.repeat(64)}`, name: '../escape.step', bytes: 1 }] }) })
+  assert.equal(badResponse.status, 409)
+  assert.equal(database.listTasks(200).length, 2)
   const detail = await fetch(`${address.url}/v1/tasks/detail?id=${created.task.id}`, { headers })
   assert.equal((await detail.json()).task.title, '自然语言散热任务')
   const probe = await fetch(`${address.url}/v1/icepak/probe`, { headers })

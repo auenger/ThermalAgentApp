@@ -22,6 +22,9 @@ import type {
   SkillSourceRecord,
   SkillStatus,
   SkillVersionRecord,
+  OptimizationSkillInput,
+  UpdateOptimizationSkillInput,
+  ModelCapabilityAssessment,
   TaskEvent,
   TaskRecord,
   ThermalVerdict,
@@ -35,6 +38,7 @@ import type {
   IcepakReadinessRecord,
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
+import { OPTIMIZATION_SKILL_SEEDS, optimizationDefinition } from './optimization-skills.js'
 
 type SqliteRow = Record<string, unknown>
 
@@ -312,6 +316,7 @@ export class LocalDatabase {
         success_count INTEGER NOT NULL DEFAULT 0,
         consecutive_failures INTEGER NOT NULL DEFAULT 0,
         last_run_at TEXT,
+        kind TEXT NOT NULL DEFAULT 'WORKFLOW',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -354,6 +359,12 @@ export class LocalDatabase {
         result_summary TEXT NOT NULL DEFAULT '',
         started_at TEXT NOT NULL,
         finished_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS model_capability_checks (
+        model_sha256 TEXT PRIMARY KEY REFERENCES artifacts(sha256),
+        assessment_json TEXT NOT NULL,
+        checked_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS skill_run_steps (
@@ -409,11 +420,15 @@ export class LocalDatabase {
 
       INSERT OR IGNORE INTO schema_migrations(version, applied_at)
         VALUES (12, datetime('now'));
+
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+        VALUES (13, datetime('now'));
     `)
     this.ensureColumn('skills', 'run_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'success_count', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'consecutive_failures', 'INTEGER NOT NULL DEFAULT 0')
     this.ensureColumn('skills', 'last_run_at', 'TEXT')
+    this.ensureColumn('skills', 'kind', "TEXT NOT NULL DEFAULT 'WORKFLOW'")
     this.ensureColumn('remote_jobs', 'error_code', 'TEXT')
     this.ensureColumn('remote_jobs', 'error_message', 'TEXT')
     this.ensureColumn('remote_jobs', 'solved_sha256', 'TEXT')
@@ -421,6 +436,25 @@ export class LocalDatabase {
     this.ensureColumn('remote_jobs', 'convergence_sha256', 'TEXT')
     this.ensureColumn('remote_jobs', 'failure_notification_status', 'TEXT')
     this.ensureColumn('peers', 'free_disk_bytes', 'INTEGER')
+    this.seedOptimizationSkills()
+  }
+
+  private seedOptimizationSkills(): void {
+    const now = new Date().toISOString()
+    const insertSkill = this.db.prepare(`
+      INSERT OR IGNORE INTO skills(id, skill_key, name, description, status, active_version,
+        source_task_count, published_path, created_at, updated_at, kind)
+      VALUES (?, ?, ?, ?, 'ENABLED', 1, 0, NULL, ?, ?, 'OPTIMIZATION')
+    `)
+    const insertVersion = this.db.prepare(`
+      INSERT OR IGNORE INTO skill_versions(id, skill_id, version, definition_json, change_summary, created_at)
+      VALUES (?, ?, 1, ?, '内置优化策略初始版本', ?)
+    `)
+    for (const seed of OPTIMIZATION_SKILL_SEEDS) {
+      insertSkill.run(randomUUID(), seed.key, seed.name, seed.description, now, now)
+      const row = this.db.prepare('SELECT id FROM skills WHERE skill_key = ?').get(seed.key) as SqliteRow
+      insertVersion.run(randomUUID(), String(row.id), JSON.stringify(optimizationDefinition(seed.guidance)), now)
+    }
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -1056,6 +1090,26 @@ export class LocalDatabase {
     }
   }
 
+  updateTaskDraft(id: string, title: string, description: string, requirementSnapshot: Record<string, unknown>, expectedVersion: number): TaskRecord {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.getTask(id)
+      if (!current) throw new TaskNotFoundError(id)
+      if (current.version !== expectedVersion) throw new VersionConflictError(expectedVersion, current.version)
+      if (current.executionStatus !== 'DRAFT') throw new Error('only DRAFT tasks can be edited')
+      const now = new Date().toISOString()
+      this.db.prepare(`UPDATE tasks SET title = ?, description = ?, requirement_snapshot_json = ?, version = ?, updated_at = ? WHERE id = ?`)
+        .run(title, description, JSON.stringify(requirementSnapshot), current.version + 1, now, id)
+      this.insertEvent({ id: randomUUID(), taskId: id, eventType: 'task.draft_updated', fromStatus: 'DRAFT', toStatus: 'DRAFT',
+        reason: '需求表单已更新', payload: { previousVersion: current.version, version: current.version + 1 }, createdAt: now })
+      this.db.exec('COMMIT')
+      return this.getTask(id) as TaskRecord
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   requestTaskApproval(id: string, verdict: ThermalVerdict, expectedVersion?: number, reason?: string): TaskRecord {
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -1177,6 +1231,17 @@ export class LocalDatabase {
       payload: parseObject(row.payload_json),
       createdAt: String(row.created_at),
     }))
+  }
+
+  addTaskNote(taskId: string, author: string, content: string): TaskEvent {
+    const task = this.getTask(taskId)
+    if (!task) throw new TaskNotFoundError(taskId)
+    const event: TaskEvent = {
+      id: randomUUID(), taskId, eventType: 'task.note_added', fromStatus: task.executionStatus,
+      toStatus: task.executionStatus, reason: null, payload: { author, content }, createdAt: new Date().toISOString(),
+    }
+    this.insertEvent(event)
+    return event
   }
 
   createRunWithAttempt(input: CreateRunInput): { run: RunRecord; attempt: AttemptRecord } {
@@ -1769,6 +1834,7 @@ export class LocalDatabase {
     try {
       const skill = this.getSkill(skillId)
       if (!skill) throw new SkillNotFoundError(skillId)
+      if (skill.kind === 'OPTIMIZATION') throw new SkillConflictError('optimization guidance is advisory and cannot create a Skill Run')
       if (skill.status !== 'ENABLED') throw new SkillConflictError('skill must be ENABLED before it can run')
       this.db.prepare(`
         INSERT INTO tasks(
@@ -1896,9 +1962,69 @@ export class LocalDatabase {
     return { ...skill, version: decodeSkillVersion(versionRow), sources: sourceRows.map(decodeSkillSource) }
   }
 
+  saveModelCapabilityAssessment(assessment: ModelCapabilityAssessment): void {
+    this.db.prepare(`INSERT INTO model_capability_checks(model_sha256, assessment_json, checked_at)
+      VALUES (?, ?, ?) ON CONFLICT(model_sha256) DO UPDATE SET assessment_json = excluded.assessment_json, checked_at = excluded.checked_at`)
+      .run(assessment.modelSha256, JSON.stringify(assessment), assessment.checkedAt)
+  }
+
+  getModelCapabilityAssessment(sha256: string): ModelCapabilityAssessment | null {
+    const row = this.db.prepare('SELECT assessment_json FROM model_capability_checks WHERE model_sha256 = ?').get(sha256) as SqliteRow | undefined
+    return row ? JSON.parse(String(row.assessment_json)) as ModelCapabilityAssessment : null
+  }
+
+  createOptimizationSkill(input: OptimizationSkillInput, source: 'app' | 'agent'): SkillDetail {
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`
+        INSERT INTO skills(id, skill_key, name, description, status, active_version,
+          source_task_count, published_path, kind, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'ENABLED', 1, 0, NULL, 'OPTIMIZATION', ?, ?)
+      `).run(id, `optimization-user-${id}`, input.name, input.description, now, now)
+      this.db.prepare(`
+        INSERT INTO skill_versions(id, skill_id, version, definition_json, change_summary, created_at)
+        VALUES (?, ?, 1, ?, ?, ?)
+      `).run(randomUUID(), id, JSON.stringify(optimizationDefinition(input.guidance)), `由 ${source} 创建的策略草稿`, now)
+      this.db.exec('COMMIT')
+      return this.getSkill(id) as SkillDetail
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  updateOptimizationSkill(id: string, input: UpdateOptimizationSkillInput): SkillDetail {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.getSkill(id)
+      if (!current) throw new SkillNotFoundError(id)
+      if (current.kind !== 'OPTIMIZATION') throw new SkillConflictError('evidence-based workflow Skills cannot be edited as advisory strategies')
+      if (current.activeVersion !== input.expectedVersion) throw new SkillConflictError('skill was changed by another operation; reload before editing')
+      const nextVersion = current.activeVersion + 1
+      const now = new Date().toISOString()
+      this.db.prepare(`
+        INSERT INTO skill_versions(id, skill_id, version, definition_json, change_summary, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(randomUUID(), id, nextVersion, JSON.stringify(optimizationDefinition(input.guidance)), input.changeSummary, now)
+      this.db.prepare('UPDATE skills SET name = ?, description = ?, active_version = ?, updated_at = ? WHERE id = ?')
+        .run(input.name, input.description, nextVersion, now, id)
+      this.db.exec('COMMIT')
+      return this.getSkill(id) as SkillDetail
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   listSkills(): SkillRecord[] {
     const rows = this.db.prepare(`
-      SELECT * FROM skills ORDER BY CASE status WHEN 'ENABLED' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END, updated_at DESC
+      SELECT * FROM skills ORDER BY
+        CASE kind WHEN 'OPTIMIZATION' THEN 0 ELSE 1 END,
+        CASE WHEN kind = 'OPTIMIZATION' THEN skill_key END ASC,
+        CASE status WHEN 'ENABLED' THEN 0 WHEN 'DRAFT' THEN 1 ELSE 2 END,
+        updated_at DESC
     `).all() as SqliteRow[]
     return rows.map(decodeSkill)
   }
@@ -1914,6 +2040,7 @@ export class LocalDatabase {
     try {
       const current = this.getSkill(id)
       if (!current) throw new SkillNotFoundError(id)
+      if (current.kind === 'OPTIMIZATION') throw new SkillConflictError('built-in optimization guidance cannot be reviewed as a solved workflow')
       if (current.updatedAt !== expectedUpdatedAt) throw new SkillConflictError('skill was changed by another operation')
       if (status === 'ENABLED' && !['DRAFT', 'DISABLED'].includes(current.status)) {
         throw new SkillConflictError(`skill status ${current.status} cannot be enabled`)
@@ -2084,6 +2211,7 @@ function decodeSkill(row: SqliteRow): SkillRecord {
   return {
     id: String(row.id),
     key: String(row.skill_key),
+    kind: row.kind === 'OPTIMIZATION' ? 'OPTIMIZATION' : 'WORKFLOW',
     name: String(row.name),
     description: String(row.description),
     status: row.status as SkillStatus,

@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, dialog, Menu, nativeImage, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Tray } from 'electron'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { resolveDesktopRuntimePaths, validatePackagedRuntime } from './runtime-paths.js'
 import { createTrayIconPng } from './tray-icon.js'
 import { CoreProcessSupervisor, type CoreProcessState } from './core-process-supervisor.js'
@@ -11,6 +12,107 @@ let window: BrowserWindow | undefined
 let tray: Tray | undefined
 let coreSupervisor: CoreProcessSupervisor | undefined
 let creatingWindow: Promise<void> | undefined
+
+async function dshFrame() {
+  if (!window || window.isDestroyed()) throw new Error('桌面窗口尚未就绪')
+  const response = await fetch(`${coreOrigin}/api/agent/status`)
+  const body = await response.json() as { agent?: { phase?: string; url?: string } }
+  if (!response.ok || body.agent?.phase !== 'ready' || !body.agent.url) throw new Error('DSH 对话尚未就绪')
+  const origin = new URL(body.agent.url).origin
+  const frame = window.webContents.mainFrame.frames.find(candidate => {
+    try { return new URL(candidate.url).origin === origin } catch { return false }
+  })
+  if (!frame) throw new Error('请先打开散热 Agent 页面并等待对话加载')
+  return frame
+}
+
+function assertDesktopSender(senderUrl: string): void {
+  if (!senderUrl.startsWith(`${coreOrigin}/`)) throw new Error('桌面操作来源无效')
+}
+
+ipcMain.handle('thermal:dsh-open-session', async (event, value: unknown) => {
+  assertDesktopSender(event.senderFrame?.url ?? '')
+  if (typeof value !== 'string' || !/^session-[0-9a-f-]{36}$/iu.test(value)) throw new Error('会话 ID 无效')
+  const response = await fetch(`${coreOrigin}/api/agent/sessions`)
+  const body = await response.json() as { sessions?: Array<{ sessionId: string }> }
+  if (!response.ok || !body.sessions?.some(item => item.sessionId === value)) throw new Error('该会话不属于当前工作目录')
+  const frame = await dshFrame()
+  await frame.executeJavaScript(`(() => {
+    document.documentElement.dataset.thermalSettings = 'false';
+    document.querySelector('[class*="VOzbGW_close"]')?.click();
+  })()`)
+  const deadline = Date.now() + 8_000
+  while (Date.now() < deadline) {
+    const active = await frame.executeJavaScript(`(() => {
+      const id = ${JSON.stringify(value)};
+      try { if (JSON.parse(localStorage.getItem('dsh.sessions.current') || '{}').sessionId === id) return true; } catch {}
+      for (const element of document.querySelectorAll('[class*="bhn1Oq_root"]')) {
+        const key = Object.keys(element).find(name => name.startsWith('__reactFiber$'));
+        let fiber = key ? element[key] : null;
+        for (let depth = 0; fiber && depth < 30; depth++, fiber = fiber.return) {
+          const props = fiber.memoizedProps;
+          if (props && typeof props.open === 'function' && typeof props.useSessions === 'function') {
+            try { props.open(id); } catch { return false; }
+            return false;
+          }
+        }
+      }
+      return false;
+    })()`)
+    if (active) return
+    await new Promise(resolveWait => setTimeout(resolveWait, 120))
+  }
+  throw new Error('DSH 未能打开指定会话，请在对话面板中手动选择')
+})
+
+ipcMain.handle('thermal:dsh-open-settings', async event => {
+  assertDesktopSender(event.senderFrame?.url ?? '')
+  const frame = await dshFrame()
+  const deadline = Date.now() + 8_000
+  let opened = false
+  while (!opened && Date.now() < deadline) {
+    opened = await frame.executeJavaScript(`(() => {
+      if (Array.from(document.querySelectorAll('h2')).some(el => /Internal Testing Notice|Add an API key to get started|内测声明|添加 API 密钥/u.test(el.textContent || ''))) {
+        return 'onboarding';
+      }
+      document.documentElement.dataset.thermalSettings = 'true';
+      if (document.querySelector('[class*="VOzbGW_panel"]')) return 'opened';
+      const trigger = document.querySelector('button[aria-haspopup="dialog"][class*="VOzbGW_trigger"]');
+      if (!trigger) return 'waiting';
+      trigger.click();
+      return 'waiting';
+    })()`).then(result => {
+      if (result === 'onboarding') throw new Error('请先在 DSH 对话中完成首次使用提示或模型配置')
+      return result === 'opened'
+    })
+    if (!opened) await new Promise(resolveWait => setTimeout(resolveWait, 120))
+  }
+  if (!opened) throw new Error('DSH 原生设置未能打开，请在对话中手动打开设置')
+  const visible = await frame.executeJavaScript(`(() => {
+    const panel = document.querySelector('[class*="VOzbGW_panel"]');
+    return Boolean(panel && getComputedStyle(panel).visibility !== 'hidden' && panel.getBoundingClientRect().width > 0);
+  })()`)
+  if (!visible) throw new Error('DSH 设置面板已打开但不可见')
+})
+
+ipcMain.handle('thermal:dsh-style-frame', async event => {
+  assertDesktopSender(event.senderFrame?.url ?? '')
+  const frame = await dshFrame()
+  await frame.executeJavaScript(`(() => {
+    if (document.getElementById('thermal-agent-dsh-shell')) return;
+    const style = document.createElement('style');
+    style.id = 'thermal-agent-dsh-shell';
+    style.textContent = '.pI_x6G_sidebarCol,.pI_x6G_rightbarCol{visibility:hidden!important;pointer-events:none!important}.pI_x6G_handle{display:none!important}.pI_x6G_frame{grid-template-columns:0px minmax(0,1fr) 0px!important}html[data-thermal-settings="true"] [class*="VOzbGW_overlay"]{background:var(--dsw-alias-bg-base)!important;visibility:visible!important;pointer-events:auto!important}html[data-thermal-settings="true"] [class*="VOzbGW_mask"]{display:none!important}html[data-thermal-settings="true"] [class*="VOzbGW_panel"]{width:100%!important;max-width:none!important;height:100%!important;border-radius:0!important;box-shadow:none!important}';
+    document.head.append(style);
+  })()`)
+})
+
+ipcMain.handle('thermal:set-title-bar-theme', (event, dark: unknown) => {
+  assertDesktopSender(event.senderFrame?.url ?? '')
+  if (process.platform === 'darwin' || !window || window.isDestroyed()) return
+  if (typeof dark !== 'boolean') throw new Error('标题栏主题值无效')
+  window.setTitleBarOverlay({ color: dark ? '#292a27' : '#f3f3ef', symbolColor: dark ? '#f1f1ed' : '#30312e', height: 48 })
+})
 
 async function availablePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
@@ -61,6 +163,7 @@ function spawnCore(): ChildProcess {
       THERMAL_AGENT_PORT: port,
       THERMAL_AGENT_WEB_ROOT: paths.webRoot,
       THERMAL_ICEPAK_PLUGIN_ROOT: paths.icepakPluginRoot,
+      THERMAL_ICEPAK_SAMPLE_PROJECT: paths.sampleProjectPath,
       ...(paths.icepakPython ? { THERMAL_ICEPAK_PYTHON: paths.icepakPython } : {}),
       THERMAL_REPORT_PLUGIN_ROOT: paths.reportPluginRoot,
       ...(paths.reportPython ? { THERMAL_REPORT_PYTHON: paths.reportPython } : {}),
@@ -107,15 +210,21 @@ async function showWindow(): Promise<void> {
       coreSupervisor.start()
     }
     await waitForCore()
+    const iconPaths = resolveDesktopRuntimePaths({
+      appPath: app.getAppPath(), resourcesPath: process.resourcesPath, packaged: app.isPackaged,
+    })
     const next = new BrowserWindow({
+      icon: iconPaths.windowIconPath,
       width: 1380,
       height: 900,
       minWidth: 960,
       minHeight: 680,
       backgroundColor: nativeTheme.shouldUseDarkColors ? '#1f1f1f' : '#f4f4f4',
       title: 'Thermal Agent',
+      titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+      ...process.platform !== 'darwin' && { titleBarOverlay: { color: '#f3f3ef', symbolColor: '#30312e', height: 48 } },
       show: false,
-      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, preload: join(fileURLToPath(new URL('.', import.meta.url)), 'preload.cjs') },
     })
     window = next
     next.on('closed', () => { if (window === next) window = undefined })
@@ -139,7 +248,10 @@ function openWindow(): void {
 }
 
 function createTray(): void {
-  const icon = nativeImage.createFromBuffer(createTrayIconPng())
+  const paths = resolveDesktopRuntimePaths({
+    appPath: app.getAppPath(), resourcesPath: process.resourcesPath, packaged: app.isPackaged,
+  })
+  const icon = nativeImage.createFromBuffer(createTrayIconPng(paths.trayIconPath))
   if (icon.isEmpty()) throw new Error('托盘图标无法加载')
   tray = new Tray(icon)
   tray.setToolTip('Thermal Agent · 后台任务运行中')

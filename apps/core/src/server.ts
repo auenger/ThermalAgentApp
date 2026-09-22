@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
-import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
+import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseOptimizationSkillInput, parseUpdateOptimizationSkillInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
@@ -28,11 +28,15 @@ import { PeerRemoteRunControl, PeerRemoteRunError } from './peer-remote-run-cont
 import { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
 import { PeerAutoDispatcher } from './peer-auto-dispatcher.js'
 import { effectiveIcepakProbe } from './icepak-readiness.js'
+import { recommendOptimizationSkills } from './optimization-recommender.js'
+import { CAD_EXTENSIONS, aedtModelAssessment, cadModelAssessment, curveFanNames, failedAedtAssessment } from './model-capabilities.js'
 import { heartbeatFreeDiskBytes, localFreeDiskBytes } from './peer-disk-capacity.js'
+import { TaskWorkspace } from './task-workspace.js'
 import type { IcepakEnvironmentProbe, PeerHeartbeat } from '@thermal-agent/contracts'
 
 export interface CoreAppOptions {
   home: string
+  sampleProjectPath?: string
   pluginClient?: IcepakPluginPort
   webRoot?: string
   startAgentRuntime?: boolean
@@ -69,6 +73,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   }, 10_000)
   leaseSweep.unref()
   const artifacts = new ArtifactStore(join(home, 'artifacts'))
+  const taskWorkspace = new TaskWorkspace(home)
+  const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
+  for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
   const pluginClient = options.pluginClient ?? new IcepakPluginClient()
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
     effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts)
@@ -127,7 +134,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, pluginClient, launchProbe, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -162,8 +169,10 @@ async function route(
   response: ServerResponse,
   database: LocalDatabase,
   artifacts: ArtifactStore,
+  taskWorkspace: TaskWorkspace,
   pluginClient: IcepakPluginPort,
   launchProbe: (version?: string) => Promise<IcepakEnvironmentProbe>,
+  sampleProjectPath: string,
   executions: IcepakExecutionManager,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
@@ -186,6 +195,10 @@ async function route(
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (request.method === 'GET' && url.pathname === '/api/health') {
     writeJson(response, 200, { status: 'ok', service: 'thermal-agent-core', version: '0.1.0' })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/workspace') {
+    writeJson(response, 200, { path: taskWorkspace.root, taskRoot: join(taskWorkspace.root, 'tasks'), agentPath: taskWorkspace.root })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/peer/v1/challenge') {
@@ -318,16 +331,109 @@ async function route(
     return
   }
   if (request.method === 'GET' && url.pathname === '/api/agent/status') {
-    writeJson(response, 200, { agent: agentRuntime.getStatus() })
+    const status = agentRuntime.getStatus()
+    writeJson(response, 200, { agent: isLoopbackAddress(request.socket.remoteAddress) ? status : { ...status, url: undefined, workspacePath: undefined } })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/agent/restart') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'DSH control is local-only')
+    assertLocalWriteOrigin(request)
     await agentRuntime.restart()
     writeJson(response, 202, { agent: agentRuntime.getStatus() })
     return
   }
+  if (url.pathname === '/api/agent/sessions') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'DSH sessions are local-only')
+    if (request.method === 'GET') { writeJson(response, 200, { sessions: await agentRuntime.listSessions() }); return }
+    if (request.method === 'POST') {
+      assertLocalWriteOrigin(request)
+      writeJson(response, 201, { sessionId: await agentRuntime.createSession() })
+      return
+    }
+  }
+  const archiveSessionMatch = url.pathname.match(/^\/api\/agent\/sessions\/(session-[0-9a-f-]{36})\/archive$/iu)
+  if (request.method === 'POST' && archiveSessionMatch) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'DSH sessions are local-only')
+    assertLocalWriteOrigin(request)
+    await agentRuntime.archiveSession(archiveSessionMatch[1])
+    writeJson(response, 200, { archived: true })
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/skills') {
     writeJson(response, 200, { skills: database.listSkills() })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/models/upload') {
+    const encodedName = request.headers['x-model-name']
+    if (typeof encodedName !== 'string') throw new RequestError(400, 'MODEL_NAME_REQUIRED', 'model filename is required')
+    let name: string
+    try { name = decodeURIComponent(encodedName) }
+    catch { throw new RequestError(400, 'INVALID_MODEL_NAME', 'model filename is invalid') }
+    const extension = extname(name).toLowerCase()
+    if (name !== basename(name) || /[/\\\0]/u.test(name) || (extension !== '.aedt' && !CAD_EXTENSIONS.has(extension)) || name.length > 255) {
+      throw new RequestError(400, 'INVALID_MODEL_NAME', 'upload one .aedt, STEP, IGES, Parasolid or ACIS file with a valid filename')
+    }
+    const maxBytes = 2 * 1024 * 1024 * 1024
+    const length = Number(request.headers['content-length'] ?? 0)
+    if (length > maxBytes) throw new RequestError(413, 'MODEL_TOO_LARGE', 'model exceeds 2 GiB upload limit')
+    const model = await artifacts.importStream(request, name, maxBytes)
+    database.upsertArtifact(model)
+    const projectPath = await artifacts.materialize(model.sha256, join(home, 'models', model.sha256, model.originalName))
+    writeJson(response, 201, { model: { sha256: model.sha256, originalName: model.originalName, sizeBytes: model.sizeBytes,
+      modelKind: extension === '.aedt' ? 'AEDT' : 'CAD', projectPath } })
+    return
+  }
+  const checkModelMatch = url.pathname.match(/^\/api\/models\/([a-f0-9]{64})\/check$/u)
+  if (request.method === 'POST' && checkModelMatch) {
+    const sha = checkModelMatch[1]
+    const model = database.getArtifact(sha)
+    if (!model) throw new RequestError(404, 'MODEL_NOT_FOUND', 'uploaded model was not found')
+    const versionInput = await readJsonBody(request, 1_024)
+    const version = isObject(versionInput) && typeof versionInput.version === 'string' && versionInput.version.trim()
+      ? versionInput.version.trim().slice(0, 50) : '2024.2'
+    const extension = extname(model.originalName).toLowerCase()
+    if (CAD_EXTENSIONS.has(extension)) {
+      const assessment = cadModelAssessment(sha)
+      database.saveModelCapabilityAssessment(assessment)
+      writeJson(response, 200, { assessment })
+      return
+    }
+    if (extension !== '.aedt') throw new RequestError(400, 'INVALID_MODEL', 'unsupported model type')
+    const projectPath = join(home, 'models', sha, model.originalName)
+    let assessment
+    try {
+      const inspection = await pluginClient.inspectProject({ projectPath, version, outputDir: join(home, 'runs', 'model-check', randomUUID()) })
+      let fanCheck = null
+      let fanCheckError = null
+      if (curveFanNames(inspection).length) {
+        try { fanCheck = await pluginClient.fanCheck({ projectPath, version, fanSpeedRatio: 1.1, outputDir: join(home, 'runs', 'model-fan-check', randomUUID()) }) }
+        catch (error) { fanCheckError = error instanceof Error ? error.message.slice(0, 500) : 'fan action check failed' }
+      }
+      assessment = aedtModelAssessment(sha, version, inspection, fanCheck, fanCheckError)
+    } catch (error) {
+      assessment = failedAedtAssessment(sha, version, error instanceof Error ? error.message.slice(0, 500) : 'Icepak project inspection failed')
+    }
+    database.saveModelCapabilityAssessment(assessment)
+    writeJson(response, 200, { assessment })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/optimization/skills') {
+    const input = parseOptimizationSkillInput(await readJsonBody(request, 32_000))
+    writeJson(response, 201, { skill: database.createOptimizationSkill(input, 'app') })
+    return
+  }
+  const editOptimizationSkillMatch = url.pathname.match(/^\/api\/optimization\/skills\/([0-9a-f-]+)$/iu)
+  if (request.method === 'PATCH' && editOptimizationSkillMatch) {
+    const input = parseUpdateOptimizationSkillInput(await readJsonBody(request, 32_000))
+    writeJson(response, 200, { skill: database.updateOptimizationSkill(editOptimizationSkillMatch[1], input) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/optimization/recommendations') {
+    const input = await readJsonBody(request, 16_000)
+    if (!isObject(input) || typeof input.requirement !== 'string' || input.requirement.length > 12_000) {
+      throw new RequestError(400, 'INVALID_REQUIREMENT', 'requirement must be a string of at most 12000 characters')
+    }
+    writeJson(response, 200, { recommendations: recommendOptimizationSkills(database, input.requirement), basis: 'keyword-pre-screening; all diagnostics and temperature drops are unverified' })
     return
   }
   const skillMatch = url.pathname.match(/^\/api\/skills\/([0-9a-f-]+)$/iu)
@@ -342,6 +448,7 @@ async function route(
     const input = parseCreateSkillRunInput(await readJsonBody(request))
     const skill = database.getSkill(skillRunMatch[1])
     if (!skill) throw new SkillNotFoundError(skillRunMatch[1])
+    if (skill.kind === 'OPTIMIZATION') throw new SkillConflictError('optimization guidance cannot start a Skill Run')
     if (skill.status !== 'ENABLED') throw new SkillConflictError('skill must be ENABLED before it can run')
     const detected = await pluginClient.probeEnvironment()
     const probe = detected.status === 'DETECTED' && pluginClient.probeLaunchability
@@ -355,15 +462,17 @@ async function route(
       projectPath: input.projectPath, version: input.version, outputDir: inspectOutput,
     })
     if (!inspection.validation.verified) throw new RequestError(409, 'ICEPAK_PROJECT_INVALID', 'Icepak project inspection was not verified')
+    const taskId = randomUUID()
     const task = createTask({
       title: input.title, description: input.description, ownerNodeId: nodeIdentity.nodeId,
       requirementSnapshot: {
+        taskWorkspacePath: taskWorkspace.ensure(taskId),
         projectPath: input.projectPath, aedtVersion: input.version ?? probe.selectedVersion ?? undefined,
         cores: input.cores ?? 4, ...(input.targetTmaxC === undefined ? {} : { targetTmaxC: input.targetTmaxC }),
         skillId: skill.id, skillVersion: skill.activeVersion,
         inspection: { inputSha256: inspection.inputSha256, design: inspection.project.activeDesign, verified: inspection.validation.verified },
       },
-    })
+    }, undefined, taskId)
     const created = database.createTaskFromSkill(skill.id, task, { ...input }, {
       probe: { status: probe.status, selectedVersion: probe.selectedVersion, capabilities: probe.capabilities },
       inspect: { inputSha256: inspection.inputSha256, activeDesign: inspection.project.activeDesign, verified: inspection.validation.verified },
@@ -381,6 +490,7 @@ async function route(
     const input = parseSkillReviewInput(await readJsonBody(request))
     const skill = database.getSkill(enableSkillMatch[1])
     if (!skill) throw new SkillNotFoundError(enableSkillMatch[1])
+    if (skill.kind === 'OPTIMIZATION') throw new SkillConflictError('built-in optimization guidance is not a solved workflow')
     if (skill.updatedAt !== input.expectedUpdatedAt) throw new SkillConflictError('skill was changed by another operation')
     const publishedPath = skillPublisher.publish(skill)
     writeJson(response, 200, { skill: database.reviewSkill(skill.id, 'ENABLED', input.reviewer, input.expectedUpdatedAt, publishedPath) })
@@ -391,6 +501,7 @@ async function route(
     const input = parseSkillReviewInput(await readJsonBody(request))
     const skill = database.getSkill(disableSkillMatch[1])
     if (!skill) throw new SkillNotFoundError(disableSkillMatch[1])
+    if (skill.kind === 'OPTIMIZATION') throw new SkillConflictError('built-in optimization guidance cannot be disabled as a solved workflow')
     if (skill.updatedAt !== input.expectedUpdatedAt) throw new SkillConflictError('skill was changed by another operation')
     skillPublisher.unpublish(skill.publishedPath)
     writeJson(response, 200, { skill: database.reviewSkill(skill.id, 'DISABLED', input.reviewer, input.expectedUpdatedAt, null) })
@@ -398,27 +509,80 @@ async function route(
   }
   if (request.method === 'GET' && url.pathname === '/api/tasks') {
     const limit = Number(url.searchParams.get('limit') ?? '100')
-    writeJson(response, 200, { tasks: database.listTasks(Number.isFinite(limit) ? limit : 100) })
+    const tasks = database.listTasks(Number.isFinite(limit) ? limit : 100)
+    for (const task of tasks) taskWorkspace.ensure(task.id)
+    writeJson(response, 200, { tasks })
     return
   }
   if (request.method === 'POST' && url.pathname === '/api/tasks') {
     const value = await readJsonBody(request)
     const input = parseCreateTaskInput({ ...(isObject(value) ? value : {}), ownerNodeId: nodeIdentity.nodeId })
-    const task = database.createTask(createTask(input))
+    const id = randomUUID()
+    const snapshot = await prepareIntakeSnapshot(input.requirementSnapshot, database, home)
+    const taskSnapshot = await bindTaskSnapshot(id, snapshot, taskWorkspace, artifacts, database)
+    const hypotheses = recommendOptimizationSkills(database, `${input.title}\n${input.description}\n${String(taskSnapshot.workCondition ?? '')}\n${String(taskSnapshot.criticalPoints ?? '')}`).filter(item => item.suggested)
+    const task = database.createTask(createTask({ ...input, requirementSnapshot: {
+      ...taskSnapshot,
+      optimizationHypotheses: hypotheses.map(item => ({ skillKey: item.key, matchedSignals: item.matchedSignals, evidenceStatus: item.evidenceStatus })),
+      optimizationSuggestions: hypotheses,
+    } }, undefined, id))
     writeJson(response, 201, { task })
     return
   }
   const taskMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)$/iu)
+  if (request.method === 'PATCH' && taskMatch) {
+    const value = await readJsonBody(request)
+    if (!isObject(value)) throw new RequestError(400, 'INVALID_TASK', 'task input must be an object')
+    const current = database.getTask(taskMatch[1])
+    if (!current) throw new TaskNotFoundError(taskMatch[1])
+    if (current.ownerNodeId !== nodeIdentity.nodeId) throw new RequestError(403, 'NOT_OWNER', 'only the owner may edit this draft')
+    const input = parseCreateTaskInput({ ...value, ownerNodeId: nodeIdentity.nodeId })
+    const snapshot = await prepareIntakeSnapshot(input.requirementSnapshot, database, home)
+    const taskSnapshot = await bindTaskSnapshot(current.id, snapshot, taskWorkspace, artifacts, database)
+    const hypotheses = recommendOptimizationSkills(database, `${input.title}\n${input.description}\n${String(snapshot.workCondition ?? '')}\n${String(snapshot.criticalPoints ?? '')}`).filter(item => item.suggested)
+    const expectedVersion = parseExpectedVersionInput(value).expectedVersion
+    writeJson(response, 200, { task: database.updateTaskDraft(taskMatch[1], input.title, input.description, {
+      ...taskSnapshot,
+      ...(current.requirementSnapshot.source === 'dsh-natural-language' ? { source: 'dsh-natural-language' } : {}),
+      ...(current.requirementSnapshot.sourceSessionId ? { sourceSessionId: current.requirementSnapshot.sourceSessionId } : {}),
+      ...(current.requirementSnapshot.conversationAttachments ? { conversationAttachments: current.requirementSnapshot.conversationAttachments } : {}),
+      optimizationHypotheses: hypotheses.map(item => ({ skillKey: item.key, matchedSignals: item.matchedSignals, evidenceStatus: item.evidenceStatus })),
+      optimizationSuggestions: hypotheses,
+    }, expectedVersion) })
+    return
+  }
+  const taskNotesMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/notes$/iu)
+  if (request.method === 'POST' && taskNotesMatch) {
+    assertLocalOwner(database, taskNotesMatch[1], nodeIdentity.nodeId)
+    const input = await readJsonBody(request, 4_096)
+    if (!isObject(input) || typeof input.author !== 'string' || !input.author.trim() || input.author.length > 100 ||
+      typeof input.content !== 'string' || !input.content.trim() || input.content.length > 2_000) {
+      throw new RequestError(400, 'INVALID_TASK_NOTE', 'author and content are required within the size limit')
+    }
+    writeJson(response, 201, { event: database.addTaskNote(taskNotesMatch[1], input.author.trim(), input.content.trim()) })
+    return
+  }
   if (request.method === 'GET' && taskMatch) {
     const task = database.getTask(taskMatch[1])
     if (!task) throw new TaskNotFoundError(taskMatch[1])
-    const runs = database.listTaskRuns(task.id).map(run => ({
+    taskWorkspace.ensure(task.id)
+    const runs = await Promise.all(database.listTaskRuns(task.id).map(async run => ({
       ...run,
-      attempts: database.listRunAttempts(run.id).map(attempt => ({
-        ...attempt,
-        artifacts: database.listAttemptArtifacts(attempt.id),
+      attempts: await Promise.all(database.listRunAttempts(run.id).map(async attempt => {
+        const linked = database.listAttemptArtifacts(attempt.id)
+        const result = linked.find(item => item.role === 'SOLVER_RESULT')
+        let resultSummary: { tmaxC: number | null; converged: boolean | null } | null = null
+        if (result) {
+          try {
+            const parsed = JSON.parse(await readFile(artifacts.resolveArtifact(result.sha256), 'utf8')) as { metrics?: Record<string, unknown> }
+            const tmax = parsed.metrics?.tmaxC == null ? Number.NaN : Number(parsed.metrics.tmaxC)
+            resultSummary = { tmaxC: Number.isFinite(tmax) ? tmax : null,
+              converged: typeof parsed.metrics?.converged === 'boolean' ? parsed.metrics.converged : null }
+          } catch { /* Preserve artifact links even when a result cannot be summarized. */ }
+        }
+        return { ...attempt, artifacts: linked, resultSummary }
       })),
-    }))
+    })))
     writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id), skillRun: database.getSkillRunForTask(task.id) })
     return
   }
@@ -446,6 +610,30 @@ async function route(
     const input = parseTaskTransitionInput(await readJsonBody(request))
     if (!['READY', 'CANCELLED'].includes(input.status)) {
       throw new RequestError(400, 'TRANSITION_REQUIRES_WORKFLOW', 'this task transition must be performed by its controlled workflow')
+    }
+    if (input.status === 'READY') {
+      const draft = database.getTask(transitionMatch[1])
+      if (!draft) throw new TaskNotFoundError(transitionMatch[1])
+      if (draft.requirementSnapshot.intakeVersion === 2) {
+        const snapshot = draft.requirementSnapshot
+        if (typeof snapshot.modelSha256 !== 'string' || !database.getArtifact(snapshot.modelSha256)) {
+          throw new RequestError(409, 'MODEL_REQUIRED', 'upload and attach a model before confirming the task')
+        }
+        if (snapshot.modelKind !== 'AEDT') {
+          throw new RequestError(409, 'ICEPAK_MODEL_REQUIRED', 'CAD intake must be prepared as an Icepak .aedt project before simulation')
+        }
+        const assessment = database.getModelCapabilityAssessment(snapshot.modelSha256)
+        if (!assessment || assessment.status !== 'READY_FOR_BASELINE' || assessment.aedtVersion !== snapshot.aedtVersion) {
+          throw new RequestError(409, 'MODEL_CHECK_REQUIRED', 'run the Icepak model capability check before confirming the task')
+        }
+        if (snapshot.autoFanRatio !== undefined && assessment.items.find(item => item.skillKey === 'optimization-04-fan-selection')?.status !== 'EXECUTABLE') {
+          throw new RequestError(409, 'FAN_NOT_EXECUTABLE', 'fan adjustment was not verified for this model')
+        }
+        if (!draft.description.trim() || !Number.isFinite(snapshot.targetTmaxC)) {
+          throw new RequestError(409, 'REQUIREMENT_INCOMPLETE', 'thermal requirement and maximum temperature target are required')
+        }
+        if (snapshot.planConfirmed !== true) throw new RequestError(409, 'PLAN_NOT_CONFIRMED', 'review and confirm the optimization plan before execution')
+      }
     }
     const task = database.transitionTask(transitionMatch[1], input.status, input.expectedVersion, input.reason)
     if (input.status === 'READY') database.updateSkillRunStep(task.id, 'confirm', 'COMPLETED', { taskVersion: task.version })
@@ -570,6 +758,25 @@ async function route(
     writeJson(response, 200, { probe: await launchProbe(version) })
     return
   }
+  if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/sample-inspect') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'sample inspection is local-only')
+    assertLocalWriteOrigin(request)
+    const input = await readJsonBody(request)
+    const version = isObject(input) ? input.version : undefined
+    if (typeof version !== 'string' || !/^20\d{2}\.[12]$/u.test(version)) {
+      throw new RequestError(400, 'INVALID_VERSION', 'select a detected AEDT version for sample inspection')
+    }
+    const detected = await pluginClient.probeEnvironment()
+    if (detected.platform !== 'win32' || !detected.pyaedtAvailable || !detected.aedtVersions.includes(version)) {
+      throw new RequestError(409, 'ICEPAK_NOT_DETECTED', 'selected AEDT/PyAEDT environment is not available on this Windows node')
+    }
+    const sample = await stat(sampleProjectPath).catch(() => null)
+    if (!sample?.isFile() || sample.size < 1) throw new RequestError(503, 'SAMPLE_NOT_AVAILABLE', 'bundled Icepak sample project is unavailable')
+    const result = await pluginClient.inspectProject({ projectPath: sampleProjectPath, version,
+      outputDir: join(home, 'runs', 'icepak-self-check', randomUUID()) })
+    writeJson(response, 200, { result, sampleName: basename(sampleProjectPath) })
+    return
+  }
   if (request.method === 'POST' && url.pathname === '/api/plugins/icepak/verify-solver') {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'solver verification is local-only')
     assertLocalWriteOrigin(request)
@@ -590,13 +797,18 @@ async function route(
     try { source = await stat(input.projectPath) }
     catch { throw new RequestError(400, 'PROJECT_NOT_FOUND', 'Icepak project file is unavailable') }
     if (!source.isFile() || source.size < 1) throw new RequestError(400, 'PROJECT_NOT_FOUND', 'Icepak project file is empty or not a file')
+    const taskId = randomUUID()
+    const taskPath = taskWorkspace.ensure(taskId)
+    const inputArtifact = await artifacts.importFile(input.projectPath)
+    database.upsertArtifact(inputArtifact)
+    const stagedPath = await taskWorkspace.attachArtifact(taskId, inputArtifact, artifacts)
     const task = database.createTask(createTask({ title: `Icepak 能力验证 · ${basename(input.projectPath)}`,
       description: '用户显式授权的一次真实求解，用于验证本机 Icepak 能力与许可证；结果仍需人工复核。',
       ownerNodeId: nodeIdentity.nodeId,
-      requirementSnapshot: { projectPath: input.projectPath, aedtVersion: input.version, diagnosticReadinessProbe: true },
-    }))
+      requirementSnapshot: { taskWorkspacePath: taskPath, projectPath: stagedPath, aedtVersion: input.version, diagnosticReadinessProbe: true },
+    }, undefined, taskId))
     database.transitionTask(task.id, 'READY', task.version, '用户明确授权真实 Icepak 求解验证')
-    const started = await executions.startBaseline(task.id, input)
+    const started = await executions.startBaseline(task.id, { ...input, projectPath: stagedPath })
     writeJson(response, 202, { task: database.getTask(task.id), run: started.run, attempt: started.attempt })
     return
   }
@@ -621,6 +833,44 @@ async function route(
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+async function prepareIntakeSnapshot(snapshot: Record<string, unknown>, database: LocalDatabase, home: string): Promise<Record<string, unknown>> {
+  if (snapshot.intakeVersion !== 2) return snapshot
+  const selected = snapshot.selectedOptimizationSkillIds
+  if (!Array.isArray(selected) || selected.some(id => typeof id !== 'string' || database.getSkill(id)?.kind !== 'OPTIMIZATION')) {
+    throw new RequestError(400, 'INVALID_PLAN', 'selected optimization Skills must exist')
+  }
+  const fanId = database.listSkills().find(skill => skill.key === 'optimization-04-fan-selection')?.id
+  const autoFanRatio = snapshot.autoFanRatio
+  if (autoFanRatio !== undefined && (typeof autoFanRatio !== 'number' || autoFanRatio <= 1 || autoFanRatio > 1.5 || !fanId || !selected.includes(fanId))) {
+    throw new RequestError(400, 'INVALID_FAN_PLAN', 'automatic fan adjustment requires selecting the fan Skill and a ratio in (1.0, 1.5]')
+  }
+  const sha = snapshot.modelSha256
+  if (sha === undefined || sha === '') return { ...snapshot, fanSkillId: fanId && selected.includes(fanId) ? fanId : undefined, projectPath: undefined, modelSha256: undefined }
+  if (typeof sha !== 'string' || !/^[a-f0-9]{64}$/u.test(sha)) throw new RequestError(400, 'INVALID_MODEL', 'modelSha256 is invalid')
+  const model = database.getArtifact(sha)
+  if (!model) throw new RequestError(400, 'MODEL_NOT_FOUND', 'uploaded model was not found')
+  const extension = extname(model.originalName).toLowerCase()
+  if (extension !== '.aedt' && !CAD_EXTENSIONS.has(extension)) throw new RequestError(400, 'INVALID_MODEL', 'unsupported model type')
+  const projectPath = join(home, 'models', sha, model.originalName)
+  return { ...snapshot, fanSkillId: fanId && selected.includes(fanId) ? fanId : undefined, modelSha256: sha,
+    modelKind: extension === '.aedt' ? 'AEDT' : 'CAD', modelOriginalName: model.originalName,
+    projectPath: extension === '.aedt' ? projectPath : undefined, cadSourcePath: extension === '.aedt' ? undefined : projectPath,
+    capabilityAssessment: database.getModelCapabilityAssessment(sha) }
+}
+
+async function bindTaskSnapshot(taskId: string, snapshot: Record<string, unknown>, workspace: TaskWorkspace,
+  artifacts: ArtifactStore, database: LocalDatabase): Promise<Record<string, unknown>> {
+  const taskWorkspacePath = workspace.ensure(taskId)
+  const sha = snapshot.modelSha256
+  if (typeof sha !== 'string') return { ...snapshot, taskWorkspacePath }
+  const artifact = database.getArtifact(sha)
+  if (!artifact) throw new RequestError(400, 'MODEL_NOT_FOUND', 'uploaded model was not found')
+  const path = await workspace.attachArtifact(taskId, artifact, artifacts)
+  return { ...snapshot, taskWorkspacePath,
+    projectPath: snapshot.modelKind === 'AEDT' ? path : undefined,
+    cadSourcePath: snapshot.modelKind === 'CAD' ? path : undefined }
 }
 
 function assertLocalOwner(database: LocalDatabase, taskId: string, nodeId: string): void {

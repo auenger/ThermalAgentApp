@@ -9,6 +9,7 @@ import type { DiscoveredPeer, PeerDiscovery } from './peer-discovery.js'
 import { PeerLeaseControl } from './peer-lease-control.js'
 import { PeerSecureChannel } from './peer-secure-channel.js'
 import { provesIcepakSolve } from './icepak-readiness.js'
+import { TaskWorkspace } from './task-workspace.js'
 
 const RENEW_INTERVAL_MS = 20_000
 const RETRY_DELAY_MS = 10_000
@@ -20,6 +21,7 @@ export class PeerRemoteSolveProcessor {
   private controller?: AbortController
   private stopped = true
   private readonly retryAfter = new Map<string, number>()
+  private readonly workspace: TaskWorkspace
 
   constructor(
     private readonly home: string,
@@ -30,7 +32,7 @@ export class PeerRemoteSolveProcessor {
     private readonly channel: PeerSecureChannel,
     private readonly transfer: PeerArtifactTransfer,
     private readonly readinessProbe?: () => Promise<IcepakEnvironmentProbe>,
-  ) {}
+  ) { this.workspace = new TaskWorkspace(home) }
 
   start(): void {
     if (this.timer) return
@@ -141,12 +143,12 @@ export class PeerRemoteSolveProcessor {
         const input = this.database.getArtifact(job.inputSha256)
         if (!input || input.sizeBytes !== job.inputSizeBytes) throw new Error('staged input artifact is missing')
         const projectPath = await this.artifacts.materialize(job.inputSha256,
-          join(this.home, 'remote-runs', job.attemptId, 'input', basename(job.inputOriginalName)))
+          join(this.workspace.ensure(job.taskId), 'runs', job.attemptId, 'input', basename(job.inputOriginalName)))
         await this.send(owner, { operation: 'task.baseline.start', ...jobReference(job) })
         this.database.transitionRemoteJob(job.attemptId, job.leaseId, job.epoch, 'INPUT_READY', 'RUNNING')
         stage = 'RUNNING'
         const result = await this.plugin.solveProject({ ...job.parameters, projectPath,
-          outputDir: join(this.home, 'remote-runs', job.attemptId, 'plugin') }, { signal: controller.signal })
+          outputDir: join(this.workspace.ensure(job.taskId), 'runs', job.attemptId, 'plugin') }, { signal: controller.signal })
         if (controller.signal.aborted) throw renewalError ?? new Error('remote solve was cancelled')
         if (result.status !== 'ok' || result.mode !== 'solve' || result.inputSha256 !== job.inputSha256) {
           throw new Error('Icepak returned a mismatched Baseline result')

@@ -71,11 +71,65 @@ export interface ThermalSkillDefinition {
   permissions: string[]
   successCriteria: string[]
   failureStrategy: string
+  optimization?: OptimizationSkillGuidance
+}
+
+/** Built-in engineering hypothesis, not a validated cooling result or executable Skill Run. */
+export interface OptimizationSkillGuidance {
+  priority: number
+  mechanism: string
+  diagnosticBasis: string
+  measure: string
+  expectedTemperatureDrop: string
+  applicability: 'LOCAL_ADJUSTABLE' | 'CUSTOMER_RECOMMENDATION' | 'COST_WEIGHT_TRADEOFF'
+  constraints: string
+  keywords: string[]
+}
+
+export interface OptimizationSkillInput {
+  name: string
+  description: string
+  guidance: OptimizationSkillGuidance
+}
+
+export interface UpdateOptimizationSkillInput extends OptimizationSkillInput {
+  expectedVersion: number
+  changeSummary: string
+}
+
+export interface OptimizationRecommendation {
+  skillId: string
+  activeVersion: number
+  key: string
+  name: string
+  guidance: OptimizationSkillGuidance
+  matchedSignals: string[]
+  suggested: boolean
+  evidenceStatus: 'UNVERIFIED'
+}
+
+export interface ModelCapabilityAssessment {
+  modelSha256: string
+  modelKind: 'AEDT' | 'CAD'
+  status: 'READY_FOR_BASELINE' | 'NEEDS_MODEL_PREPARATION' | 'INSPECTION_FAILED'
+  checkedAt: string
+  aedtVersion: string | null
+  projectName: string | null
+  activeDesign: string | null
+  setups: string[]
+  items: Array<{
+    skillKey: string
+    status: 'EXECUTABLE' | 'ADVISORY_ONLY' | 'NEEDS_MAPPING' | 'UNAVAILABLE'
+    targetNames: string[]
+    reason: string
+  }>
+  diagnostics: string[]
 }
 
 export interface SkillRecord {
   id: string
   key: string
+  kind: 'WORKFLOW' | 'OPTIMIZATION'
   name: string
   description: string
   status: SkillStatus
@@ -581,6 +635,49 @@ export function parseSkillReviewInput(value: unknown): SkillReviewInput {
   return {
     reviewer: requiredText(value.reviewer, 'reviewer', 200),
     expectedUpdatedAt,
+  }
+}
+
+export function parseOptimizationSkillInput(value: unknown): OptimizationSkillInput {
+  if (!isObject(value) || !isObject(value.guidance)) throw new Error('optimization skill and guidance must be objects')
+  const guidance = value.guidance
+  const priority = Number(guidance.priority)
+  if (!Number.isInteger(priority) || priority < 1 || priority > 999) throw new Error('priority must be an integer from 1 to 999')
+  const applicability = guidance.applicability
+  if (!['LOCAL_ADJUSTABLE', 'CUSTOMER_RECOMMENDATION', 'COST_WEIGHT_TRADEOFF'].includes(String(applicability))) {
+    throw new Error('applicability is invalid')
+  }
+  const rawKeywords = typeof guidance.keywords === 'string'
+    ? guidance.keywords.split(/[,，、;；\n]/u)
+    : guidance.keywords
+  if (!Array.isArray(rawKeywords) || rawKeywords.length > 30 || rawKeywords.some(item => typeof item !== 'string')) {
+    throw new Error('keywords must be a string or an array of at most 30 strings')
+  }
+  const keywords = [...new Set(rawKeywords.map(item => item.trim()).filter(Boolean))]
+  if (!keywords.length || keywords.some(item => item.length > 50)) throw new Error('keywords must contain 1 to 30 terms of at most 50 characters')
+  return {
+    name: requiredText(value.name, 'name', 200),
+    description: requiredText(value.description, 'description', 2_000),
+    guidance: {
+      priority,
+      mechanism: requiredText(guidance.mechanism, 'mechanism', 2_000),
+      diagnosticBasis: requiredText(guidance.diagnosticBasis, 'diagnosticBasis', 4_000),
+      measure: requiredText(guidance.measure, 'measure', 4_000),
+      expectedTemperatureDrop: requiredText(guidance.expectedTemperatureDrop, 'expectedTemperatureDrop', 500),
+      applicability: applicability as OptimizationSkillGuidance['applicability'],
+      constraints: requiredText(guidance.constraints, 'constraints', 4_000),
+      keywords,
+    },
+  }
+}
+
+export function parseUpdateOptimizationSkillInput(value: unknown): UpdateOptimizationSkillInput {
+  if (!isObject(value)) throw new Error('request body must be an object')
+  if (!Number.isInteger(value.expectedVersion) || Number(value.expectedVersion) < 1) throw new Error('expectedVersion must be a positive integer')
+  return {
+    ...parseOptimizationSkillInput(value),
+    expectedVersion: Number(value.expectedVersion),
+    changeSummary: requiredText(value.changeSummary, 'changeSummary', 500),
   }
 }
 

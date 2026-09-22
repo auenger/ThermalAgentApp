@@ -10,8 +10,12 @@ function verifyBundle(appOutDir) {
     'bundled Node.js': join(resources, 'node', 'node.exe'),
     'bundled Python': join(resources, 'python', 'python.exe'),
     'DSH CLI': join(unpacked, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    'DSH package': join(unpacked, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
     'DSH thermal plugin': join(unpacked, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
     'Icepak plugin': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', '__main__.py'),
+    'Icepak sample project': join(resources, 'icepak-sample', 'Project1.aedt'),
+    'window icon': join(resources, 'brand', 'app.png'),
+    'tray icon': join(resources, 'brand', 'tray.png'),
     'PDF report plugin': join(unpacked, 'plugins', 'report-reportlab', 'python', 'thermal_report_plugin', '__main__.py'),
   }
   const missing = Object.entries(required).filter(([, path]) => !existsSync(path)).map(([name]) => name)

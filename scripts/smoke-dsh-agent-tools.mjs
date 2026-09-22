@@ -43,6 +43,7 @@ try {
       { id: 'ui-directory-picker-browse', name: '@deepseek-ai/dsh-client-ui-directory-picker-browse' },
     ] },
     ...loadOverlayPatches('thermal-smoke', patch),
+    { id: 'thermal-session-control', disabled: true },
   ]
   ctx = await boot('thermal-smoke', config, patches, bootContext => {
     bootContext.provide('connection', {
@@ -61,6 +62,9 @@ try {
   for (const expected of [
     'thermal_list_tasks',
     'thermal_list_skills',
+    'thermal_recommend_optimizations',
+    'thermal_create_optimization_skill',
+    'thermal_update_optimization_skill',
     'thermal_get_task',
     'thermal_create_task',
     'thermal_probe_icepak',
@@ -69,7 +73,7 @@ try {
     'write',
   ]) assert.ok(names.includes(expected), `missing DSH tool: ${expected}`)
   assert.ok(!names.includes('thermal_start_baseline'), 'DSH must not bypass the human confirmation gate')
-  process.stdout.write(`Thermal Agent DSH preset exposes ${names.length} tools with six controlled thermal tools.\n`)
+  process.stdout.write(`Thermal Agent DSH preset exposes ${names.length} tools with nine controlled thermal tools.\n`)
 } finally {
   await handle?.dispose()
   await ctx?.fiber.dispose()

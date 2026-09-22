@@ -5,6 +5,7 @@ import type { IcepakCandidateInput, IcepakProjectOperationInput, IcepakProjectOp
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { provesIcepakSolve } from './icepak-readiness.js'
+import { TaskWorkspace } from './task-workspace.js'
 
 export interface StartedExecution {
   run: RunRecord
@@ -13,6 +14,7 @@ export interface StartedExecution {
 
 export class IcepakExecutionManager {
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>()
+  private readonly workspace: TaskWorkspace
 
   constructor(
     private readonly home: string,
@@ -20,6 +22,7 @@ export class IcepakExecutionManager {
     private readonly artifacts: ArtifactStore,
     private readonly plugin: IcepakPluginPort,
   ) {
+    this.workspace = new TaskWorkspace(home)
     this.recoverInterruptedAttempts()
   }
 
@@ -31,7 +34,14 @@ export class IcepakExecutionManager {
       throw new Error('cancel the waiting automatic remote dispatch before starting a local baseline')
     }
 
-    const inputArtifact = await this.artifacts.importFile(input.projectPath)
+    const uploadedSha = task.requirementSnapshot.intakeVersion === 2 ? task.requirementSnapshot.modelSha256 : null
+    if (uploadedSha && input.projectPath !== task.requirementSnapshot.projectPath) {
+      throw new Error('baseline must use the uploaded model bound to this task')
+    }
+    const inputArtifact = typeof uploadedSha === 'string'
+      ? this.database.getArtifact(uploadedSha)
+      : await this.artifacts.importFile(input.projectPath)
+    if (!inputArtifact) throw new Error('uploaded model artifact is missing')
     this.database.upsertArtifact(inputArtifact)
     const created = this.database.createRunWithAttempt({
       taskId,
@@ -48,7 +58,7 @@ export class IcepakExecutionManager {
       role: 'INPUT_PROJECT',
       createdAt: new Date().toISOString(),
     })
-    const attemptRoot = join(this.home, 'runs', created.attempt.id)
+    const attemptRoot = join(this.workspace.ensure(taskId), 'runs', created.attempt.id)
     const stagedProject = await this.artifacts.materialize(
       inputArtifact.sha256,
       join(attemptRoot, 'input', basename(input.projectPath)),
@@ -87,7 +97,7 @@ export class IcepakExecutionManager {
     const baselineResult = JSON.parse(await readFile(this.artifacts.resolveArtifact(resultArtifact.sha256), 'utf8')) as IcepakProjectOperationResult
     if (!baselineResult.metrics || typeof baselineResult.metrics !== 'object') throw new Error('task must have Baseline temperature metrics')
 
-    const candidateRoot = join(this.home, 'runs', `candidate-${Date.now()}`)
+    const candidateRoot = join(this.workspace.ensure(taskId), 'runs', `candidate-${Date.now()}`)
     const stagedProject = await this.artifacts.materialize(
       solved.sha256,
       join(candidateRoot, 'input', basename(baselineResult.workingProject || 'Baseline.aedt')),
@@ -110,7 +120,7 @@ export class IcepakExecutionManager {
       expectedVersion: undefined,
       projectPath: stagedProject,
       baselineMetrics: baselineResult.metrics,
-      outputDir: join(this.home, 'runs', created.attempt.id, 'plugin'),
+      outputDir: join(this.workspace.ensure(taskId), 'runs', created.attempt.id, 'plugin'),
       nonGraphical: true,
     }
     const controller = new AbortController()
@@ -133,7 +143,7 @@ export class IcepakExecutionManager {
     if (!previous?.inputArtifactSha256) throw new Error('retry requires an immutable input artifact')
     const inputArtifact = this.database.getArtifact(previous.inputArtifactSha256)
     if (!inputArtifact) throw new Error('retry requires the stored input artifact metadata')
-    const retryRoot = join(this.home, 'runs', `retry-${Date.now()}`)
+    const retryRoot = join(this.workspace.ensure(taskId), 'runs', `retry-${Date.now()}`)
     const stagedProject = await this.artifacts.materialize(
       previous.inputArtifactSha256, join(retryRoot, 'input', inputArtifact.originalName),
     )
@@ -160,7 +170,7 @@ export class IcepakExecutionManager {
       baselineAttemptId: undefined,
       projectPath: stagedProject,
       ...(baselineMetrics ? { baselineMetrics } : {}),
-      outputDir: join(this.home, 'runs', retried.attempt.id, 'plugin'),
+      outputDir: join(this.workspace.ensure(taskId), 'runs', retried.attempt.id, 'plugin'),
       nonGraphical: true,
     } as IcepakProjectOperationInput & { outputDir: string }
     const controller = new AbortController()
@@ -241,7 +251,17 @@ export class IcepakExecutionManager {
       const task = this.database.getTask(taskId)
       if (task?.executionStatus === 'RUNNING') {
         const verdict = determineThermalVerdict(result, task.requirementSnapshot)
-        this.database.requestTaskApproval(taskId, verdict, task.version, 'Baseline 求解及证据收集完成，等待人工复核')
+        const pending = this.database.requestTaskApproval(taskId, verdict, task.version, 'Baseline 求解及证据收集完成，等待人工复核')
+        const ratio = pending.requirementSnapshot.autoFanRatio
+        if (verdict === 'FAIL' && pending.requirementSnapshot.intakeVersion === 2 && pending.requirementSnapshot.planConfirmed === true &&
+          typeof ratio === 'number' && ratio > 1 && ratio <= 1.5) {
+          try {
+            await this.startCandidate(taskId, { expectedVersion: pending.version, fanSpeedRatio: ratio,
+              version: input.version, cores: input.cores, minImprovementC: 0.5 })
+          } catch (error) {
+            console.error('pre-approved fan candidate could not start; task remains pending for review', error)
+          }
+        }
       }
     } catch (error) {
       const cancelled = controller.signal.aborted

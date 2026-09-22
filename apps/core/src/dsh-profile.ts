@@ -54,6 +54,8 @@ export function prepareDshProfile(dshHome: string, pluginPath: string): string {
     '        trust: system',
     '    includeUserRoot: true',
     '- insert:',
+    '    - id: thermal-session-control',
+    `      name: ${JSON.stringify(resolve(pluginPath, '..', 'session-control.js'))}`,
     '    - id: thermal-agent-tools',
     `      name: ${JSON.stringify(resolve(pluginPath))}`,
     '',
@@ -61,4 +63,3 @@ export function prepareDshProfile(dshHome: string, pluginPath: string): string {
   chmodSync(patch, 0o600)
   return patch
 }
-

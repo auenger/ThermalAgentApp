@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import { access, copyFile, mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { Transform } from 'node:stream'
+import type { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ArtifactRecord } from '@thermal-agent/contracts'
 
@@ -37,6 +38,29 @@ export class ArtifactStore {
     })
     try {
       await pipeline(createReadStream(sourcePath), hashTap, createWriteStream(tempPath, { flags: 'wx' }))
+      return await this.commitTempFile(tempPath, hash.digest('hex'), originalName, mediaType)
+    } catch (error) {
+      await unlink(tempPath).catch(() => undefined)
+      throw error
+    }
+  }
+
+  async importStream(source: Readable, originalName: string, maxBytes: number, mediaType = 'application/octet-stream'): Promise<ArtifactRecord> {
+    await this.initialize()
+    const tempPath = join(this.root, 'tmp', randomUUID())
+    const hash = createHash('sha256')
+    let size = 0
+    const hashTap = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        size += chunk.length
+        if (size > maxBytes) { callback(new Error('model file exceeds upload limit')); return }
+        hash.update(chunk)
+        callback(null, chunk)
+      },
+    })
+    try {
+      await pipeline(source, hashTap, createWriteStream(tempPath, { flags: 'wx' }))
+      if (size === 0) throw new Error('model file is empty')
       return await this.commitTempFile(tempPath, hash.digest('hex'), originalName, mediaType)
     } catch (error) {
       await unlink(tempPath).catch(() => undefined)

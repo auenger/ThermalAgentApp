@@ -18,11 +18,16 @@ files:
   - plugins/report-reportlab/python/**
   - node_modules/**
 extraResources:
+  - from: assets/brand
+    to: brand
   - from: packaging/windows-runtime/node
     to: node
   - from: packaging/windows-runtime/python
     to: python
+  - from: assets/icepak/Project1.aedt
+    to: icepak-sample/Project1.aedt
 win:
+  icon: assets/brand/app.ico
   target:
     - target: nsis
       arch:
