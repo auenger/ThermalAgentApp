@@ -180,6 +180,8 @@ test('uploaded model, confirmed intake and pre-authorized fan action form a two-
       project: { name: 'Uploaded', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: [], setups: ['Setup1'], boundaries: [],
         nativeComponents: [{ name: 'Fan1', properties: { NativeComponentDefinitionProvider: { Type: 'Fan', FlowType: 'Curve', X: ['1'], Y: ['2'] } } }], monitors: [], objects: [] },
       validation: { verified: true, checks: [] },
+      parameterCatalog: { schemaVersion: 1, variables: [{ name: 'FinGap', scope: 'design', expression: '2mm', units: 'mm', used: true, readOnly: false }],
+        materials: [], boundaries: [], fans: [{ name: 'Fan1', flowType: 'Curve', properties: {}, actionStatus: 'DISCOVERED' }], setups: ['Setup1'], diagnostics: [] },
     } },
     async fanCheck(input) { return { status: 'ok', mode: 'fan-check', sourceProject: input.projectPath, workingProject: input.projectPath,
       inputSha256: 'unused', project: { name: 'Uploaded', aedtVersion: '2024.2', activeDesign: 'IcepakDesign1', designs: [], setups: ['Setup1'], boundaries: [], nativeComponents: [], monitors: [], objects: [] },
@@ -223,6 +225,8 @@ test('uploaded model, confirmed intake and pre-authorized fan action form a two-
   assert.equal(assessment.status, 'READY_FOR_BASELINE')
   assert.deepEqual(assessment.items.find(item => item.skillKey === 'optimization-04-fan-selection').targetNames, ['Fan1'])
   assert.equal(assessment.items.find(item => item.skillKey === 'optimization-04-fan-selection').status, 'EXECUTABLE')
+  assert.equal(assessment.parameterCatalog.variables[0].name, 'FinGap')
+  assert.equal(assessment.parameterCatalog.fans[0].actionStatus, 'VERIFIED')
   const promotedCad = await fetch(`${base}/api/tasks/${cadTask.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title: cadTask.title, description: 'CAD 几何已补成 Icepak 工程', expectedVersion: cadTask.version,
       requirementSnapshot: { intakeVersion: 2, modelSha256: model.sha256, aedtVersion: '2024.2', targetTmaxC: 90,

@@ -123,6 +123,67 @@ def _project_metadata(ipk: Any) -> dict[str, Any]:
     }
 
 
+def _parameter_catalog(ipk: Any, project: Mapping[str, Any]) -> dict[str, Any]:
+    """Discover AEDT edit targets without claiming they are safe to modify."""
+    diagnostics: list[str] = []
+    variables: list[dict[str, Any]] = []
+    try:
+        manager = getattr(ipk, "variable_manager", None)
+    except Exception as exc:
+        manager = None
+        diagnostics.append(f"variable manager unavailable: {type(exc).__name__}: {exc}")
+    if manager is None:
+        diagnostics.append("variable manager unavailable")
+    else:
+        try:
+            for name, variable in sorted(getattr(manager, "variables", {}).items()):
+                used: bool | None = None
+                try:
+                    used = bool(manager.is_used(name))
+                except Exception:
+                    diagnostics.append(f"variable usage unavailable: {name}")
+                variables.append({
+                    "name": str(name),
+                    "scope": "project" if str(name).startswith("$") else "design",
+                    "expression": str(getattr(variable, "expression", "")),
+                    "units": str(getattr(variable, "units", "") or ""),
+                    "used": used,
+                    "readOnly": bool(getattr(variable, "read_only", False)),
+                })
+        except Exception as exc:
+            diagnostics.append(f"variable inventory failed: {type(exc).__name__}: {exc}")
+
+    materials: list[dict[str, str]] = []
+    modeler = getattr(ipk, "modeler", None)
+    if modeler is not None:
+        for name in project.get("objects", []):
+            try:
+                material = getattr(modeler[name], "material_name", None)
+                if material:
+                    materials.append({"objectName": name, "materialName": str(material)})
+            except Exception as exc:
+                diagnostics.append(f"material unavailable for {name}: {type(exc).__name__}")
+
+    boundaries = [
+        {"name": item["name"], "type": item["type"], "properties": item["properties"]}
+        for item in project.get("boundaries", [])
+    ]
+    fans: list[dict[str, Any]] = []
+    for component in project.get("nativeComponents", []):
+        properties = component.get("properties", {})
+        provider = properties.get("NativeComponentDefinitionProvider", {}) if isinstance(properties, Mapping) else {}
+        if isinstance(provider, Mapping) and provider.get("Type") == "Fan":
+            fans.append({
+                "name": component["name"], "flowType": str(provider.get("FlowType", "")),
+                "properties": _json_safe(provider), "actionStatus": "DISCOVERED",
+            })
+    return {
+        "schemaVersion": 1, "variables": variables, "materials": materials,
+        "boundaries": boundaries, "fans": fans, "setups": list(project.get("setups", [])),
+        "diagnostics": diagnostics,
+    }
+
+
 def validate_fan_speed_ratio(value: Any) -> float:
     try:
         ratio = float(value)
@@ -424,6 +485,8 @@ def run_project_operation(
             "validation": validation,
             "solve": {"attempted": False},
         }
+        if mode == "inspect":
+            result["parameterCatalog"] = _parameter_catalog(ipk, project)
         if mode == "fan-check":
             result["fanAction"] = apply_fan_speed_ratio(ipk, fan_speed_ratio)
             return result

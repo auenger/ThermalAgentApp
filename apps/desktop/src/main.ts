@@ -251,8 +251,11 @@ function createTray(): void {
   const paths = resolveDesktopRuntimePaths({
     appPath: app.getAppPath(), resourcesPath: process.resourcesPath, packaged: app.isPackaged,
   })
-  const icon = nativeImage.createFromBuffer(createTrayIconPng(paths.trayIconPath))
+  const icon = process.platform === 'darwin'
+    ? nativeImage.createFromPath(paths.trayIconPath)
+    : nativeImage.createFromBuffer(createTrayIconPng(paths.trayIconPath))
   if (icon.isEmpty()) throw new Error('托盘图标无法加载')
+  if (process.platform === 'darwin') icon.setTemplateImage(true)
   tray = new Tray(icon)
   tray.setToolTip('Thermal Agent · 后台任务运行中')
   tray.setContextMenu(Menu.buildFromTemplate([

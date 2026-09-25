@@ -49,6 +49,16 @@ class _Monitor:
 class _Modeler:
     object_names = ["Chip1", "Chip2"]
 
+    def __getitem__(self, name: str) -> object:
+        return type("Object", (), {"material_name": "copper" if name == "Chip1" else "aluminum"})()
+
+
+class _VariableManager:
+    variables = {"FinGap": type("Variable", (), {"expression": "2mm", "units": "mm", "read_only": False})()}
+
+    def is_used(self, name: str) -> bool:
+        return name == "FinGap"
+
 
 class _Post:
     def __init__(self, maximum: float = 121.654) -> None:
@@ -70,6 +80,7 @@ class _FakeIcepak:
         self.native_components = {"Fan1": _Fan()}
         self.monitor = _Monitor()
         self.modeler = _Modeler()
+        self.variable_manager = _VariableManager()
         self.post = _Post(maximum)
         self.closed = False
         self.released = False
@@ -193,6 +204,13 @@ class PluginProtocolTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), b"original-project")
             self.assertNotEqual(result["sourceProject"], result["workingProject"])
             self.assertTrue(result["validation"]["verified"])
+            catalog = result["parameterCatalog"]
+            self.assertEqual(catalog["variables"][0]["name"], "FinGap")
+            self.assertEqual(catalog["variables"][0]["expression"], "2mm")
+            self.assertTrue(catalog["variables"][0]["used"])
+            self.assertEqual(catalog["materials"][0], {"objectName": "Chip1", "materialName": "copper"})
+            self.assertEqual(catalog["boundaries"][0]["properties"]["Temperature"], "30cel")
+            self.assertEqual(catalog["fans"][0]["actionStatus"], "DISCOVERED")
             self.assertIn("project_inspected", stages)
             self.assertTrue(fake.closed)
             self.assertTrue(fake.released)

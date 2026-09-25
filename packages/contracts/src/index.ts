@@ -124,6 +124,18 @@ export interface ModelCapabilityAssessment {
     reason: string
   }>
   diagnostics: string[]
+  parameterCatalog?: IcepakParameterCatalog
+}
+
+/** Read-only AEDT inventory. Discovery does not authorize an edit. */
+export interface IcepakParameterCatalog {
+  schemaVersion: 1
+  variables: Array<{ name: string; scope: 'design' | 'project'; expression: string; units: string; used: boolean | null; readOnly: boolean }>
+  materials: Array<{ objectName: string; materialName: string }>
+  boundaries: Array<{ name: string; type: string; properties: Record<string, unknown> }>
+  fans: Array<{ name: string; flowType: string; properties: Record<string, unknown>; actionStatus: 'DISCOVERED' | 'VERIFIED' }>
+  setups: string[]
+  diagnostics: string[]
 }
 
 export interface SkillRecord {
@@ -456,6 +468,7 @@ export interface IcepakProjectOperationResult {
     objects: string[]
   }
   validation: { verified: boolean; checks: string[] }
+  parameterCatalog?: IcepakParameterCatalog
   fanAction?: Record<string, unknown>
   solve?: Record<string, unknown>
   metrics?: Record<string, unknown>

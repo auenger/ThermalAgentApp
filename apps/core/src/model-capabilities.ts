@@ -56,11 +56,19 @@ export function aedtModelAssessment(
     fan.reason = `找到曲线型 Fan，但动作尚未通过写入／读回验证：${fanCheckError ?? '验证结果不完整'}`
   }
   const validSetup = inspected.validation.verified === true && inspected.project.setups.length > 0
+  const parameterCatalog = inspected.parameterCatalog ? {
+    ...inspected.parameterCatalog,
+    fans: inspected.parameterCatalog.fans.map(item => ({
+      ...item,
+      actionStatus: fan.status === 'EXECUTABLE' && checkedNames.includes(item.name) ? 'VERIFIED' as const : 'DISCOVERED' as const,
+    })),
+  } : undefined
   return {
     modelSha256, modelKind: 'AEDT', status: validSetup ? 'READY_FOR_BASELINE' : 'NEEDS_MODEL_PREPARATION',
     checkedAt: new Date().toISOString(), aedtVersion: requestedVersion,
     projectName: inspected.project.name, activeDesign: inspected.project.activeDesign, setups: inspected.project.setups,
     items, diagnostics: validSetup ? [] : ['工程检查未验证通过或缺少可用 Setup；不能启动 Baseline。'],
+    parameterCatalog,
   }
 }
 

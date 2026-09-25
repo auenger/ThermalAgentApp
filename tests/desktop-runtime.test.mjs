@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import sharp from 'sharp'
 import { resolveDesktopRuntimePaths, validatePackagedRuntime } from '../apps/desktop/dist/runtime-paths.js'
 import { createTrayIconPng } from '../apps/desktop/dist/tray-icon.js'
 const { verifyBundle } = createRequire(import.meta.url)('../scripts/verify-electron-bundle.cjs')
@@ -15,6 +16,20 @@ test('desktop tray icon uses the supplied brand image', async () => {
   assert.equal(png.readUInt32BE(16), 32)
   assert.equal(png.readUInt32BE(20), 32)
   assert.deepEqual(png, await readFile(path))
+  const { data, info } = await sharp(png).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  let transparent = 0
+  let white = 0
+  for (let i = 0; i < data.length; i += info.channels) {
+    if (data[i + 3] === 0) transparent++
+    if (data[i + 3] > 0 && data[i] === 255 && data[i + 1] === 255 && data[i + 2] === 255) white++
+  }
+  assert.ok(transparent > 0 && white > 0, 'tray mark must be white on a transparent background')
+  for (const [file, size] of [['trayTemplate.png', 16], ['trayTemplate@2x.png', 32]]) {
+    const metadata = await sharp(resolve('assets/brand', file)).metadata()
+    assert.equal(metadata.width, size)
+    assert.equal(metadata.height, size)
+    assert.equal(metadata.hasAlpha, true)
+  }
 })
 
 test('desktop development paths resolve from the workspace instead of process cwd', () => {
@@ -27,6 +42,8 @@ test('desktop development paths resolve from the workspace instead of process cw
   assert.equal(paths.nodeBin, 'C:\\node\\node.exe')
   assert.equal(paths.sampleProjectPath, join(paths.appRoot, 'assets', 'icepak', 'Project1.aedt'))
   assert.equal(paths.trayIconPath, join(paths.appRoot, 'assets', 'brand', 'tray.png'))
+  const macPaths = resolveDesktopRuntimePaths({ appPath, resourcesPath: '/unused', packaged: false, platform: 'darwin' })
+  assert.equal(macPaths.trayIconPath, join(macPaths.appRoot, 'assets', 'brand', 'trayTemplate.png'))
 })
 
 test('packaged desktop points plain Node and Python at unpacked resources', async t => {
@@ -62,7 +79,18 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   const dshPlugin = paths.dshPlugin
   const icepakMain = join(paths.icepakPluginRoot, 'thermal_icepak_plugin', '__main__.py')
   const reportMain = join(paths.reportPluginRoot, 'thermal_report_plugin', '__main__.py')
-  for (const path of [python, dshPlugin, icepakMain, reportMain, paths.sampleProjectPath, paths.windowIconPath, paths.trayIconPath]) {
+  const nativeModules = [
+    join(unpacked, 'node_modules', 'node-pty', 'prebuilds', 'win32-x64', 'conpty.node'),
+    join(unpacked, 'node_modules', '@img', 'sharp-win32-x64', 'lib', 'sharp-win32-x64-0.35.4.node'),
+    join(unpacked, 'node_modules', '@koromix', 'koffi-win32-x64', 'win32_x64', 'koffi.node'),
+    join(unpacked, 'node_modules', '@vscode', 'ripgrep-win32-x64', 'bin', 'rg.exe'),
+    join(unpacked, 'node_modules', 'node-addon-require-builtin-win32-x64-msvc', 'prebuilt', 'win32-x64-msvc-napi-v9.node'),
+  ]
+  const manifest = JSON.parse(await readFile(resolve('package.json'), 'utf8'))
+  const runtimePackages = Object.keys(manifest.dependencies)
+    .filter(name => name.startsWith('@deepseek-ai/'))
+    .map(name => join(unpacked, 'node_modules', name, 'package.json'))
+  for (const path of [python, dshPlugin, icepakMain, reportMain, paths.sampleProjectPath, paths.windowIconPath, paths.trayIconPath, ...nativeModules, ...runtimePackages]) {
     await mkdir(join(path, '..'), { recursive: true })
     await writeFile(path, '')
   }

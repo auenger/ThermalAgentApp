@@ -23,6 +23,9 @@ test('model capability gate distinguishes CAD, fixed-flow fans, and verified cur
   assert.equal(fixed.items.find(item => item.skillKey === 'optimization-04-fan-selection').status, 'UNAVAILABLE')
 
   const curveProject = inspected([fan('FanA'), fan('FanB')])
+  curveProject.parameterCatalog = { schemaVersion: 1, variables: [], materials: [], boundaries: [],
+    fans: [{ name: 'FanA', flowType: 'Curve', properties: {}, actionStatus: 'DISCOVERED' },
+      { name: 'FanB', flowType: 'Curve', properties: {}, actionStatus: 'DISCOVERED' }], setups: ['Setup1'], diagnostics: [] }
   const failed = aedtModelAssessment(sha, '2024.2', curveProject, null, 'write-back failed')
   const failedFan = failed.items.find(item => item.skillKey === 'optimization-04-fan-selection')
   assert.equal(failedFan.status, 'UNAVAILABLE')
@@ -33,6 +36,7 @@ test('model capability gate distinguishes CAD, fixed-flow fans, and verified cur
   const availableFan = available.items.find(item => item.skillKey === 'optimization-04-fan-selection')
   assert.equal(availableFan.status, 'EXECUTABLE')
   assert.deepEqual(availableFan.targetNames, ['FanA', 'FanB'])
+  assert.deepEqual(available.parameterCatalog.fans.map(item => item.actionStatus), ['VERIFIED', 'VERIFIED'])
 
   const mismatched = aedtModelAssessment(sha, '2024.2', curveProject, { ...checked, fanAction: { verified: true, fans: [{ name: 'FanA' }, { name: 'Other' }] } }, null)
   assert.equal(mismatched.items.find(item => item.skillKey === 'optimization-04-fan-selection').status, 'UNAVAILABLE')

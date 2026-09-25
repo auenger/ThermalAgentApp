@@ -5,6 +5,7 @@ dist/
 .thermal-agent/
 coverage/
 release/
+release-cross/
 packaging/windows-runtime/
 *.log
 __pycache__/
