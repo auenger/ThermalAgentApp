@@ -1,6 +1,6 @@
 // Uses an isolated Core and clearly labelled test-double solver. Run after pnpm build.
 import assert from 'node:assert/strict'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { modelApp } from '../tests/fixtures/model-preparation-app.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
@@ -19,6 +19,34 @@ try {
   await workspace.getByRole('button', { name: '导入 CAD / 重新导入' }).click()
   await workspace.getByRole('button', { name: '配置此导入版本' }).waitFor({ timeout: 15000 })
   await workspace.getByRole('button', { name: '配置此导入版本' }).click()
+  const selectedPanel = workspace.getByRole('complementary', { name: '选中对象上下文' })
+  await workspace.getByRole('button', { name: '选择实体 CPU', exact: true }).click()
+  await selectedPanel.getByText('CPU', { exact: true }).waitFor()
+  assert.equal(await workspace.getByRole('button', { name: '选择实体 CPU', exact: true }).getAttribute('aria-pressed'), 'true')
+  const selectionDownload = page.waitForEvent('download')
+  await selectedPanel.getByRole('button', { name: '导出选中对象上下文' }).click()
+  const selectedContext = JSON.parse(await readFile(await (await selectionDownload).path(), 'utf8'))
+  const imported = (await fixture.request('/model-preparations')).body.inspections[0]
+  assert.equal(selectedContext.taskId, fixture.task.id)
+  assert.equal(selectedContext.inspectionId, imported.id)
+  assert.equal(selectedContext.catalogSha256, imported.catalogSha256)
+  assert.equal(selectedContext.sourceSha256, imported.sourceSha256)
+  assert.equal(selectedContext.objectKey, imported.catalog.objects[0].key)
+  assert.equal(selectedContext.configurationState, 'EDITABLE_DRAFT')
+  assert.equal(selectedContext.evidenceKind, 'TEST_DOUBLE')
+  // A new import with identical names must not retain the old object's identity.
+  await workspace.getByRole('button', { name: '导入 CAD / 重新导入' }).click()
+  await page.waitForFunction(() => [...document.querySelectorAll('#cad-workspace button')].filter(b => b.textContent === '配置此导入版本').length === 2)
+  await workspace.getByRole('button', { name: '配置此导入版本' }).last().click()
+  await selectedPanel.getByText('尚未选择实体。', { exact: true }).waitFor()
+  assert.equal(await selectedPanel.getByRole('button', { name: '导出选中对象上下文' }).count(), 0)
+  await workspace.getByRole('button', { name: '选择实体 Sink', exact: true }).click()
+  await workspace.getByLabel('搜索实体名称').fill('CPU')
+  await selectedPanel.getByRole('button', { name: '定位配置行' }).click()
+  assert.equal(await workspace.getByLabel('搜索实体名称').inputValue(), '')
+  assert.equal(await workspace.locator('#cad-selected-object').count(), 1)
+  await selectedPanel.getByRole('button', { name: '清除选择' }).click()
+  await workspace.getByRole('button', { name: '选择实体 CPU', exact: true }).click()
   await workspace.getByLabel('CPU 角色', { exact: true }).selectOption('HEAT_SOURCE')
   await workspace.getByLabel('Sink 角色', { exact: true }).selectOption('HEATSINK')
   await workspace.getByLabel('CPU 材料', { exact: true }).selectOption('silicon')
@@ -38,7 +66,19 @@ try {
   await workspace.getByLabel('接触与间隙说明').fill('CPU 与散热器直接接触，保留全部间隙，无导热垫。')
   await workspace.getByLabel('建模依据 / 说明').fill('流程测试，校验 CAD 到 Baseline 输入的配置与产物关联。')
   await workspace.getByLabel('记录人', { exact: true }).fill('测试工程师')
+  await selectedPanel.getByText(/功率：10 W/).waitFor()
+  const updatedDownload = page.waitForEvent('download')
+  await selectedPanel.getByRole('button', { name: '导出选中对象上下文' }).click()
+  const updatedContext = JSON.parse(await readFile(await (await updatedDownload).path(), 'utf8'))
+  assert.notEqual(updatedContext.inspectionId, selectedContext.inspectionId)
+  assert.equal(updatedContext.configuration.powerW.value, 10)
+  assert.equal(updatedContext.configuration.material.value, 'silicon')
   await page.screenshot({ path: `${output}/01-configuration.png`, fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await selectedPanel.scrollIntoViewIfNeeded()
+  assert.equal(await workspace.evaluate(el => el.scrollWidth > el.clientWidth + 1), false, 'selection context must fit a narrow viewport')
+  await page.screenshot({ path: `${output}/01b-object-selection-narrow.png` })
+  await page.setViewportSize({ width: 1440, height: 1080 })
   await page.reload()
   if (!await workspace.isVisible()) await page.getByRole('button', { name: fixture.task.title, exact: true }).first().click()
   await workspace.getByLabel('CPU 功率 W', { exact: true }).waitFor()
@@ -65,7 +105,7 @@ try {
   await page.screenshot({ path: `${output}/04-baseline.png`, fullPage: true })
   assert.deepEqual(errors, [])
   console.log(JSON.stringify({ success: true, evidenceKind: 'TEST_DOUBLE', screenshots: output,
-    covered: ['import', 'object mapping', 'source confirmation', 'local draft recovery', 'prepare', 'validate', 'download', 'narrow viewport', 'activate', 'baseline without Agent', 'baseline evidence download'] }))
+    covered: ['version-bound object selection', 'context export', 'stale selection rejected', 'filtered row location', 'draft context updates', 'import', 'object mapping', 'source confirmation', 'local draft recovery', 'prepare', 'validate', 'download', 'narrow viewport', 'activate', 'baseline without Agent', 'baseline evidence download'] }))
 } catch (error) {
   await page.screenshot({ path: `${output}/failure.png`, fullPage: true })
   console.error((await workspaceText(page)).slice(-9000))

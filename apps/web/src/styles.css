@@ -199,3 +199,7 @@ button, input, textarea { font: inherit; }
 .cad-table td label { display: block; margin-top: 8px; font-size: 13px; }
 .cad-confirm { display: block; margin: 12px 0; }
 .cad-error { color: #b42318; overflow-wrap: anywhere; }
+
+.cad-object-context { border: 1px solid #d7dfe5; border-radius: 8px; padding: 14px; margin: 14px 0; overflow-wrap: anywhere; }
+.cad-object-context h4 { margin: 0 0 8px; }
+.cad-object-selected { background: rgba(0, 120, 212, .1); outline: 2px solid #0078d4; outline-offset: -2px; }

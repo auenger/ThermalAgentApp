@@ -23,12 +23,24 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [filter, setFilter] = useState('')
+  const [selection, setSelection] = useState<{ taskId: string; inspectionId: string; sourceSha256: string; catalogSha256: string; objectKey: string } | null>(null)
   const [draftVersion, setDraftVersion] = useState(0)
   const loaded = useRef(false)
   const localApp = ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname)
   const editable = task.executionStatus === 'DRAFT' && localApp
   const running = context?.jobs.some(j => ['QUEUED', 'RUNNING'].includes(j.status)) ?? false
   const inspection = context?.inspections.find(i => i.id === spec?.inspectionId)
+  const selectionCurrent = !!selection && selection.taskId === task.id && selection.inspectionId === inspection?.id &&
+    selection.sourceSha256 === inspection.sourceSha256 && selection.catalogSha256 === inspection.catalogSha256 &&
+    spec?.sourceSha256 === inspection.sourceSha256 && spec.catalogSha256 === inspection.catalogSha256
+  useEffect(() => {
+    if (selection && !selectionCurrent) {
+      setSelection(null)
+      setNotice('导入或目录身份已变化，请重新选择对象。')
+    }
+  }, [selection, selectionCurrent])
+  const selectedGeometry = selectionCurrent ? inspection?.catalog?.objects.find(o => o.key === selection!.objectKey) : undefined
+  const selectedConfiguration = selectedGeometry ? spec?.objects.find(o => o.objectKey === selectedGeometry.key) : undefined
   const issues = spec && inspection ? validateThermalModelSpec(spec, inspection) : []
   const refresh = async () => {
     const next = await api<ModelPreparationContext>(`${path}/model-preparations`)
@@ -63,6 +75,21 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
     catch (e) { setError((e as Error).message) }
     finally { setBusy('') }
   }
+  function selectObject(objectKey: string) {
+    if (!inspection?.catalogSha256 || !inspection.catalog?.objects.some(o => o.key === objectKey)) return
+    setSelection({ taskId: task.id, inspectionId: inspection.id, sourceSha256: inspection.sourceSha256, catalogSha256: inspection.catalogSha256, objectKey })
+  }
+  function exportSelection() {
+    if (!selectedGeometry || !selectedConfiguration || !selectionCurrent) return
+    const payload = { schemaVersion: 1, contextKind: 'CAD_OBJECT_DRAFT', ...selection,
+      units: inspection!.catalog!.units, geometry: selectedGeometry, configuration: selectedConfiguration,
+      configurationState: 'EDITABLE_DRAFT', persistedDraftVersion: draftVersion,
+      evidenceKind: inspection!.environment?.evidenceKind ?? 'ICEPAK_IMPORT',
+      note: '选中对象与当前可编辑配置；不是求解证据或已批准修改。使用前须重新核对任务、导入和目录身份。' }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }))
+    const link = document.createElement('a'); link.href = url; link.download = 'cad-object-context.json'; link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
   async function save() {
     const result = await api<{ draft: { version: number } }>(`${path}/model-spec`, { spec, expectedVersion: draftVersion }, 'PUT')
     setDraftVersion(result.draft.version)
@@ -90,12 +117,22 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
       {editable && i.status === 'SUCCEEDED' && <Button disabled={!!busy || running} onClick={() => { setSpec(createThermalModelSpec(i)); setNotice('已载入此导入版本，请补齐材料、功率和环境。') }}>配置此导入版本</Button>}
     </details>)}
     {spec && inspection?.catalog && <div className="cad-spec"><h3>材料、热源与监测映射</h3><p className="cad-muted">草稿尚未作为求解输入。材料和功率须逐项确认；实体中心监测用于所选位置温度。</p>
+      <aside className="cad-object-context" aria-label="选中对象上下文">
+        <h4>对象选择（实验）</h4>
+        <p className="cad-muted">从实体表中选择部件，核对配置并导出对象上下文。当前使用实体清单与静态预览。</p>
+        {selectedGeometry && selectedConfiguration ? <>
+          <p role="status">已选择：<strong>{selectedGeometry.name}</strong> · {selectedGeometry.type} · {selectedConfiguration.role}</p>
+          <p>材料：{selectedConfiguration.material.value || '待填写'} · 功率：{selectedConfiguration.powerW.value} W · 中心监测：{selectedConfiguration.monitor ? '开启' : '关闭'}</p>
+          <p className="cad-muted">导入版本：{inspection!.id} · 对象键：{selectedGeometry.key}</p>
+          <div className="cad-controls"><Button onClick={() => { setFilter(''); requestAnimationFrame(() => document.getElementById('cad-selected-object')?.scrollIntoView({ block: 'center', behavior: 'smooth' })) }}>定位配置行</Button><Button onClick={exportSelection}>导出选中对象上下文</Button><Button onClick={() => setSelection(null)}>清除选择</Button></div>
+        </> : <p role="status">{selection ? '选择已失效，请在当前导入版本重新选择。' : '尚未选择实体。'}</p>}
+      </aside>
       <Input placeholder="搜索实体名称" aria-label="搜索实体名称" value={filter} onChange={(_, d) => setFilter(d.value)} />
       <div className="cad-table-scroll"><table className="cad-table"><thead><tr><th>实体 / 尺寸</th><th>角色</th><th>材料</th><th>功率 W</th><th>中心温度监测</th></tr></thead><tbody>{spec.objects.map((o, index) => {
         const c = inspection.catalog!.objects.find(c => c.key === o.objectKey)
         if (!c || !c.name.toLowerCase().includes(filter.toLowerCase())) return null
         const update = (patch: Partial<typeof o>) => edit({ objects: spec.objects.map((item, n) => n === index ? { ...item, ...patch } : item) })
-        return <tr key={o.objectKey}><td><strong>{c.name}</strong><small>{c.type} · {c.boundingBox.map(n => Number(n.toFixed(3))).join(', ')} {spec.units}</small></td>
+        return <tr key={o.objectKey} id={selectedGeometry?.key === o.objectKey ? 'cad-selected-object' : undefined} className={selectedGeometry?.key === o.objectKey ? 'cad-object-selected' : undefined}><td><Button size="small" aria-label={`选择实体 ${c.name}`} aria-pressed={selectedGeometry?.key === o.objectKey} onClick={() => selectObject(o.objectKey)}>{c.name}</Button><small>{c.type} · {c.boundingBox.map(n => Number(n.toFixed(3))).join(', ')} {spec.units}</small></td>
           <td><Select aria-label={`${c.name} 角色`} value={o.role} disabled={!editable} onChange={(_, d) => update({ role: d.value as typeof o.role, included: d.value !== 'EXCLUDED', powerW: { ...o.powerW, value: 0, confirmed: false }, monitor: d.value !== 'EXCLUDED' && o.monitor })}><option value="SOLID">固体部件</option><option value="HEAT_SOURCE">发热器件</option><option value="HEATSINK">散热器</option><option value="EXCLUDED">排除</option></Select>{!o.included && <Input placeholder="排除原因" aria-label={`${c.name} 排除原因`} value={o.exclusionReason} onChange={(_, d) => update({ exclusionReason: d.value })} disabled={!editable} />}</td>
           <td><Select aria-label={`${c.name} 材料`} value={o.material.value} disabled={!editable || !o.included} onChange={(_, d) => update({ material: { value: d.value, source: 'USER_INPUT', reference: 'App 表单', confirmed: false } })}><option value="">请选择</option>{context!.materials.map(m => <option key={m} value={m}>{m}</option>)}</Select><small>{sourceNames[o.material.source]}{o.material.source === 'CAD_METADATA' ? `：${o.material.value}（需匹配）` : ''}</small><label><input type="checkbox" disabled={!editable || !o.included} checked={o.material.confirmed} onChange={e => update({ material: { ...o.material, confirmed: e.target.checked } })} />已核对材料</label></td>
           <td><Input type="number" aria-label={`${c.name} 功率 W`} value={String(o.powerW.value)} disabled={!editable || o.role !== 'HEAT_SOURCE'} onChange={(_, d) => update({ powerW: { value: Number(d.value), source: 'USER_INPUT', reference: 'App 表单', confirmed: false } })} /><label><input type="checkbox" disabled={!editable || o.role !== 'HEAT_SOURCE'} checked={o.powerW.confirmed} onChange={e => update({ powerW: { ...o.powerW, confirmed: e.target.checked } })} />已核对功率</label></td>
