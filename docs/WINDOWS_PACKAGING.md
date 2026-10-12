@@ -4,6 +4,12 @@
 
 Windows 测试可直接打开 [离线 HTML 操作说明](./Thermal-Agent-功能进度与操作说明.html)，按 CAD 到 Baseline 步骤操作并保存或导出测试记录。2026-10-12 的说明和计划更新不代表安装包重新构建；当前试包身份仍以下列 SHA 为准。
 
+## 2026-10-12 CAD Preview 实验试包
+
+分支 `experiment/cad-object-context` 已新增真实 STEP 3D 预览、拾取、隐藏/隔离、人工对应和配置联动。实验包使用独立应用 ID、产品名和包内名称，输出为 `release-cross/cad-preview/Thermal-Agent-0.1.0-CAD-Preview-Windows-x64.exe`（212,251,295 字节）；SHA256 为 `9ee5afe7443ab350d82f97dfda8e8101b6fdfeb57e572267fee84ea693620122`。原主线试包保留在下列位置。
+
+构建命令为 `pnpm package:win:cad-preview:cross`。包内资源与构建 SHA 已核对，Windows 安装、GPU 和真实实体映射仍待验收。测试步骤、能力上限和详细证据见 [CAD 对象交互实验](./CAD_OBJECT_INTERACTION_EXPERIMENT.md)。实验安装后的数据目录与主线分开，不自动迁移主线任务。
+
 ## 2026-10-09 CAD 功能跨平台试包（待 Windows 验收）
 
 已重新构建 `release-cross/Thermal-Agent-0.1.0-Windows-x64.exe`，209,763,686 字节，SHA256 为 `e4bdca05ecf34b1450ce6da28bfc23900ce210e51820980dd81ee5e842fa3710`。随包新增 CAD 导入、基础热模型生成和验证模块、受管生命周期与 Windows Job Object 模块、`resources/cad-samples/` 公开 STEP 样本、`resources/cad-acceptance/` 独立验收脚本及契约。`afterPack` 检查必需资源与样本 SHA；实际包内 Core/契约文件已与本次构建输出核对。

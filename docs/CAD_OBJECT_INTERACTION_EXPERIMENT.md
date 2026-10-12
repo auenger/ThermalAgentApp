@@ -70,3 +70,13 @@ pnpm package:win:cad-preview:cross
 Windows 测试先上传包内公开 STEP、进入任务详情并打开 3D 预览，验证旋转/缩放/点击、关闭和再次打开；此步骤不需要 Icepak。随后按原 CAD 流程导入并配置版本，在预览中选择部件、选择实际实体并核对对应关系，确认后检查表格高亮和导出 JSON 的身份。最后验证错误对应被阻止、重新导入后映射失效，以及原建模/验证/Baseline 流程。
 
 实机测试还需检查不同 GPU、无 WebGL 降级、实际 AEDT 对象目录、目录单位/坐标、复杂装配、峰值内存和安装后的离线资源。跨平台构建及浏览器通过仍不能替代这些证据。
+
+### 2026-10-12 实验试包身份
+
+已生成 `release-cross/cad-preview/Thermal-Agent-0.1.0-CAD-Preview-Windows-x64.exe`，212,251,295 字节。SHA256：
+
+```text
+9ee5afe7443ab350d82f97dfda8e8101b6fdfeb57e572267fee84ea693620122
+```
+
+包内名称 `thermal-agent-cad-preview` 与 Core、Web、Worker、WASM、许可等 10 个归档文件已核对，内容 SHA 与本地构建输出一致；代码提交为 `5b79690`。`release-cross/cad-preview/viewer-build-evidence.json` 与安装包旁的 `.exe.sha256` 保存本次证据。此结果证明跨平台构建和资源完整性，没有在当前 macOS 上运行 Windows 安装程序、GPU 或真实 Icepak。
