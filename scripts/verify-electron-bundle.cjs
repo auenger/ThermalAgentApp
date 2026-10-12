@@ -2,6 +2,21 @@ const { existsSync, readFileSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const { join } = require('node:path')
+const { listPackage, extractFile, uncache } = require('@electron/asar')
+
+function verifyViewerAssets(archivePath) {
+  uncache(archivePath)
+  const files = listPackage(archivePath).map(p => p.replaceAll('\\', '/'))
+  const required = [/\/apps\/web\/dist\/assets\/step\.worker-[\w-]+\.js$/,
+    /\/apps\/web\/dist\/assets\/occt-import-js-[\w-]+\.js$/,
+    /\/apps\/web\/dist\/assets\/occt-import-js-[\w-]+\.wasm$/,
+    /\/apps\/web\/dist\/assets\/license\.occt-[\w-]+\.txt$/,
+    /\/apps\/web\/dist\/assets\/license\.occt-import-js-[\w-]+\.txt$/]
+  for (const pattern of required) {
+    const name = files.find(p => pattern.test(p))
+    if (!name || !extractFile(archivePath, name.slice(1)).length) throw new Error(`Packaged CAD viewer asset missing: ${pattern}`)
+  }
+}
 
 function verifyBundle(appOutDir) {
   const resources = join(appOutDir, 'resources')
@@ -44,6 +59,7 @@ function verifyBundle(appOutDir) {
   const metadata = JSON.parse(readFileSync(required['CAD reference metadata'], 'utf8'))
   const actual = createHash('sha256').update(readFileSync(required['CAD reference STEP'])).digest('hex')
   if (metadata.sha256 !== actual || metadata.cadKernelRoundtrip?.passed !== true) throw new Error('Packaged CAD sample hash or geometry roundtrip metadata is invalid')
+  verifyViewerAssets(required['Electron application'])
 }
 
 exports.default = async function afterPack(context) {
@@ -71,3 +87,4 @@ exports.default = async function afterPack(context) {
   }
 }
 exports.verifyBundle = verifyBundle
+exports.verifyViewerAssets = verifyViewerAssets

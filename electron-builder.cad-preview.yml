@@ -1,0 +1,9 @@
+extends: ./electron-builder.yml
+appId: com.thermalagent.desktop.cadpreview
+productName: Thermal Agent CAD Preview
+extraMetadata:
+  name: thermal-agent-cad-preview
+directories:
+  output: release-cross/cad-preview
+nsis:
+  artifactName: Thermal-Agent-${version}-CAD-Preview-Windows-x64.${ext}

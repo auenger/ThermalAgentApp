@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createCoreApp } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
-export async function modelApp(existingHome) {
+export async function modelApp(existingHome, { realCad = false } = {}) {
   const home = existingHome ?? await mkdtemp(join(tmpdir(), 'thermal-model-test-'))
   const controls = { delay: 0, failedValidation: false, badPath: false, calls: [] }
   const env = { aedtVersion: '2024.2', pyaedtVersion: 'test', evidenceKind: 'TEST_DOUBLE' }
@@ -28,8 +28,8 @@ export async function modelApp(existingHome) {
       controls.calls.push({ method: 'inspect', input })
       options?.onProgress?.('cad_importing'); await wait(options)
       const catalog = { schemaVersion: 1, inspectionId: input.inspectionId, sourceSha256: input.sourceSha256, units: 'mm', boundingBox: [0, 0, 0, 30, 30, 12],
-        objects: [{ key: input.inspectionId + ':CPU', name: 'CPU', type: 'Solid', boundingBox: [5, 5, 0, 15, 15, 2], volume: 200, materialName: null },
-          { key: input.inspectionId + ':Sink', name: 'Sink', type: 'Solid', boundingBox: [0, 0, 2, 30, 30, 12], volume: 9000, materialName: 'aluminum' }], diagnostics: [] }
+        objects: [{ key: input.inspectionId + ':CPU', name: 'CPU', type: 'Solid', boundingBox: realCad ? [10, 10, 0, 20, 20, 2] : [5, 5, 0, 15, 15, 2], volume: 200, materialName: null },
+          { key: input.inspectionId + ':Sink', name: 'Sink', type: 'Solid', boundingBox: realCad ? [0, 0, 2, 30, 30, 20] : [0, 0, 2, 30, 30, 12], volume: realCad ? 6750 : 9000, materialName: 'aluminum' }], diagnostics: [] }
       const projectPath = await write(input.outputDir, 'Imported.aedt', 'imported-geometry')
       const catalogPath = await write(input.outputDir, 'objects.json', catalog)
       return { status: 'ok', operation: 'inspect_cad', inputSha256: input.sourceSha256, catalog, projectPath, environment: env,
@@ -64,7 +64,7 @@ export async function modelApp(existingHome) {
   const base = `http://127.0.0.1:${app.server.address().port}`
   let task = app.database.listTasks().find(t => t.title === 'CAD 基础案例')
   if (!task) {
-    const artifact = await app.artifacts.putBytes(Buffer.from('STEP TEST DOUBLE'), 'sample.step', 'application/octet-stream')
+    const artifact = await app.artifacts.putBytes(realCad ? await readFile(resolve('assets/cad/reference-natural-convection.step')) : Buffer.from('STEP TEST DOUBLE'), 'sample.step', 'application/octet-stream')
     app.database.upsertArtifact(artifact)
     task = app.database.createTask(createTask({ title: 'CAD 基础案例', description: 'CAD 创建自然对流基础案例', ownerNodeId: app.nodeIdentity.nodeId,
       requirementSnapshot: { intakeVersion: 2, modelKind: 'CAD', modelSha256: artifact.sha256, selectedOptimizationSkillIds: [] } }))

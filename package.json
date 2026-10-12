@@ -19,7 +19,8 @@
     "dev:desktop": "pnpm build && electron apps/desktop",
     "smoke:gui": "electron scripts/smoke-electron-gui.mjs",
     "package:win": "pnpm build && node scripts/verify-windows-runtime.mjs && electron-builder --win nsis --x64",
-    "package:win:cross": "pnpm build && electron-builder --win nsis --x64 -c.npmRebuild=false -c.directories.output=release-cross"
+    "package:win:cross": "pnpm build && electron-builder --win nsis --x64 -c.npmRebuild=false -c.directories.output=release-cross",
+    "package:win:cad-preview:cross": "pnpm build && electron-builder --config electron-builder.cad-preview.yml --win nsis --x64 -c.npmRebuild=false"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.2",

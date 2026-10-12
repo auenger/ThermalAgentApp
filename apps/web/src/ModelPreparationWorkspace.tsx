@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Badge, Button, Field, Input, Select, Spinner, Textarea } from '@fluentui/react-components'
 import { createThermalModelSpec, validateThermalModelSpec } from '@thermal-agent/contracts'
 import type { ModelPreparationContext, ModelValue, TaskRecord, ThermalModelSpec } from '@thermal-agent/contracts'
+
+import type { DisplayObjectReference } from './cad-viewer/CadStepViewer'
+const CadStepViewer = lazy(() => import('./cad-viewer/CadStepViewer').then(m => ({ default: m.CadStepViewer })))
 
 async function api<T>(path: string, value?: unknown, method = 'POST'): Promise<T> {
   const response = await fetch(path, value === undefined ? undefined : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) })
@@ -24,6 +27,7 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
   const [notice, setNotice] = useState('')
   const [filter, setFilter] = useState('')
   const [selection, setSelection] = useState<{ taskId: string; inspectionId: string; sourceSha256: string; catalogSha256: string; objectKey: string } | null>(null)
+  const [displayReference, setDisplayReference] = useState<DisplayObjectReference | null>(null)
   const [draftVersion, setDraftVersion] = useState(0)
   const loaded = useRef(false)
   const localApp = ['127.0.0.1', 'localhost', '[::1]'].includes(window.location.hostname)
@@ -35,7 +39,7 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
     spec?.sourceSha256 === inspection.sourceSha256 && spec.catalogSha256 === inspection.catalogSha256
   useEffect(() => {
     if (selection && !selectionCurrent) {
-      setSelection(null)
+      setSelection(null); setDisplayReference(null)
       setNotice('导入或目录身份已变化，请重新选择对象。')
     }
   }, [selection, selectionCurrent])
@@ -77,12 +81,13 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
   }
   function selectObject(objectKey: string) {
     if (!inspection?.catalogSha256 || !inspection.catalog?.objects.some(o => o.key === objectKey)) return
+    setDisplayReference(null)
     setSelection({ taskId: task.id, inspectionId: inspection.id, sourceSha256: inspection.sourceSha256, catalogSha256: inspection.catalogSha256, objectKey })
   }
   function exportSelection() {
     if (!selectedGeometry || !selectedConfiguration || !selectionCurrent) return
     const payload = { schemaVersion: 1, contextKind: 'CAD_OBJECT_DRAFT', ...selection,
-      units: inspection!.catalog!.units, geometry: selectedGeometry, configuration: selectedConfiguration,
+      displaySelection: displayReference, units: inspection!.catalog!.units, geometry: selectedGeometry, configuration: selectedConfiguration,
       configurationState: 'EDITABLE_DRAFT', persistedDraftVersion: draftVersion,
       evidenceKind: inspection!.environment?.evidenceKind ?? 'ICEPAK_IMPORT',
       note: '选中对象与当前可编辑配置；不是求解证据或已批准修改。使用前须重新核对任务、导入和目录身份。' }
@@ -105,6 +110,11 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
     <p>上传 CAD → 导入几何 → 配置材料与工况 → 生成工程 → 读回与网格验证 → Baseline</p>
     <p className="cad-muted">首版支持 STEP/STP、稳态自然对流。模板待 Windows 案例验收；全部步骤可通过表单完成。</p>
     {!localApp && <p className="cad-muted">当前为内网只读访问；导入、建模、恢复和取消操作请在任务所属的本机 App 执行。</p>}
+    {(() => {
+      const original = task.requirementSnapshot.sourceModel as { sha256?: string } | undefined
+      const source = inspection?.sourceSha256 ?? original?.sha256 ?? (task.requirementSnapshot.modelKind === 'CAD' ? task.requirementSnapshot.modelSha256 : undefined)
+      return typeof source === 'string' ? <Suspense fallback={<Spinner label="读取 3D 查看器" />}><CadStepViewer taskId={task.id} sourceSha256={source} inspection={inspection} selectedObjectKey={selectedGeometry?.key} onObjectSelect={(key, reference) => { selectObject(key); setDisplayReference(reference) }} onUnboundSelect={() => { setSelection(null); setDisplayReference(null) }} /></Suspense> : null
+    })()}
     {context?.template && <ul className="cad-muted">{context.template.assumptions.map(a => <li key={a}>{a}</li>)}</ul>}
     {editable && <div className="cad-controls"><Field label="AEDT 版本"><Input value={version} onChange={(_, d) => setVersion(d.value)} /></Field><label><input type="checkbox" checked={healing} onChange={e => setHealing(e.target.checked)} />使用导入修复（记录选项，请核对薄层和间隙）</label><Button disabled={!!busy || running} onClick={() => void act('导入', async () => { await api(`${path}/cad-inspections`, { requestId: crypto.randomUUID(), version, healing }); setNotice('导入已提交，可离开页面。') })}>导入 CAD / 重新导入</Button></div>}
     {!context && <Spinner label="读取建模记录" />}
@@ -124,7 +134,7 @@ export function ModelPreparationWorkspace({ task, onChanged }: { task: TaskRecor
           <p role="status">已选择：<strong>{selectedGeometry.name}</strong> · {selectedGeometry.type} · {selectedConfiguration.role}</p>
           <p>材料：{selectedConfiguration.material.value || '待填写'} · 功率：{selectedConfiguration.powerW.value} W · 中心监测：{selectedConfiguration.monitor ? '开启' : '关闭'}</p>
           <p className="cad-muted">导入版本：{inspection!.id} · 对象键：{selectedGeometry.key}</p>
-          <div className="cad-controls"><Button onClick={() => { setFilter(''); requestAnimationFrame(() => document.getElementById('cad-selected-object')?.scrollIntoView({ block: 'center', behavior: 'smooth' })) }}>定位配置行</Button><Button onClick={exportSelection}>导出选中对象上下文</Button><Button onClick={() => setSelection(null)}>清除选择</Button></div>
+          <div className="cad-controls"><Button onClick={() => { setFilter(''); requestAnimationFrame(() => document.getElementById('cad-selected-object')?.scrollIntoView({ block: 'center', behavior: 'smooth' })) }}>定位配置行</Button><Button onClick={exportSelection}>导出选中对象上下文</Button><Button onClick={() => { setSelection(null); setDisplayReference(null) }}>清除选择</Button></div>
         </> : <p role="status">{selection ? '选择已失效，请在当前导入版本重新选择。' : '尚未选择实体。'}</p>}
       </aside>
       <Input placeholder="搜索实体名称" aria-label="搜索实体名称" value={filter} onChange={(_, d) => setFilter(d.value)} />

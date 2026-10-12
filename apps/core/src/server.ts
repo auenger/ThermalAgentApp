@@ -414,6 +414,22 @@ async function route(
       'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' })
     await pipeline(createReadStream(artifacts.resolveArtifact(sha)), response); return
   }
+  const cadSource = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/cad-source\/([a-f0-9]{64})$/u)
+  if (request.method === 'GET' && cadSource) {
+    const [, taskId, sha] = cadSource
+    const task = database.getTask(taskId)
+    const original = task?.requirementSnapshot.sourceModel as { sha256?: string } | undefined
+    const current = task?.requirementSnapshot.modelKind === 'CAD' ? task.requirementSnapshot.modelSha256 : undefined
+    if (!task || (original?.sha256 !== sha && current !== sha && !modelPreparations.context(taskId).inspections.some(i => i.sourceSha256 === sha))) {
+      throw new RequestError(404, 'CAD_SOURCE_NOT_FOUND', '源 CAD 不属于当前任务')
+    }
+    const artifact = database.getArtifact(sha)
+    if (!artifact || !/\.(step|stp)$/iu.test(artifact.originalName)) throw new RequestError(404, 'CAD_SOURCE_NOT_FOUND', '只支持 STEP/STP 预览')
+    if (artifact.sizeBytes > 32 * 1024 * 1024) throw new RequestError(413, 'CAD_PREVIEW_TOO_LARGE', '首版 3D 预览支持不超过 32 MiB 的 STEP；原建模流程不受影响')
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(artifact.sizeBytes),
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' })
+    await pipeline(createReadStream(artifacts.resolveArtifact(sha)), response); return
+  }
   const modelArtifact = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/model-artifacts\/([a-f0-9]{64})$/u)
   if (request.method === 'GET' && modelArtifact) {
     const [, taskId, sha] = modelArtifact
@@ -1050,13 +1066,19 @@ async function serveWeb(response: ServerResponse, webRoot: string, pathname: str
     '.svg': 'image/svg+xml',
     '.png': 'image/png',
     '.ico': 'image/x-icon',
+    '.wasm': 'application/wasm',
+    '.txt': 'text/plain; charset=utf-8',
   }
+  const cadWorker = /^step\.worker-[\w-]+\.js$/u.test(basename(target))
   response.writeHead(200, {
     'Content-Type': contentTypes[extname(target).toLowerCase()] ?? 'application/octet-stream',
     'Content-Length': String(data.length),
     'Cache-Control': extname(target) === '.html' ? 'no-store' : 'public, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
-    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src http://127.0.0.1:*",
+    // The pinned Emscripten binding needs dynamic functions only inside this dedicated worker.
+    'Content-Security-Policy': cadWorker
+      ? "default-src 'none'; script-src 'self' 'unsafe-eval'; connect-src 'self'"
+      : "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src http://127.0.0.1:*",
   })
   response.end(data)
 }
@@ -1100,6 +1122,10 @@ class RequestError extends Error {
 }
 
 function writeError(response: ServerResponse, error: unknown): void {
+  if (response.headersSent || response.destroyed || response.writableEnded) {
+    response.destroy()
+    return
+  }
   if (error instanceof PeerDispatchError) {
     writeJson(response, 409, { error: { code: error.code, message: error.message } })
     return

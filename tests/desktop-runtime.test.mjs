@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -9,6 +9,7 @@ import sharp from 'sharp'
 import { resolveDesktopRuntimePaths, validatePackagedRuntime } from '../apps/desktop/dist/runtime-paths.js'
 import { createTrayIconPng } from '../apps/desktop/dist/tray-icon.js'
 const { verifyBundle } = createRequire(import.meta.url)('../scripts/verify-electron-bundle.cjs')
+const { createPackage } = createRequire(import.meta.url)('@electron/asar')
 
 test('desktop tray icon uses the supplied brand image', async () => {
   const path = resolve('assets/brand/tray.png')
@@ -114,7 +115,18 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   await cp(resolve('scripts/accept-cad-model.mjs'), join(acceptanceRoot, 'scripts', 'accept-cad-model.mjs'))
   await cp(resolve('packages/contracts/dist'), join(acceptanceRoot, 'packages', 'contracts', 'dist'), { recursive: true })
   await cp(resolve('packages/contracts/package.json'), join(acceptanceRoot, 'packages', 'contracts', 'package.json'))
+  const archiveInput = join(root, 'archive-input')
+  await mkdir(join(archiveInput, 'apps', 'web'), { recursive: true })
+  const archivedWeb = join(archiveInput, 'apps', 'web', 'dist')
+  await cp(resolve('apps/web/dist'), archivedWeb, { recursive: true })
+  await createPackage(archiveInput, join(resources, 'app.asar'))
   assert.doesNotThrow(() => verifyBundle(root))
+  const wasm = (await readdir(join(archivedWeb, 'assets'))).find(name => name.endsWith('.wasm'))
+  await rm(join(archivedWeb, 'assets', wasm))
+  await createPackage(archiveInput, join(resources, 'app.asar'))
+  assert.throws(() => verifyBundle(root), /CAD viewer asset missing/u)
+  await cp(resolve('apps/web/dist/assets', wasm), join(archivedWeb, 'assets', wasm))
+  await createPackage(archiveInput, join(resources, 'app.asar'))
   assert.match(execFileSync(process.execPath, [join(acceptanceRoot, 'scripts', 'accept-cad-model.mjs'), '--help'], { encoding: 'utf8' }), /CAD App acceptance/)
   await writeFile(join(sampleRoot, 'reference-natural-convection.step'), 'corrupt sample')
   assert.throws(() => verifyBundle(root), /CAD sample hash/u)
