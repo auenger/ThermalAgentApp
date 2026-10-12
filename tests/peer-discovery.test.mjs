@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { randomInt } from 'node:crypto'
 import { createSocket } from 'node:dgram'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -34,7 +33,7 @@ test('UDP discovery stores only trusted signed capabilities and rejects replay o
   const executor = NodeIdentity.loadOrCreate(join(home, 'executor'))
   const database = new LocalDatabase(join(home, 'thermal.db'))
   t.after(() => database.close())
-  const port = randomInt(47_000, 55_000)
+  const port = await unusedUdpPort()
   const discovery = new PeerDiscovery(owner, database, async () => ({ ...ready, pluginStatus: 'DETECTED', maxConcurrent: 0 }), {
     port, group: '127.0.0.1', bindAddress: '127.0.0.1', multicast: false, intervalMs: 10_000,
   })
@@ -77,6 +76,14 @@ async function waitFor(check, timeoutMs = 2_000) {
   assert.fail('expected UDP discovery state was not reached')
 }
 
+async function unusedUdpPort() {
+  const socket = createSocket('udp4')
+  await new Promise((done, reject) => { socket.once('error', reject); socket.bind(0, '127.0.0.1', done) })
+  const port = socket.address().port
+  await new Promise(done => socket.close(done))
+  return port
+}
+
 test('Core starts signed discovery with LAN publishing and stops it with LAN', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-discovery-core-'))
   const pluginClient = { async probeEnvironment() { return {
@@ -86,7 +93,7 @@ test('Core starts signed discovery with LAN publishing and stops it with LAN', a
   } } }
   const app = createCoreApp({
     home, pluginClient, startAgentRuntime: false,
-    discoveryOptions: { port: randomInt(47_000, 55_000), group: '127.0.0.1', bindAddress: '127.0.0.1', multicast: false },
+    discoveryOptions: { port: await unusedUdpPort(), group: '127.0.0.1', bindAddress: '127.0.0.1', multicast: false },
   })
   app.server.listen(0, '127.0.0.1')
   await new Promise(resolve => app.server.once('listening', resolve))

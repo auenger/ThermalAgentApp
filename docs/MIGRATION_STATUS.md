@@ -1,10 +1,20 @@
 # 迁移状态
 
-更新日期：2026-09-21
+更新日期：2026-10-12
 
 本文件记录从 `suzhousanre` 向 Thermal Agent App 的实际迁移进度。只有已经存在代码和验证证据的项目才能标记完成。
 
 2026-09-21 的交接总结、测试结果和人工回归步骤见 [阶段总结与本地手动回归](./MIGRATION_HANDOFF_2026-09-21.md)。
+
+## 2026-10-12 本轮状态
+
+- 已接入 CAD → 基础热模型 → 验证 → Baseline，以及 Baseline 参数修改与版本追溯；软件流程已通过本地替身测试，真实热结果仍待 Windows 验收。
+- 已实现共享 Icepak 执行锁、受管进程取消和恢复保护；Windows Job Object 原生行为仍待实机检查。
+- 2026-10-09 已生成包含上述功能的 Windows 跨平台试包，包内资源与 SHA 已检查；安装包不随 Git 推送。
+- 已提供 [离线 HTML 操作说明](./Thermal-Agent-功能进度与操作说明.html)、截图手册、公开 STEP 与 App API 验收脚本。
+- 后续按 P0 Windows Baseline 验收 → P1 3D 对象选择 → P2 几何预检查 → P3 参数化散热器 → P4 Agent 辅助推进。P1–P4 为计划项，详见 [CAD 建模计划](./CAD_MODEL_PREPARATION_PLAN.md)。
+
+实现和剩余验收门槛见 [CAD 实现与验收记录](./CAD_MODEL_PREPARATION_IMPLEMENTATION.md)；参数操作见 [参数修改与追溯](./PARAMETER_EDITING.md)。
 
 ## 阶段 0：契约和架构边界
 
@@ -38,7 +48,7 @@
 - [x] 输入、求解工程、结果 JSON 和收敛证据与 Attempt 关联。
 - [x] 校验/收敛/目标温度的确定性热判定和人工结果审批 Gate。
 - [x] ReportLab PDF 插件、已审批任务的报告生成/下载、Artifact 关联与中英文字体/渲染验收（待 Windows 离线打包和真实工程报告复核）。
-- [ ] Windows 安装包和真实 AEDT 验收（已有 electron-builder NSIS 配置、内置 Node 的 DSH 冒烟、隔离 Python 依赖来源与 x64 预检、`afterPack` 二次检查及 Desktop 缺件拒启；运行时插件也不继承用户 `PYTHONPATH`。2026-09-21 在 macOS 实际运行 `pnpm package:win`，TS/Web 构建通过，但预检按设计拒绝非 Windows x64 构建机；尚无 Windows 构建/安装证据）。
+- [ ] Windows 安装包和真实 AEDT 验收（已有 electron-builder NSIS 配置、内置 Node 的 DSH 冒烟、隔离 Python 依赖来源与 x64 预检、`afterPack` 二次检查及 Desktop 缺件拒启；运行时插件也不继承用户 `PYTHONPATH`。2026-09-21 在 macOS 实际运行 `pnpm package:win`，TS/Web 构建通过，但预检按设计拒绝非 Windows x64 构建机；2026-10-09 已有 macOS 跨平台 NSIS 试包与资源检查证据，Windows 原生构建、安装后的 CAD 流程与真实求解仍待验收）。
 
 ## 阶段 2：DSH Agent
 

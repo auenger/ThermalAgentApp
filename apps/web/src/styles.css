@@ -123,3 +123,79 @@ button, input, textarea { font: inherit; }
   button { transition: transform 120ms ease, opacity 120ms ease; }
   button:active { transform: translateY(1px); }
 }
+
+.parameter-workspace { scroll-margin-top: 80px; }
+.parameter-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.parameter-heading h2, .parameter-heading h3 { margin: 0; }
+.parameter-heading h3 { font-size: 14px; }
+.parameter-heading p, .parameter-version-meta, .parameter-actions > span { font-size: 12px; color: var(--colorNeutralForeground2); }
+.parameter-baseline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding: 14px 16px; margin: 16px 0; background: var(--colorNeutralBackground3); border-radius: 6px; font-size: 12px; }
+.parameter-baseline code, .parameter-identities dd { overflow-wrap: anywhere; white-space: normal; }
+.parameter-baseline details { width: 100%; }
+.parameter-baseline summary, .parameter-identities summary { cursor: pointer; padding: 6px 0; }
+.parameter-editor { border: 1px solid var(--colorNeutralStroke2); padding: 18px; border-radius: 6px; }
+.parameter-picker { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto; align-items: end; gap: 12px; margin-top: 16px; }
+.parameter-picker > *, .parameter-edit-row > * { min-width: 0; }
+.parameter-workspace .fui-Select { max-width: 100%; }
+.parameter-workspace .fui-Select select { text-overflow: ellipsis; }
+.parameter-edit-row { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(120px, 1.2fr) minmax(110px, .8fr) 36px; align-items: start; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--colorNeutralStroke2); }
+.parameter-row-name { display: grid; gap: 5px; padding-top: 4px; overflow-wrap: anywhere; font-size: 13px; }
+.parameter-row-name span, .parameter-row-name small { color: var(--colorNeutralForeground2); font-size: 12px; }
+.parameter-role { display: block; padding-top: 7px; font-size: 13px; }
+.parameter-empty { color: var(--colorNeutralForeground2); padding: 12px 0; font-size: 13px; }
+.parameter-purpose { background: var(--colorNeutralBackground3); padding: 12px; margin: 16px 0; font-size: 13px; line-height: 1.6; border-left: 3px solid var(--colorBrandStroke1); }
+.parameter-purpose p { font-size: 12px; color: var(--colorNeutralForeground2); }
+.parameter-reason { display: grid; grid-template-columns: minmax(100px, .6fr) minmax(160px, 1.4fr); gap: 16px; }
+.parameter-actions { display: flex; gap: 8px 12px; flex-wrap: wrap; align-items: center; margin-top: 16px; }
+.parameter-history { margin-top: 28px; }
+.parameter-version { padding: 18px 0; border-bottom: 1px solid var(--colorNeutralStroke2); }
+.parameter-version:last-child { border-bottom: 0; }
+.parameter-version-toggle { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; text-align: left; background: none; border: 0; color: inherit; padding: 8px 0; width: 100%; cursor: pointer; font: inherit; font-size: 13px; }
+.parameter-version-toggle > span:last-child { margin-left: auto; color: var(--colorBrandForeground1); }
+.parameter-version > p { font-size: 13px; overflow-wrap: anywhere; }
+.parameter-outcome { padding: 10px 12px; background: var(--colorNeutralBackground3); }
+.parameter-diff { margin: 16px 0; font-size: 13px; }
+.parameter-diff > div { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding: 12px 8px; border-bottom: 1px solid var(--colorNeutralStroke2); }
+.parameter-diff > div > span { overflow-wrap: anywhere; min-width: 0; }
+.parameter-diff small { display: block; color: var(--colorNeutralForeground2); margin-top: 4px; }
+.parameter-diff-head { background: var(--colorNeutralBackground3); font-size: 12px; font-weight: 600; }
+.parameter-identities { font-size: 12px; margin: 12px 0; }
+.parameter-identities dl { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 8px; }
+.parameter-identities dd { margin: 0; font-family: monospace; }
+.parameter-error { color: var(--colorPaletteRedForeground1); padding: 10px 12px; background: var(--colorPaletteRedBackground1); border-radius: 4px; }
+.parameter-message { padding: 10px 12px; background: var(--colorNeutralBackground3); border-radius: 4px; }
+.parameter-workspace button:focus-visible, .parameter-workspace summary:focus-visible, .parameter-editor:focus-visible { outline: 2px solid var(--colorBrandStroke1); outline-offset: 3px; }
+.task-detail-jumps { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; font-size: 13px; }
+.task-detail-jumps a { color: var(--colorBrandForeground1); text-underline-offset: 3px; }
+@media (max-width: 760px) {
+  .parameter-picker { grid-template-columns: 1fr; }
+  .parameter-picker button { justify-self: start; }
+  .parameter-edit-row { grid-template-columns: minmax(0, 1fr) 36px; }
+  .parameter-row-name { grid-column: 1; }
+  .parameter-edit-row > .fui-Field { grid-column: 1; }
+  .parameter-edit-row > button { grid-column: 2; grid-row: 1; }
+  .parameter-reason { grid-template-columns: 1fr; }
+  .parameter-identities dl { grid-template-columns: 1fr; }
+  .parameter-editor { padding: 12px; }
+  .parameter-actions button { min-height: 44px; }
+  .parameter-diff > div { gap: 8px; font-size: 12px; }
+}
+
+.parameter-workspace .fui-Field { min-width: 0; }
+.parameter-workspace .fui-Select { min-width: 0; width: 100%; box-sizing: border-box; }
+.parameter-workspace .fui-Select select { min-width: 0; width: 100%; max-width: 100%; }
+.parameter-reason { align-items: start; }
+.cad-workspace details { padding: 12px; margin: 12px 0; border: 1px solid #d7dfe5; border-radius: 6px; }
+.cad-workspace summary { cursor: pointer; font-weight: 600; }
+.cad-workspace a { display: inline-block; margin: 8px 16px 8px 0; }
+.cad-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 16px 0; }
+.cad-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 16px 0; }
+.cad-muted { color: #596b77; font-size: 13px; overflow-wrap: anywhere; }
+.cad-preview { display: block; max-width: 100%; max-height: 360px; object-fit: contain; }
+.cad-table-scroll { overflow-x: auto; margin: 14px 0; }
+.cad-table { width: 100%; border-collapse: collapse; min-width: 900px; }
+.cad-table th, .cad-table td { text-align: left; padding: 12px; border-bottom: 1px solid #d7dfe5; vertical-align: top; }
+.cad-table td small { display: block; max-width: 220px; overflow-wrap: anywhere; margin: 6px 0; }
+.cad-table td label { display: block; margin-top: 8px; font-size: 13px; }
+.cad-confirm { display: block; margin: 12px 0; }
+.cad-error { color: #b42318; overflow-wrap: anywhere; }

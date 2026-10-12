@@ -25,3 +25,8 @@ export { PeerRemoteInputProcessor } from './peer-remote-input-processor.js'
 export { PeerRemoteSolveProcessor } from './peer-remote-solve-processor.js'
 export { PeerAutoDispatcher } from './peer-auto-dispatcher.js'
 export { effectiveIcepakProbe, provesIcepakSolve, ICEPAK_READINESS_TTL_MS } from './icepak-readiness.js'
+
+export { ParameterPlanManager } from './parameter-plans.js'
+
+export { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
+export { lockIcepakOperations, IcepakOperationBusyError } from './icepak-operation-lock.js'

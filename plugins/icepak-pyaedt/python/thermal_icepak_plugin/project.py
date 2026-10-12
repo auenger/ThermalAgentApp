@@ -20,8 +20,10 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from .parameters import discover_parameters, apply_changes, verify_changes
 from .convergence import collect_convergence_evidence
 from .metrics import collect_temperature_metrics, compare_temperature_metrics
+from .managed import track_session
 
 
 IcepakFactory = Callable[..., Any]
@@ -177,8 +179,13 @@ def _parameter_catalog(ipk: Any, project: Mapping[str, Any]) -> dict[str, Any]:
                 "name": component["name"], "flowType": str(provider.get("FlowType", "")),
                 "properties": _json_safe(provider), "actionStatus": "DISCOVERED",
             })
+    try:
+        editable = discover_parameters(ipk)
+    except Exception as exc:
+        editable = []
+        diagnostics.append(f"editable parameter inventory unavailable: {type(exc).__name__}: {exc}")
     return {
-        "schemaVersion": 1, "variables": variables, "materials": materials,
+        "schemaVersion": 1, "editableParameters": editable, "variables": variables, "materials": materials,
         "boundaries": boundaries, "fans": fans, "setups": list(project.get("setups", [])),
         "diagnostics": diagnostics,
     }
@@ -207,11 +214,13 @@ def _scale_values(values: list[Any], factor: float) -> list[str]:
     return [format(float(value) * factor, ".12g") for value in values]
 
 
-def apply_fan_speed_ratio(ipk: Any, value: Any) -> dict[str, Any]:
+def apply_fan_speed_ratio(ipk: Any, value: Any, targets: list[str] | None = None) -> dict[str, Any]:
     """Scale every native curve fan using the fan similarity laws and verify read-back."""
     ratio = validate_fan_speed_ratio(value)
     fans: list[dict[str, Any]] = []
     for name, component in getattr(ipk, "native_components", {}).items():
+        if targets is not None and name not in targets:
+            continue
         provider = _fan_provider(component)
         if provider.get("Type") != "Fan" or provider.get("FlowType") != "Curve":
             continue
@@ -423,6 +432,7 @@ def run_project_operation(
     cores: int | None = None,
     fan_speed_ratio: float = 1.1,
     flow_convergence_criterion: float | None = None,
+    changes: list[dict] | None = None,
     baseline_metrics: Mapping[str, Any] | None = None,
     min_improvement_c: float = 0.5,
     non_graphical: bool = True,
@@ -431,7 +441,7 @@ def run_project_operation(
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Inspect, solve, or validate a fan action on an isolated project copy."""
-    if mode not in {"inspect", "fan-check", "solve", "fan-solve"}:
+    if mode not in {"inspect", "fan-check", "solve", "fan-solve", "check-changes"}:
         raise ValueError(f"unsupported project operation: {mode}")
     if mode in {"fan-check", "fan-solve"}:
         fan_speed_ratio = validate_fan_speed_ratio(fan_speed_ratio)
@@ -471,6 +481,7 @@ def run_project_operation(
             else:
                 _report(progress, "aedt_starting")
                 ipk = icepak_factory(**factory_args)
+        track_session(ipk)
         _report(progress, "aedt_started")
         project = _project_metadata(ipk)
         _report(progress, "project_inspected")
@@ -485,8 +496,24 @@ def run_project_operation(
             "validation": validation,
             "solve": {"attempted": False},
         }
-        if mode == "inspect":
-            result["parameterCatalog"] = _parameter_catalog(ipk, project)
+        result["parameterCatalog"] = _parameter_catalog(ipk, project)
+        if mode == "check-changes":
+            _report(progress, "parameters_applying")
+            actions = apply_changes(ipk, changes or [])
+            verified_path = run_dir / "verified" / source.name
+            verified_path.parent.mkdir()
+            if ipk.save_project(file_name=str(verified_path), overwrite=False) is False or not verified_path.is_file():
+                raise RuntimeError("parameter project save failed")
+            ipk.close_project(save=False)
+            _report(progress, "parameters_reopening")
+            # Open the persisted file, never verify the objects that were just mutated.
+            if ipk.load_project(str(verified_path), design=project["activeDesign"]) is False:
+                raise RuntimeError("parameter project reopen failed")
+            verify_changes(ipk, changes or [], actions)
+            result.update(actionResults=actions, verifiedProjectPath=str(verified_path))
+            result["validation"]["checks"].append("persistedParameters")
+            _report(progress, "parameters_verified")
+            return result
         if mode == "fan-check":
             result["fanAction"] = apply_fan_speed_ratio(ipk, fan_speed_ratio)
             return result
@@ -537,7 +564,7 @@ def run_project_operation(
                 "reversedFlowDetected": bool((convergence.get("reversedFlow") or {}).get("detected")),
             }
         )
-        if mode == "fan-solve":
+        if baseline_metrics is not None:
             result["comparison"] = compare_temperature_metrics(
                 baseline_metrics or {},
                 result["metrics"],

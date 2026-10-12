@@ -1,3 +1,5 @@
+import { ParameterWorkspace } from './ParameterWorkspace'
+import { ModelPreparationWorkspace } from './ModelPreparationWorkspace'
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
 import {
   Badge,
@@ -371,10 +373,10 @@ export function App() {
             {page === 'agent' && <AgentWorkspace styles={styles} status={dshStatus} action={agentAction} onActionDone={finishAgentAction} onStatusChanged={refreshDsh} />}
             {page === 'tasks' && <TaskList styles={styles} tasks={tasks} loading={loading} onOpenTask={openTask} onCreateTask={() => openCreateTask()} />}
             {page === 'task-create' && <CreateTaskPanel key={createDraftId ?? 'new'} styles={styles} tasks={tasks} initialDraftId={createDraftId} onCreated={async taskId => { await refresh(); openTask(taskId) }} onCancel={() => setPage('tasks')} />}
-            {page === 'task-detail' && selectedTaskId && <TaskDetail key={selectedTaskId} styles={styles} taskId={selectedTaskId} task={tasks.find(item => item.id === selectedTaskId) ?? null} autoDispatch={autoDispatches.find(item => item.taskId === selectedTaskId)} onBack={() => setPage('tasks')} onEdit={() => openCreateTask(selectedTaskId)} onChanged={refresh} />}
+            {page === 'task-detail' && selectedTaskId && <TaskDetail key={selectedTaskId} styles={styles} taskId={selectedTaskId} task={tasks.find(item => item.id === selectedTaskId) ?? null} autoDispatch={autoDispatches.find(item => item.taskId === selectedTaskId)} onBack={() => setPage('tasks')} onEdit={() => openCreateTask(selectedTaskId)} onChanged={refresh} onOpenTask={openTask} />}
             {page === 'skills' && <SkillLibrary styles={styles} skills={skills} onChanged={refresh} />}
             {page === 'nodes' && <NodeWorkspace styles={styles} />}
-            {page === 'settings' && <><div className={styles.intro}><div><h1 className={styles.title}>设置</h1><p className={styles.subtitle}>模型与 Agent 预设由 DSH 管理；网络发布与 Icepak 验证保留在 App 中。</p></div></div><div className={styles.panel} style={{ marginBottom: 14 }}><h2 className={styles.panelTitle}>界面与状态</h2><div className={styles.headerActions}><Badge appearance="outline" color={probe?.status === 'READY' ? 'success' : 'informative'}>{probe ? `Icepak ${probe.status}` : '正在探测'}</Badge><Button icon={<ArrowClockwise20Regular />} onClick={() => void refresh()}>刷新状态</Button><Button icon={dark ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />} onClick={() => setDark(value => !value)}>{dark ? '浅色外观' : '深色外观'}</Button></div></div><div className={styles.panel} style={{ marginBottom: 14 }}><h2 className={styles.panelTitle}>App 工作空间</h2><p className={styles.details}>DSH Agent 与 App 使用同一个工作空间；每个任务位于其 tasks 子目录。工作空间由 App 管理，不能在 DSH 中单独修改。</p><code>{dshStatus.workspacePath ?? '正在准备本地工作空间'}</code></div><div className={styles.panel} style={{ marginBottom: 14 }}><h2 className={styles.panelTitle}><Bot20Regular />DSH 原生设置</h2><p className={styles.details}>模型、API 密钥、Agent 预设与插件直接写入当前本机 DSH Profile。</p><Button disabled={isLanClient || dshStatus.phase !== 'ready' || !window.thermalDesktop} onClick={() => { setPage('agent'); setAgentAction({ kind: 'settings', key: Date.now() }) }}>打开 DSH 设置</Button></div><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} onProbeUpdated={setProbe} check={icepakCheck} onCheckUpdated={setIcepakCheck} autoRun={!icepakAutoCheckStarted} onAutoRunStarted={() => setIcepakAutoCheckStarted(true)} /></>}
+            {page === 'settings' && <><div className={styles.intro}><div><h1 className={styles.title}>设置</h1><p className={styles.subtitle}>模型与 Agent 预设由 DSH 管理；网络发布与 Icepak 验证保留在 App 中。</p></div></div><div className={styles.panel} style={{ marginBottom: 14 }}><h2 className={styles.panelTitle}>界面与状态</h2><div className={styles.headerActions}><Badge appearance="outline" color={probe?.status === 'READY' ? 'success' : 'informative'}>{probe ? `Icepak ${probe.status}` : '正在探测'}</Badge><Button icon={<ArrowClockwise20Regular />} onClick={() => void refresh()}>刷新状态</Button><Button icon={dark ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />} onClick={() => setDark(value => !value)}>{dark ? '浅色外观' : '深色外观'}</Button></div></div><div className={styles.panel} style={{ marginBottom: 14 }}><h2 className={styles.panelTitle}>App 工作空间</h2><p className={styles.details}>DSH Agent 与 App 使用同一个工作空间；每个任务位于其 tasks 子目录。工作空间由 App 管理，不能在 DSH 中单独修改。</p><code>{dshStatus.workspacePath ?? '正在准备本地工作空间'}</code>{!isLanClient && <p className={styles.details}>本机服务地址：<code>{window.location.origin}</code>（用于本机验收脚本）</p>}</div><div className={styles.panel} style={{ marginBottom: 14 }}><h2 className={styles.panelTitle}><Bot20Regular />DSH 原生设置</h2><p className={styles.details}>模型、API 密钥、Agent 预设与插件直接写入当前本机 DSH Profile。</p><Button disabled={isLanClient || dshStatus.phase !== 'ready' || !window.thermalDesktop} onClick={() => { setPage('agent'); setAgentAction({ kind: 'settings', key: Date.now() }) }}>打开 DSH 设置</Button></div><LanSettings styles={styles} /><IcepakSettings styles={styles} probe={probe} onProbeUpdated={setProbe} check={icepakCheck} onCheckUpdated={setIcepakCheck} autoRun={!icepakAutoCheckStarted} onAutoRunStarted={() => setIcepakAutoCheckStarted(true)} /></>}
           </div>
         </main>
       </div>
@@ -512,9 +514,9 @@ interface TaskDetailResponse {
   events: TaskEvent[]
 }
 
-function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChanged }: {
+function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChanged, onOpenTask }: {
   styles: ReturnType<typeof useStyles>; taskId: string; task: TaskRecord | null; autoDispatch?: AutoDispatchRecord
-  onBack(): void; onEdit(): void; onChanged(): Promise<void>
+  onBack(): void; onEdit(): void; onChanged(): Promise<void>; onOpenTask(id: string): void
 }) {
   const [detail, setDetail] = useState<TaskDetailResponse | null>(null)
   const [error, setError] = useState('')
@@ -523,12 +525,20 @@ function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChan
   const [savingNote, setSavingNote] = useState(false)
   useEffect(() => {
     let active = true
+    let pending = false
+    const load = () => {
+    if (pending) return
+    pending = true
     void fetch(`/api/tasks/${taskId}`).then(async response => {
       const body = await response.json() as TaskDetailResponse & { error?: { message?: string } }
       if (!response.ok || !body.task) throw new Error(body.error?.message ?? '任务详情读取失败')
       if (active) { setDetail(body); setError('') }
     }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : '任务详情读取失败') })
-    return () => { active = false }
+    .finally(() => { pending = false })
+    }
+    load()
+    const timer = setInterval(load, 4000)
+    return () => { active = false; clearInterval(timer) }
   }, [taskId, task?.version])
   async function addNote(event: FormEvent) {
     event.preventDefault(); setSavingNote(true); setError('')
@@ -545,6 +555,9 @@ function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChan
   const current = detail?.task ?? task
   if (!current) return <div className={styles.panel}>{error || '正在读取任务详情'}</div>
   const snapshot = current.requirementSnapshot
+  const cadTask = snapshot.modelKind === 'CAD' || Boolean(snapshot.sourceModel)
+  const showParameters = !cadTask || Boolean(detail?.runs.some(run => run.kind === 'BASELINE' && run.status === 'COMPLETED'))
+  const temperatureLabel = snapshot.baselineMonitoringScope === 'SELECTED_OBJECT_CENTROIDS' ? '所选实体中心监测温度最高值' : '最高温度'
   const attachments = Array.isArray(snapshot.conversationAttachments) ? snapshot.conversationAttachments.filter((item): item is { originalName: string; sizeBytes: number; taskPath: string } =>
     !!item && typeof item === 'object' && typeof item.originalName === 'string' && typeof item.taskPath === 'string' && typeof item.sizeBytes === 'number') : []
   const suggestions = Array.isArray(snapshot.optimizationSuggestions) ? snapshot.optimizationSuggestions as OptimizationRecommendation[] : []
@@ -557,17 +570,21 @@ function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChan
     <div className={styles.intro}><div><h1 className={styles.title}>{current.title}</h1><p className={styles.subtitle}>{current.description || '尚未填写详细散热需求'}</p></div><div className={styles.headerActions}><Badge appearance="outline">{current.executionStatus}</Badge>{current.executionStatus === 'DRAFT' && <Button appearance="primary" icon={<Edit20Regular />} onClick={onEdit}>继续完善需求</Button>}</div></div>
     <div className="task-detail-layout">
       <div className="task-detail-main">
+        <nav className="task-detail-jumps" aria-label="任务详情导航">{cadTask && <a href="#cad-workspace">CAD 转换与建模</a>}{showParameters && <a href="#parameter-workspace">参数修改与追溯</a>}<a href="#task-results">求解结果</a><a href="#task-timeline">推进记录</a></nav>
+        {showParameters && <ParameterWorkspace task={current} onChanged={onChanged} onOpenTask={onOpenTask} />}
+        {(snapshot.modelKind === 'CAD' || Boolean(snapshot.sourceModel)) && <ModelPreparationWorkspace task={current} onChanged={onChanged} />}
         <section className="task-detail-section"><h2>需求输入</h2><div className="task-detail-fields">
           <div><span>客户</span><strong>{textValue('customer')}</strong></div><div><span>项目</span><strong>{textValue('projectName')}</strong></div>
           <div><span>产品型号</span><strong>{textValue('productModel')}</strong></div><div><span>工况</span><strong>{textValue('workCondition')}</strong></div>
-          <div><span>最高温度目标</span><strong>{typeof snapshot.targetTmaxC === 'number' ? `${snapshot.targetTmaxC} °C` : '待填写'}</strong></div><div><span>模型文件</span><strong>{textValue('modelOriginalName')}</strong></div>
+          <div><span>{temperatureLabel}目标</span><strong>{typeof snapshot.targetTmaxC === 'number' ? `${snapshot.targetTmaxC} °C` : '待填写'}</strong></div><div><span>模型文件</span><strong>{textValue('modelOriginalName')}</strong></div>
           <div><span>关键监测点</span><strong>{textValue('criticalPoints')}</strong></div><div><span>可调整范围</span><strong>{textValue('adjustmentBounds')}</strong></div>
         </div><p className={styles.details}>任务工作目录：{textValue('taskWorkspacePath')}</p>{attachments.length > 0 && <div className="task-detail-list">{attachments.map((item, index) => <div key={`${item.taskPath}:${index}`}><strong>{item.originalName}</strong><span>{(item.sizeBytes / 1024 / 1024).toFixed(2)} MB</span><small>已从 Agent 会话归档到本任务：{item.taskPath}</small></div>)}</div>}</section>
         <section className="task-detail-section"><h2>模型能力</h2>{assessment ? <><p className={styles.details}>{assessment.modelKind === 'CAD' ? 'CAD 已归档，需建立 Icepak 工程后再判断可执行动作。' : assessment.status === 'READY_FOR_BASELINE' ? `工程 ${assessment.projectName ?? ''} 已通过 Baseline 前检查。` : assessment.diagnostics.join('；')}</p><div className="task-detail-list">{assessment.items.map(item => <div key={item.skillKey}><strong>{capabilityNames[item.skillKey] ?? item.skillKey}</strong><span>{capabilityStatuses[item.status]}</span><small>目标：{item.targetNames.join('、') || '未识别'}。{item.reason}</small></div>)}</div><ParameterCatalogView styles={styles} assessment={assessment} /></> : <p className={styles.details}>尚未完成模型能力检查。</p>}</section>
         <section className="task-detail-section"><h2>AI / 规则初筛建议</h2><p className={styles.details}>根据需求关键词给出排查方向，尚未用 Baseline 结果验证物理诊断。</p>{suggestions.length ? <div className="task-detail-list">{suggestions.map(item => <div key={item.skillId}><strong>{item.name}</strong><span>待仿真验证</span><small>命中依据：{item.matchedSignals.join('、') || '默认排查'}。{item.guidance.diagnosticBasis}</small></div>)}</div> : <p className={styles.details}>当前任务没有保存候选建议。旧任务可能只保存了简要匹配记录。</p>}</section>
         <section className="task-detail-section"><h2>人工确认与补充</h2><p>{snapshot.planConfirmed === true ? '方案已人工确认' : '方案尚待人工确认'}</p><div className="task-detail-list">{selectedNames.length ? selectedNames.map((name, index) => <div key={`${selectedIds[index]}:${index}`}><strong>{name}</strong><small>{snapshot.autoFanRatio && selectedIds[index] === snapshot.fanSkillId ? '已授权 Baseline 失败后尝试一次风扇 +10%' : '确认纳入本任务的方案范围；不代表已具备自动修改能力'}</small></div>) : <p className={styles.details}>尚未选定优化方案；仍可先执行 Baseline 以获得诊断证据。</p>}</div><div className="task-expert-note"><span>人工补充建议 / 约束</span><p>{textValue('expertSupplement')}</p></div></section>
-        <section className="task-detail-section"><h2>Icepak 模拟与结果</h2>{detail?.runs.length ? <div className="task-detail-list">{detail.runs.map(run => <div key={run.id}><strong>{run.kind} #{run.sequence}</strong><span>{run.status}</span>{run.attempts.map(attempt => <small key={attempt.id}>尝试 {attempt.id.slice(0, 8)}：{attempt.status}{attempt.resultSummary?.tmaxC != null ? `，最高温度 ${attempt.resultSummary.tmaxC} °C` : ''}{attempt.resultSummary?.converged != null ? `，${attempt.resultSummary.converged ? '已收敛' : '未收敛'}` : ''}，执行节点 {attempt.executorNodeId.slice(0, 8)}，证据 {attempt.artifacts.map(artifact => artifact.role).join('、') || '待生成'}{attempt.errorMessage ? `；${attempt.errorMessage}` : ''}</small>)}</div>)}</div> : <p className={styles.details}>尚无求解记录。任务确认后可启动 Baseline；求解完成后结果会回写到本任务。</p>}</section>
-        <section className="task-detail-section"><h2>任务推进记录</h2>{detail?.events.length ? <div className="task-detail-timeline">{detail.events.map(event => <div key={event.id}><time>{new Date(event.createdAt).toLocaleString('zh-CN')}</time><strong>{event.eventType === 'task.note_added' ? `人工补充：${String(event.payload.author ?? '')}` : event.eventType}</strong><span>{event.eventType === 'task.note_added' ? String(event.payload.content ?? '') : event.reason || [event.fromStatus, event.toStatus].filter(Boolean).join(' → ')}</span></div>)}</div> : <p className={styles.details}>暂无推进记录。</p>}<form className="task-detail-note-form" onSubmit={addNote}><Field label="记录人" required><Input value={noteAuthor} maxLength={100} onChange={(_, data) => setNoteAuthor(data.value)} /></Field><Field label="补充建议或下一步判断" hint="追加到任务时间线，不会自动改模或启动求解。" required><Textarea value={noteContent} maxLength={2000} onChange={(_, data) => setNoteContent(data.value)} /></Field><Button type="submit" icon={<Save20Regular />} disabled={savingNote || !noteAuthor.trim() || !noteContent.trim()}>{savingNote ? '保存中' : '追加记录'}</Button></form></section>
+        <section className="task-detail-section" id="task-results"><h2>Icepak 模拟与结果</h2>{detail?.runs.length ? <div className="task-detail-list">{detail.runs.map(run => <div key={run.id}><strong>{run.kind} #{run.sequence}</strong><span>{run.status}</span>{run.attempts.map(attempt => <small key={attempt.id}>尝试 {attempt.id.slice(0, 8)}：{attempt.status}{attempt.resultSummary?.tmaxC != null ? `，${temperatureLabel} ${attempt.resultSummary.tmaxC} °C` : ''}{attempt.resultSummary?.converged != null ? `，${attempt.resultSummary.converged ? '已收敛' : '未收敛'}` : ''}，执行节点 {attempt.executorNodeId.slice(0, 8)}，证据 {attempt.artifacts.map(artifact => artifact.role).join('、') || '待生成'}{attempt.errorMessage ? `；${attempt.errorMessage}` : ''}</small>)}</div>)}</div> : <p className={styles.details}>尚无求解记录。任务确认后可启动 Baseline；求解完成后结果会回写到本任务。</p>}</section>
+        {detail?.runs.some(run => run.attempts.some(attempt => attempt.artifacts.length > 0)) && <section className="task-detail-section"><h2>求解证据下载</h2><div className="task-detail-list">{detail.runs.map(run => run.attempts.filter(attempt => attempt.artifacts.length > 0).map(attempt => <div key={attempt.id}><strong>{run.kind} #{run.sequence} · 尝试 {attempt.id.slice(0, 8)}</strong>{attempt.artifacts.map(artifact => <a key={`${artifact.role}:${artifact.sha256}`} href={`/api/tasks/${current.id}/runs/${run.id}/attempts/${attempt.id}/artifacts/${artifact.sha256}`} download>{artifact.role} · {artifact.sha256.slice(0, 12)}</a>)}</div>))}</div></section>}
+        <section className="task-detail-section" id="task-timeline"><h2>任务推进记录</h2>{detail?.events.length ? <div className="task-detail-timeline">{detail.events.map(event => <div key={event.id}><time>{new Date(event.createdAt).toLocaleString('zh-CN')}</time><strong>{event.eventType === 'task.note_added' ? `人工补充：${String(event.payload.author ?? '')}` : event.eventType.startsWith('parameters.') ? '参数方案更新' : event.eventType}</strong><span>{event.eventType === 'task.note_added' ? String(event.payload.content ?? '') : event.reason || [event.fromStatus, event.toStatus].filter(Boolean).join(' → ')}</span></div>)}</div> : <p className={styles.details}>暂无推进记录。</p>}<form className="task-detail-note-form" onSubmit={addNote}><Field label="记录人" required><Input value={noteAuthor} maxLength={100} onChange={(_, data) => setNoteAuthor(data.value)} /></Field><Field label="补充建议或下一步判断" hint="追加到任务时间线，不会自动改模或启动求解。" required><Textarea value={noteContent} maxLength={2000} onChange={(_, data) => setNoteContent(data.value)} /></Field><Button type="submit" icon={<Save20Regular />} disabled={savingNote || !noteAuthor.trim() || !noteContent.trim()}>{savingNote ? '保存中' : '追加记录'}</Button></form></section>
       </div>
       <aside className="task-detail-aside"><div className={styles.panel}><h2 className={styles.panelTitle}>当前状态与下一步</h2><div className="task-detail-status"><span>执行</span><strong>{current.executionStatus}</strong><span>热判定</span><strong>{current.thermalVerdict}</strong><span>人工审批</span><strong>{current.approvalStatus}</strong></div><TaskAction styles={styles} task={current} autoDispatch={autoDispatch} onChanged={onChanged} /></div></aside>
     </div>{error && <p className={styles.error}>{error}</p>}
@@ -579,7 +596,7 @@ function TaskAction({ styles, task, autoDispatch, onChanged }: { styles: ReturnT
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const projectPath = typeof task.requirementSnapshot.projectPath === 'string' ? task.requirementSnapshot.projectPath : ''
-  async function act(kind: 'confirm' | 'baseline' | 'remote-baseline' | 'auto-baseline' | 'cancel-auto' | 'retry-offer' | 'candidate' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
+  async function act(kind: 'confirm' | 'baseline' | 'remote-baseline' | 'auto-baseline' | 'cancel-auto' | 'retry-offer' | 'retry' | 'skill' | 'report' | 'approve' | 'reject') {
     setBusy(true); setError(''); setNotice('')
     try {
       let response: Response
@@ -617,8 +634,6 @@ function TaskAction({ styles, task, autoDispatch, onChanged }: { styles: ReturnT
         ? await fetch(`/api/tasks/${task.id}/transitions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'READY', expectedVersion: task.version, reason: '用户确认需求与工程路径' }) })
         : kind === 'baseline'
           ? await fetch(`/api/tasks/${task.id}/runs/baseline`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ projectPath, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4 }) })
-          : kind === 'candidate'
-            ? await fetch(`/api/tasks/${task.id}/runs/candidate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: task.version, fanSpeedRatio: 1.1, version: task.requirementSnapshot.aedtVersion ?? '2024.2', cores: task.requirementSnapshot.cores ?? 4, minImprovementC: 0.5 }) })
           : kind === 'retry'
             ? await fetch(`/api/tasks/${task.id}/runs/retry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion: task.version }) })
           : kind === 'report'
@@ -636,7 +651,7 @@ function TaskAction({ styles, task, autoDispatch, onChanged }: { styles: ReturnT
     } catch (reason) { setError(reason instanceof Error ? reason.message : '操作未完成') }
     finally { setBusy(false) }
   }
-  if (task.executionStatus === 'DRAFT' && task.requirementSnapshot.intakeVersion === 2) return <p className={styles.details}>{task.requirementSnapshot.modelKind === 'CAD' ? 'CAD 已归档。请完善 Icepak 工程后，点击上方“继续完善需求”上传 .aedt。' : '请点击上方“继续完善需求”，核对模型能力并确认方案。'}</p>
+  if (task.executionStatus === 'DRAFT' && task.requirementSnapshot.intakeVersion === 2 && !task.requirementSnapshot.simulationInput) return <p className={styles.details}>{task.requirementSnapshot.modelKind === 'CAD' ? '请在“CAD 转换与基础热模型”中导入、配置并验证工程，然后选为 Baseline 输入。' : '请点击上方“继续完善需求”，核对模型能力并确认方案。'}</p>
   if (task.executionStatus === 'DRAFT') return <div><Button size="small" icon={<Checkmark20Regular />} disabled={!projectPath || busy} onClick={() => void act('confirm')}>确认需求</Button>{!projectPath && <div className={styles.error}>缺少工程路径</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'READY' && autoDispatch?.status === 'WAITING') return <div><Badge appearance="outline">等待兼容空闲节点</Badge> <Button size="small" icon={<Stop20Regular />} disabled={busy} onClick={() => void act('cancel-auto')}>撤销自动派发</Button>{autoDispatch.errorMessage && <div className={styles.details}>{autoDispatch.errorMessage}</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'READY') return <div><div className={styles.headerActions}><Button size="small" icon={<Play20Regular />} appearance="primary" disabled={!projectPath || busy} onClick={() => void act('baseline')}>{busy ? '启动中' : '本机 Baseline'}</Button>{!isLanClient && <><Button size="small" icon={<Send20Regular />} disabled={!projectPath || busy} onClick={() => void act('remote-baseline')}>派发到空闲节点</Button><Button size="small" icon={<Send20Regular />} disabled={!projectPath || busy} onClick={() => void act('auto-baseline')}>授权自动派发</Button></>}</div>{autoDispatch?.status === 'FAILED' && <div className={styles.error}>自动派发失败：{autoDispatch.errorMessage}</div>}{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
@@ -644,10 +659,7 @@ function TaskAction({ styles, task, autoDispatch, onChanged }: { styles: ReturnT
     ? <span className={styles.details}>{autoDispatch.status === 'DELIVERED' ? '自动派单已送达，等待执行节点处理' : '自动重试远程 Offer 中'}</span>
     : <div><Button size="small" icon={<ArrowClockwise20Regular />} disabled={busy} onClick={() => void act('retry-offer')}>{busy ? '重发中' : '重发远程 Offer'}</Button>{notice && <div className={styles.details}>{notice}</div>}{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'WAITING_FOR_APPROVAL') {
-    const selected = task.requirementSnapshot.selectedOptimizationSkillIds
-    const fanAllowed = task.requirementSnapshot.intakeVersion !== 2 ||
-      (Array.isArray(selected) && selected.some(id => typeof id === 'string' && id === task.requirementSnapshot.fanSkillId))
-    return <div><div className={styles.headerActions}><Button size="small" icon={<Checkmark20Regular />} appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button>{task.thermalVerdict === 'FAIL' && fanAllowed && <Button size="small" icon={<Play20Regular />} disabled={busy} onClick={() => void act('candidate')}>批准风扇 +10%</Button>}<Button size="small" icon={<Dismiss20Regular />} disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
+    return <div><div className={styles.headerActions}><Button size="small" icon={<Checkmark20Regular />} appearance="primary" disabled={busy} onClick={() => void act('approve')}>接受结果</Button>{task.thermalVerdict === 'FAIL' && <Button as="a" href="#parameter-workspace" size="small" icon={<Edit20Regular />}>调整参数方案</Button>}<Button size="small" icon={<Dismiss20Regular />} disabled={busy} onClick={() => void act('reject')}>拒绝并升级</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   }
   if (task.executionStatus === 'COMPLETED') return <div><div className={styles.headerActions}><Button size="small" icon={<DocumentPdf20Regular />} disabled={busy} onClick={() => void act('report')}>{busy ? '生成中' : '查看 PDF 报告'}</Button><Button size="small" icon={<DocumentAdd20Regular />} disabled={busy} onClick={() => void act('skill')}>沉淀 Skill 草稿</Button></div>{error && <div className={styles.error}>{error}</div>}</div>
   if (task.executionStatus === 'FAILED' || task.executionStatus === 'CANCELLED') return <div><Button size="small" icon={<ArrowClockwise20Regular />} disabled={busy} onClick={() => void act('retry')}>{busy ? '重试中' : '重试最近 Run'}</Button>{error && <div className={styles.error}>{error}</div>}</div>
@@ -833,7 +845,7 @@ function ParameterCatalogView({ styles, assessment }: { styles: ReturnType<typeo
   }
   return <div className={styles.resultItem}>
     <strong>模型可操作参数 · 只读发现</strong>
-    <p className={styles.details}>发现的变量、对象和边界不等于已确认可修改；目前仅“已验证”的曲线风扇支持自动候选。</p>
+    <p className={styles.details}>发现的变量、对象和边界不等于已确认可修改；完成 Baseline 后，可在“参数修改与追溯”中编辑受支持参数并验证。</p>
     <Button type="button" size="small" icon={<ArrowDownload20Regular />} onClick={download}>导出 JSON 清单</Button>
     <details className="parameter-catalog-details"><summary>查看清单：变量 {catalog.variables.length} · 材料对象 {catalog.materials.length} · 边界 {catalog.boundaries.length} · 风扇 {catalog.fans.length}</summary><div className="task-detail-list parameter-catalog-scroll">
       {catalog.variables.map(item => <div key={`var:${item.name}`}><strong>{item.name}</strong><span>{item.readOnly ? '只读' : item.used === true ? '已引用，待映射' : '引用未确认'}</span><small>{item.scope === 'project' ? '项目变量' : '设计变量'} · {item.expression}{item.units ? ` · 单位 ${item.units}` : ''}</small></div>)}
@@ -956,7 +968,7 @@ function CreateTaskPanel({ styles, tasks, initialDraftId, onCreated, onCancel }:
       if (!readyForRun) {
         setNotice(isAedt
           ? 'Icepak 工程已保存为草稿，但能力检查未通过；请检查 AEDT 环境、工程和 Setup 后重新检查，不能启动求解。'
-          : 'CAD 几何已保存为需求草稿。请先建立含材料、热源、边界条件、监测点和 Setup 的 Icepak 工程，再回到此处载入草稿并上传 .aedt。')
+          : 'CAD 已保存为草稿。请在任务详情的“CAD 转换与基础热模型”中导入并配置工程；首版转换支持 STEP/STP。')
         await onCreated(created.task.id)
         return
       }
@@ -985,7 +997,7 @@ function CreateTaskPanel({ styles, tasks, initialDraftId, onCreated, onCancel }:
     <Field label="允许的调整范围"><Textarea value={adjustmentBounds} onChange={(_, data) => setAdjustmentBounds(data.value)} placeholder="材料、风扇、结构、成本与噪声限制" /></Field>
     <Field label="专家补充建议 / 约束" hint="与 AI 初筛分开保存，可写客户禁改项、优先级和需要人工核对的判断。"><Textarea value={expertSupplement} onChange={(_, data) => setExpertSupplement(data.value)} placeholder="人工经验判断与补充约束" /></Field>
     <Field label="AEDT 版本"><Input value={aedtVersion} onChange={(_, data) => setAedtVersion(data.value)} /></Field>
-    <Field label="模型文件" hint="可先上传单个 STEP、IGES、Parasolid、ACIS CAD 几何，作为待建模需求；只有通过能力检查的 .aedt 才能启动求解。" required><input type="file" accept=".aedt,.step,.stp,.iges,.igs,.x_t,.x_b,.sat,.sab" onChange={event => { setModelFile(event.target.files?.[0] ?? null); setModelSha256(''); setModelKind(null); setAssessment(null) }} />{modelName && !modelFile && <span className={styles.details}>已上传：{modelName}</span>}</Field>
+    <Field label="模型文件" hint="可先上传单个 STEP、IGES、Parasolid、ACIS CAD 几何，作为待建模需求；STEP/STP 可在任务详情生成热模型；工程通过验证后可启动求解。" required><input type="file" accept=".aedt,.step,.stp,.iges,.igs,.x_t,.x_b,.sat,.sab" onChange={event => { setModelFile(event.target.files?.[0] ?? null); setModelSha256(''); setModelKind(null); setAssessment(null) }} />{modelName && !modelFile && <span className={styles.details}>已上传：{modelName}</span>}</Field>
     <Button type="button" icon={<ArrowUpload20Regular />} disabled={(!modelFile && !modelSha256) || checkingModel || saving} onClick={() => void uploadAndCheck().catch(reason => setError(reason instanceof Error ? reason.message : '模型检查失败'))}>{checkingModel ? '正在上传 / 检查' : '上传并检查模型能力'}</Button>
     {assessment && <><div className={styles.resultItem}><strong>{assessment.modelKind === 'CAD' ? 'CAD 需求输入 · 待建立 Icepak 工程' : assessment.status === 'READY_FOR_BASELINE' ? 'Icepak 工程可启动 Baseline' : 'Icepak 工程暂不能启动 Baseline'}</strong><p className={styles.details}>{assessment.projectName ? `${assessment.projectName} / ${assessment.activeDesign} · Setup：${assessment.setups.join('、') || '无'}` : assessment.diagnostics.join('；')}</p>{assessment.items.map(item => <p key={item.skillKey} className={styles.details}>{capabilityNames[item.skillKey] ?? item.skillKey} · {capabilityStatuses[item.status]} · 目标对象：{item.targetNames.join('、') || '未识别'}；{item.reason}</p>)}</div><ParameterCatalogView styles={styles} assessment={assessment} /></>}
     <Button type="button" icon={<BrainCircuit20Regular />} disabled={!title.trim() || !description.trim() || analyzing} onClick={() => void analyze()}>{analyzing ? '分析中' : '分析适合的优化方案'}</Button>

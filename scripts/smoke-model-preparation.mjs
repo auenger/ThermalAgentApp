@@ -1,0 +1,74 @@
+// Uses an isolated Core and clearly labelled test-double solver. Run after pnpm build.
+import assert from 'node:assert/strict'
+import { mkdir } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { modelApp } from '../tests/fixtures/model-preparation-app.mjs'
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
+const fixture = await modelApp()
+const browser = await chromium.launch({ headless: true })
+const page = await browser.newPage({ viewport: { width: 1440, height: 1080 } })
+page.setDefaultTimeout(15000)
+const output = resolve('.thermal-agent/screenshots/cad')
+await mkdir(output, { recursive: true })
+const errors = []
+page.on('pageerror', error => errors.push(error.message))
+try {
+  await page.goto(fixture.base)
+  await page.getByRole('button', { name: fixture.task.title, exact: true }).first().click()
+  const workspace = page.locator('#cad-workspace')
+  await workspace.getByRole('button', { name: '导入 CAD / 重新导入' }).click()
+  await workspace.getByRole('button', { name: '配置此导入版本' }).waitFor({ timeout: 15000 })
+  await workspace.getByRole('button', { name: '配置此导入版本' }).click()
+  await workspace.getByLabel('CPU 角色', { exact: true }).selectOption('HEAT_SOURCE')
+  await workspace.getByLabel('Sink 角色', { exact: true }).selectOption('HEATSINK')
+  await workspace.getByLabel('CPU 材料', { exact: true }).selectOption('silicon')
+  await workspace.getByLabel('Sink 材料', { exact: true }).selectOption('aluminum')
+  await workspace.getByLabel('CPU 功率 W', { exact: true }).fill('10')
+  await workspace.getByLabel('CPU 中心监测', { exact: true }).check()
+  await workspace.getByLabel('Sink 中心监测', { exact: true }).check()
+  for (const name of ['CPU', 'Sink']) {
+    const row = workspace.getByRole('row').filter({ has: page.getByLabel(`${name} 角色`, { exact: true }) })
+    await row.getByLabel('已核对材料').check()
+    if (name === 'CPU') await row.getByLabel('已核对功率').check()
+  }
+  for (const checkbox of await workspace.getByLabel('已核对此值', { exact: true }).all()) await checkbox.check()
+  await workspace.getByLabel('已核对安装方向').check()
+  await workspace.getByLabel('已核对单位和实际尺寸').check()
+  await workspace.getByLabel(/已核对接触与间隙/).check()
+  await workspace.getByLabel('接触与间隙说明').fill('CPU 与散热器直接接触，保留全部间隙，无导热垫。')
+  await workspace.getByLabel('建模依据 / 说明').fill('流程测试，校验 CAD 到 Baseline 输入的配置与产物关联。')
+  await workspace.getByLabel('记录人', { exact: true }).fill('测试工程师')
+  await page.screenshot({ path: `${output}/01-configuration.png`, fullPage: true })
+  await page.reload()
+  if (!await workspace.isVisible()) await page.getByRole('button', { name: fixture.task.title, exact: true }).first().click()
+  await workspace.getByLabel('CPU 功率 W', { exact: true }).waitFor()
+  assert.equal(await workspace.getByLabel('CPU 功率 W', { exact: true }).inputValue(), '10')
+  await workspace.getByRole('button', { name: '生成基础热模型' }).click()
+  await workspace.getByRole('button', { name: '验证工程 / 重试验证' }).waitFor({ timeout: 15000 })
+  await workspace.getByRole('button', { name: '验证工程 / 重试验证' }).click()
+  await workspace.getByRole('button', { name: '选为 Baseline 输入' }).waitFor({ timeout: 15000 })
+  const downloadEvent = page.waitForEvent('download')
+  await workspace.getByRole('link', { name: '下载生成工程', exact: true }).click()
+  assert.equal((await downloadEvent).suggestedFilename(), 'ThermalModel.aedt')
+  await page.screenshot({ path: `${output}/02-verified.png`, fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  assert.equal(await workspace.evaluate(el => el.scrollWidth > el.clientWidth + 1), false, 'workspace must fit a narrow viewport')
+  await page.screenshot({ path: `${output}/03-narrow.png`, fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1080 })
+  await workspace.getByRole('button', { name: '选为 Baseline 输入' }).click()
+  await page.getByRole('button', { name: '确认需求', exact: true }).click()
+  await page.getByRole('button', { name: '本机 Baseline', exact: true }).click()
+  await page.getByRole('button', { name: '接受结果', exact: true }).waitFor({ timeout: 15000 })
+  const resultDownload = page.waitForEvent('download')
+  await page.getByRole('link', { name: /^SOLVER_RESULT ·/ }).click()
+  assert.match((await resultDownload).suggestedFilename(), /-result\.json$/u)
+  await page.screenshot({ path: `${output}/04-baseline.png`, fullPage: true })
+  assert.deepEqual(errors, [])
+  console.log(JSON.stringify({ success: true, evidenceKind: 'TEST_DOUBLE', screenshots: output,
+    covered: ['import', 'object mapping', 'source confirmation', 'local draft recovery', 'prepare', 'validate', 'download', 'narrow viewport', 'activate', 'baseline without Agent', 'baseline evidence download'] }))
+} catch (error) {
+  await page.screenshot({ path: `${output}/failure.png`, fullPage: true })
+  console.error((await workspaceText(page)).slice(-9000))
+  throw error
+} finally { await browser.close(); await fixture.close() }
+async function workspaceText(page) { return page.locator('#cad-workspace').innerText() }

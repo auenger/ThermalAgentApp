@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -101,5 +102,20 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   assert.doesNotThrow(() => validatePackagedRuntime(complete))
   assert.throws(() => verifyBundle(root), /Electron application/u)
   await writeFile(join(resources, 'app.asar'), '')
+  const cadRoot = join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin')
+  for (const file of ['cad.py', 'model_preparation.py', 'model_validation.py', 'managed.py', 'windows_job.py']) await writeFile(join(cadRoot, file), '')
+  const sampleRoot = join(resources, 'cad-samples')
+  await mkdir(sampleRoot, { recursive: true })
+  const sampleBytes = await readFile(resolve('assets/cad/reference-natural-convection.step'))
+  await writeFile(join(sampleRoot, 'reference-natural-convection.step'), sampleBytes)
+  await writeFile(join(sampleRoot, 'reference-natural-convection.json'), await readFile(resolve('assets/cad/reference-natural-convection.json')))
+  const acceptanceRoot = join(resources, 'cad-acceptance')
+  await mkdir(join(acceptanceRoot, 'scripts'), { recursive: true })
+  await cp(resolve('scripts/accept-cad-model.mjs'), join(acceptanceRoot, 'scripts', 'accept-cad-model.mjs'))
+  await cp(resolve('packages/contracts/dist'), join(acceptanceRoot, 'packages', 'contracts', 'dist'), { recursive: true })
+  await cp(resolve('packages/contracts/package.json'), join(acceptanceRoot, 'packages', 'contracts', 'package.json'))
   assert.doesNotThrow(() => verifyBundle(root))
+  assert.match(execFileSync(process.execPath, [join(acceptanceRoot, 'scripts', 'accept-cad-model.mjs'), '--help'], { encoding: 'utf8' }), /CAD App acceptance/)
+  await writeFile(join(sampleRoot, 'reference-natural-convection.step'), 'corrupt sample')
+  assert.throws(() => verifyBundle(root), /CAD sample hash/u)
 })

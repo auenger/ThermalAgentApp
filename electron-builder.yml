@@ -18,6 +18,14 @@ files:
   - plugins/report-reportlab/python/**
   - node_modules/**
 extraResources:
+  - from: assets/cad
+    to: cad-samples
+  - from: scripts/accept-cad-model.mjs
+    to: cad-acceptance/scripts/accept-cad-model.mjs
+  - from: packages/contracts/dist
+    to: cad-acceptance/packages/contracts/dist
+  - from: packages/contracts/package.json
+    to: cad-acceptance/packages/contracts/package.json
   - from: assets/brand
     to: brand
   - from: packaging/windows-runtime/node

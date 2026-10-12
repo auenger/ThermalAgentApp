@@ -8,6 +8,9 @@ import type {
   IcepakProjectOperationInput,
   IcepakProjectOperationResult,
   RpcResponse,
+  CadPluginInput,
+  ModelPluginInput,
+  ModelPluginResult,
 } from '@thermal-agent/contracts'
 
 export interface IcepakPluginClientOptions {
@@ -20,13 +23,21 @@ export interface PluginCallOptions {
   timeoutMs?: number
   signal?: AbortSignal
   onProgress?(stage: string): void
+  /** Internal Core-owned execution identity; not accepted from HTTP request bodies. */
+  operationId?: string
+  onProcessStarted?(pid: number): void
+  onManagedResource?(pid: number, creationTime: number): void
 }
 
 export interface IcepakPluginPort {
+  inspectCad?(input: CadPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
+  prepareModel?(input: ModelPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
+  validateModel?(input: ModelPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
   probeEnvironment(): Promise<IcepakEnvironmentProbe>
-  probeLaunchability?(version?: string): Promise<IcepakEnvironmentProbe>
-  inspectProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
-  fanCheck(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult>
+  probeLaunchability?(version?: string, options?: PluginCallOptions): Promise<IcepakEnvironmentProbe>
+  inspectProject(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
+  checkChanges?(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
+  fanCheck(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
   solveProject(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
   fanSolve(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
 }
@@ -46,20 +57,36 @@ export class IcepakPluginClient {
     return this.call('probe_environment') as Promise<IcepakEnvironmentProbe>
   }
 
-  async probeLaunchability(version?: string): Promise<IcepakEnvironmentProbe> {
-    return this.call('probe_launchability', version ? { version } : {}, { timeoutMs: 5 * 60_000 }) as Promise<IcepakEnvironmentProbe>
+  async inspectCad(input: CadPluginInput, options: PluginCallOptions = {}): Promise<ModelPluginResult> {
+    return this.call('inspect_cad', input, { timeoutMs: 20 * 60_000, ...options }) as Promise<ModelPluginResult>
+  }
+
+  async prepareModel(input: ModelPluginInput, options: PluginCallOptions = {}): Promise<ModelPluginResult> {
+    return this.call('prepare_model', input, { timeoutMs: 20 * 60_000, ...options }) as Promise<ModelPluginResult>
+  }
+
+  async validateModel(input: ModelPluginInput, options: PluginCallOptions = {}): Promise<ModelPluginResult> {
+    return this.call('validate_model', input, { timeoutMs: 60 * 60_000, ...options }) as Promise<ModelPluginResult>
+  }
+
+  async probeLaunchability(version?: string, options: PluginCallOptions = {}): Promise<IcepakEnvironmentProbe> {
+    return this.call('probe_launchability', version ? { version } : {}, { timeoutMs: 5 * 60_000, ...options }) as Promise<IcepakEnvironmentProbe>
   }
 
   async health(): Promise<unknown> {
     return this.call('health')
   }
 
-  async inspectProject(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult> {
-    return this.call('inspect_project', input, { timeoutMs: 10 * 60_000 }) as Promise<IcepakProjectOperationResult>
+  async inspectProject(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult> {
+    return this.call('inspect_project', input, { timeoutMs: 10 * 60_000, ...options }) as Promise<IcepakProjectOperationResult>
   }
 
-  async fanCheck(input: IcepakProjectOperationInput & { outputDir: string }): Promise<IcepakProjectOperationResult> {
-    return this.call('fan_check', input, { timeoutMs: 10 * 60_000 }) as Promise<IcepakProjectOperationResult>
+  async checkChanges(input: IcepakProjectOperationInput & { outputDir: string }, options: PluginCallOptions = {}): Promise<IcepakProjectOperationResult> {
+    return this.call('check_changes', input, { timeoutMs: 10 * 60_000, ...options }) as Promise<IcepakProjectOperationResult>
+  }
+
+  async fanCheck(input: IcepakProjectOperationInput & { outputDir: string }, options: PluginCallOptions = {}): Promise<IcepakProjectOperationResult> {
+    return this.call('fan_check', input, { timeoutMs: 10 * 60_000, ...options }) as Promise<IcepakProjectOperationResult>
   }
 
   async solveProject(input: IcepakProjectOperationInput & { outputDir: string }, options: PluginCallOptions = {}): Promise<IcepakProjectOperationResult> {
@@ -71,10 +98,11 @@ export class IcepakPluginClient {
   }
 
   async call(method: string, params: object = {}, options: PluginCallOptions = {}): Promise<unknown> {
+    if (options.signal?.aborted) throw new Error(`Icepak plugin ${method} was cancelled before launch`)
     const id = randomUUID()
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
     const child = spawn(this.python, pythonPluginArgs(this.pluginRoot, 'thermal_icepak_plugin'), {
-      env: pythonPluginEnv(),
+      env: { ...pythonPluginEnv(), ...(options.operationId ? { THERMAL_ICEPAK_PARENT_PID: String(process.pid), THERMAL_ICEPAK_MANAGED_ONESHOT: '1' } : {}) },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -83,6 +111,7 @@ export class IcepakPluginClient {
     let stderr = ''
     let stdoutBytes = 0
     let stdoutOverflow = false
+    child.stdin.on('error', () => { /* EPIPE during cancellation/exit is handled by the process close event. */ })
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', chunk => {
@@ -100,9 +129,11 @@ export class IcepakPluginClient {
         lineBuffer = lineBuffer.slice(newline + 1)
         if (line) {
           try {
-            const event = JSON.parse(line) as { id?: string; event?: string; stage?: string }
+            const event = JSON.parse(line) as { id?: string; event?: string; stage?: string; pid?: number; creationTime?: number }
             if (event.id === id && event.event === 'progress' && typeof event.stage === 'string') {
               options.onProgress?.(event.stage)
+            } else if (event.id === id && event.event === 'managed_process' && Number.isInteger(event.pid) && typeof event.creationTime === 'number') {
+              options.onManagedResource?.(event.pid!, event.creationTime)
             } else {
               responseLine = line
             }
@@ -117,25 +148,43 @@ export class IcepakPluginClient {
 
     const response = await new Promise<RpcResponse>((resolveResponse, reject) => {
       let aborted = false
+      let timedOut = false
+      let forceTimer: NodeJS.Timeout | undefined
+      const stop = () => {
+        if (forceTimer) return
+        // Let the plugin clean up explicitly registered AEDT sessions before forcibly reaping it.
+        if (options.operationId) {
+          if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.write(`${JSON.stringify({ event: 'cancel' })}\n`)
+          forceTimer = setTimeout(() => terminateProcessTree(child, { force: true }), 10_000)
+          forceTimer.unref()
+        } else terminateProcessTree(child, { force: true })
+      }
       const timer = setTimeout(() => {
-        terminateProcessTree(child, { force: true })
-        reject(new Error(`Icepak plugin ${method} timed out`))
+        timedOut = true
+        stop()
+        // Hold the shared operation lock until the managed process has actually closed.
       }, timeoutMs)
       timer.unref()
       const abort = () => {
         aborted = true
-        terminateProcessTree(child, { force: true })
+        stop()
       }
       if (options.signal?.aborted) abort()
       options.signal?.addEventListener('abort', abort, { once: true })
       child.once('error', error => {
         clearTimeout(timer)
+        if (forceTimer) clearTimeout(forceTimer)
         options.signal?.removeEventListener('abort', abort)
         reject(error)
       })
       child.once('close', code => {
         clearTimeout(timer)
+        if (forceTimer) clearTimeout(forceTimer)
         options.signal?.removeEventListener('abort', abort)
+        if (timedOut) {
+          reject(Object.assign(new Error(`Icepak plugin ${method} timed out`), { code: 'PLUGIN_TIMEOUT' }))
+          return
+        }
         if (aborted) {
           reject(new Error(`Icepak plugin ${method} was cancelled`))
           return
@@ -155,11 +204,19 @@ export class IcepakPluginClient {
           reject(new Error(`Icepak plugin returned invalid JSON: ${line.slice(0, 500)}`))
         }
       })
-      child.stdin.end(`${JSON.stringify({ id, method, params })}\n`)
+      try {
+        if (child.pid) options.onProcessStarted?.(child.pid)
+        if (options.operationId) child.stdin.write(`${JSON.stringify({ id, method, params })}\n`)
+        else child.stdin.end(`${JSON.stringify({ id, method, params })}\n`)
+      } catch (error) {
+        aborted = true
+        terminateProcessTree(child, { force: true })
+        child.once('close', () => reject(error))
+      }
     })
 
     if (response.id !== id) throw new Error('Icepak plugin response id mismatch')
-    if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+    if (!response.ok) throw Object.assign(new Error(`${response.error.code}: ${response.error.message}`), { code: response.error.code })
     return response.result
   }
 }

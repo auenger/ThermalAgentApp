@@ -62,6 +62,10 @@ def probe_environment() -> dict[str, object]:
         "pyaedtAvailable": pyaedt_available,
         "licenseStatus": "UNKNOWN",
         "capabilities": [
+            "cad_inspect",
+            "model_prepare",
+            "model_validate",
+            "managed_lifecycle",
             "environment_probe",
             "health",
             "project_inspect",
@@ -69,6 +73,7 @@ def probe_environment() -> dict[str, object]:
             "baseline_solve",
             "fan_solve",
             "convergence_evidence",
+            "parameter_check",
         ],
         "diagnostics": diagnostics,
     }
@@ -99,6 +104,8 @@ def probe_launchability(
         from .project import _without_agent_secrets
         with _without_agent_secrets():
             app = icepak_factory(version=selected, non_graphical=True, new_desktop=True, close_on_exit=True)
+        from .managed import track_session
+        track_session(app)
         if app is None:
             raise RuntimeError("PyAEDT did not return an Icepak session")
         result["status"] = "LAUNCHABLE"

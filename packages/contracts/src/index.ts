@@ -1,3 +1,6 @@
+export * from './parameters.js'
+export * from './model-preparation.js'
+import type { IcepakEditableParameter, IcepakParameterChange, IcepakActionResult } from './parameters.js'
 export const EXECUTION_STATUSES = [
   'DRAFT',
   'READY',
@@ -130,6 +133,7 @@ export interface ModelCapabilityAssessment {
 /** Read-only AEDT inventory. Discovery does not authorize an edit. */
 export interface IcepakParameterCatalog {
   schemaVersion: 1
+  editableParameters?: IcepakEditableParameter[]
   variables: Array<{ name: string; scope: 'design' | 'project'; expression: string; units: string; used: boolean | null; readOnly: boolean }>
   materials: Array<{ objectName: string; materialName: string }>
   boundaries: Array<{ name: string; type: string; properties: Record<string, unknown> }>
@@ -435,6 +439,7 @@ export interface IcepakProjectOperationInput {
   nonGraphical?: boolean
   expectedProfile?: Record<string, unknown>
   fanSpeedRatio?: number
+  changes?: IcepakParameterChange[]
   flowConvergenceCriterion?: number
   baselineMetrics?: Record<string, unknown>
   minImprovementC?: number
@@ -445,14 +450,17 @@ export interface IcepakCandidateInput {
   version?: string
   setup?: string
   cores?: number
-  fanSpeedRatio: number
+  fanSpeedRatio?: number
+  /** Internal only: resolved from an immutable, verified parameter plan. */
+  parameterPlanId?: string
+  preparedProjectSha256?: string
   flowConvergenceCriterion?: number
   minImprovementC?: number
 }
 
 export interface IcepakProjectOperationResult {
   status: 'ok'
-  mode: 'inspect' | 'fan-check' | 'solve' | 'fan-solve'
+  mode: 'inspect' | 'fan-check' | 'solve' | 'fan-solve' | 'check-changes'
   sourceProject: string
   workingProject: string
   inputSha256: string
@@ -469,6 +477,8 @@ export interface IcepakProjectOperationResult {
   }
   validation: { verified: boolean; checks: string[] }
   parameterCatalog?: IcepakParameterCatalog
+  actionResults?: IcepakActionResult[]
+  verifiedProjectPath?: string
   fanAction?: Record<string, unknown>
   solve?: Record<string, unknown>
   metrics?: Record<string, unknown>

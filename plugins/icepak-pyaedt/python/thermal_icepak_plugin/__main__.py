@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any, Callable
 
 from . import PLUGIN_ID, PLUGIN_VERSION, PROTOCOL_VERSION
 from .probe import probe_environment, probe_launchability
 from .project import run_project_operation
+from .cad import inspect_cad, ModelPreparationError
+from .model_preparation import prepare_model
+from .model_validation import validate_model
+from .managed import start_managed, finish_managed, read_managed_request
 
 
 def _success(request_id: str, result: object) -> dict[str, object]:
@@ -76,7 +81,39 @@ def handle_request(value: Any, progress: Callable[[str], None] | None = None) ->
         if not isinstance(params, dict) or (params.get("version") is not None and not isinstance(params["version"], str)):
             return _failure(request_id, "INVALID_REQUEST", "version must be a string")
         return _success(request_id, probe_launchability(params.get("version")))
-    if method in {"inspect_project", "fan_check", "solve_project", "fan_solve"}:
+    if method in {"prepare_model", "validate_model"}:
+        try:
+            params = value.get("params")
+            if not isinstance(params, dict):
+                raise ValueError("params must be an object")
+            for key in ("projectPath", "projectSha256", "specSha256", "outputDir"):
+                if not isinstance(params.get(key), str) or not params[key].strip():
+                    raise ValueError(f"{key} must be a non-empty string")
+            operation = prepare_model if method == "prepare_model" else validate_model
+            return _success(request_id, operation(project_path=params["projectPath"], project_sha256=params["projectSha256"],
+                catalog=params.get("catalog"), spec=params.get("spec"), spec_sha256=params["specSha256"], output_dir=params["outputDir"], progress=progress))
+        except ModelPreparationError as exc:
+            return _failure(request_id, exc.code, str(exc)[:500])
+        except Exception as exc:
+            return _failure(request_id, type(exc).__name__.upper(), str(exc)[:500])
+    if method == "inspect_cad":
+        try:
+            params = value.get("params")
+            if not isinstance(params, dict):
+                raise ValueError("params must be an object")
+            for key in ("sourcePath", "sourceSha256", "inspectionId", "outputDir", "version"):
+                if not isinstance(params.get(key), str) or not params[key].strip():
+                    raise ValueError(f"{key} must be a non-empty string")
+            if not isinstance(params.get("healing", False), bool):
+                raise ValueError("healing must be a boolean")
+            return _success(request_id, inspect_cad(source_path=params["sourcePath"], source_sha256=params["sourceSha256"],
+                inspection_id=params["inspectionId"], output_dir=params["outputDir"], version=params["version"],
+                healing=params.get("healing", False), progress=progress))
+        except ModelPreparationError as exc:
+            return _failure(request_id, exc.code, str(exc)[:500])
+        except Exception as exc:
+            return _failure(request_id, type(exc).__name__.upper(), str(exc)[:500])
+    if method in {"inspect_project", "fan_check", "solve_project", "fan_solve", "check_changes"}:
         try:
             params = _project_params(value.get("params"))
             params["mode"] = {
@@ -84,7 +121,10 @@ def handle_request(value: Any, progress: Callable[[str], None] | None = None) ->
                 "fan_check": "fan-check",
                 "solve_project": "solve",
                 "fan_solve": "fan-solve",
+                "check_changes": "check-changes",
             }[method]
+            if method == "check_changes":
+                params["changes"] = value["params"].get("changes")
             if method in {"fan_check", "fan_solve"}:
                 params["fan_speed_ratio"] = value["params"].get("fanSpeedRatio", 1.1)
             return _success(request_id, run_project_operation(**params, progress=progress))
@@ -95,25 +135,36 @@ def handle_request(value: Any, progress: Callable[[str], None] | None = None) ->
 
 def main() -> int:
     """Read requests until stdin closes and emit exactly one response per input line."""
-    for raw_line in sys.stdin:
+    managed = os.environ.get("THERMAL_ICEPAK_MANAGED_ONESHOT") == "1"
+    control = None
+    if managed:
+        raw_line, control = read_managed_request(sys.stdin)
+        requests = [raw_line]
+    else:
+        requests = sys.stdin
+    for raw_line in requests:
         if not raw_line.strip():
             continue
         try:
             request = json.loads(raw_line)
             request_id = request.get("id", "") if isinstance(request, dict) else ""
-            response = handle_request(
-                request,
-                progress=lambda stage: print(
-                    json.dumps({"id": request_id, "event": "progress", "stage": stage}, ensure_ascii=False),
-                    flush=True,
-                ),
-            )
+            lifecycle = None
+            try:
+                if managed:
+                    lifecycle = start_managed(int(os.environ["THERMAL_ICEPAK_PARENT_PID"]),
+                        lambda pid, created: print(json.dumps({"id": request_id, "event": "managed_process", "pid": pid, "creationTime": created}), flush=True), control)
+                response = handle_request(request, progress=lambda stage: print(
+                    json.dumps({"id": request_id, "event": "progress", "stage": stage}, ensure_ascii=False), flush=True))
+            finally:
+                if lifecycle is not None: finish_managed(lifecycle)
         except json.JSONDecodeError:
             response = _failure("", "INVALID_JSON", "request is not valid JSON")
         except Exception as exc:  # plugin boundary must return a stable protocol error
             request_id = request.get("id", "") if isinstance(request, dict) else ""
             response = _failure(str(request_id), type(exc).__name__.upper(), str(exc)[:500])
         print(json.dumps(response, ensure_ascii=False), flush=True)
+        if os.environ.get("THERMAL_ICEPAK_MANAGED_ONESHOT") == "1":
+            return 0
     return 0
 
 

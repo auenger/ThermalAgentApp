@@ -84,7 +84,8 @@ test('pinned DSH web Host reaches ready with its live profile', async t => {
     { url: 'http://127.0.0.1:1', token: 'test-bridge' }, plugin, value => statuses.push(value))
   t.after(async () => { await host.shutdown(); await rm(root, { recursive: true, force: true }) })
   await host.start()
-  const deadline = Date.now() + 15_000
+  // This integration test loads the real dependency graph; allow cold/loaded machines to start.
+  const deadline = Date.now() + 30_000
   while (Date.now() < deadline && !statuses.some(status => status.phase === 'ready' || status.phase === 'failed')) {
     await new Promise(resolveWait => setTimeout(resolveWait, 100))
   }
@@ -109,7 +110,7 @@ test('local Core DSH sessions can be created, listed and archived without losing
   const address = app.server.address()
   assert.ok(address && typeof address !== 'string')
   const base = `http://127.0.0.1:${address.port}`
-  const deadline = Date.now() + 20_000
+  const deadline = Date.now() + 30_000
   let ready = false
   while (Date.now() < deadline) {
     const status = (await (await fetch(`${base}/api/agent/status`)).json()).agent

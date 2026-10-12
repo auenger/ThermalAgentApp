@@ -6,13 +6,18 @@
   "entrypoint": ["python", "-m", "thermal_icepak_plugin"],
   "platforms": ["win32"],
   "capabilities": [
+    "cad_inspect",
+    "model_prepare",
+    "model_validate",
+    "managed_lifecycle",
     "environment_probe",
     "health",
     "project_inspect",
     "fan_check",
     "baseline_solve",
     "fan_solve",
-    "convergence_evidence"
+    "convergence_evidence",
+    "parameter_check"
   ],
   "maxConcurrency": 1
 }

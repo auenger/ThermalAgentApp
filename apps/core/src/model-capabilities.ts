@@ -6,12 +6,12 @@ type Item = ModelCapabilityAssessment['items'][number]
 
 function advisoryItems(): Item[] {
   return [
-    { skillKey: 'optimization-01-tim', status: 'NEEDS_MAPPING', targetNames: [], reason: '需识别导热贴或接触热阻对应的模型对象；尚无自动修改器。' },
-    { skillKey: 'optimization-02-fin-geometry', status: 'NEEDS_MAPPING', targetNames: [], reason: '需识别鳍片参数化几何及风阻约束；尚无自动修改器。' },
+    { skillKey: 'optimization-01-tim', status: 'NEEDS_MAPPING', targetNames: [], reason: '需映射导热贴的驱动变量；Baseline 后可在参数方案中验证。接触热阻专用修改尚未支持。' },
+    { skillKey: 'optimization-02-fin-geometry', status: 'NEEDS_MAPPING', targetNames: [], reason: '需识别鳍片已有几何变量及风阻约束；Baseline 后可通过参数方案修改并验证。' },
     { skillKey: 'optimization-03-heat-spreader', status: 'NEEDS_MAPPING', targetNames: [], reason: '需识别热管或 VC 几何与材料；尚无自动修改器。' },
     { skillKey: 'optimization-04-fan-selection', status: 'UNAVAILABLE', targetNames: [], reason: '尚未发现可验证的曲线型原生 Fan。' },
     { skillKey: 'optimization-05-system-vents', status: 'ADVISORY_ONLY', targetNames: [], reason: '涉及客户系统进出风结构，只形成建议，不自动修改。' },
-    { skillKey: 'optimization-06-copper', status: 'NEEDS_MAPPING', targetNames: [], reason: '需指定散热器对象并核对重量、成本；尚无自动修改器。' },
+    { skillKey: 'optimization-06-copper', status: 'NEEDS_MAPPING', targetNames: [], reason: '需指定散热器实体并核对重量、成本；Baseline 后可在参数方案中选择项目已有材料并验证。' },
   ]
 }
 

@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { createReadStream, mkdirSync } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
@@ -8,6 +9,10 @@ import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInp
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
+import { ParameterPlanManager } from './parameter-plans.js'
+import { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
+import { ModelPreparationStore } from '@thermal-agent/sqlite-store'
+import { lockIcepakOperations, IcepakOperationBusyError } from './icepak-operation-lock.js'
 import { IcepakExecutionManager } from './execution-manager.js'
 import { DshRuntime } from './dsh-runtime.js'
 import { SkillPublisher } from './skill-publisher.js'
@@ -65,6 +70,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     database.close()
     throw error
   }
+  const modelStore = new ModelPreparationStore(database.path)
+  try { modelStore.recover() }
+  catch (error) { modelStore.close(); database.close(); throw error }
   database.adoptLegacyLocalTasks(nodeIdentity.nodeId)
   database.reconcileLeases()
   const leaseSweep = setInterval(() => {
@@ -76,7 +84,8 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const taskWorkspace = new TaskWorkspace(home)
   const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
-  const pluginClient = options.pluginClient ?? new IcepakPluginClient()
+  const pluginClient = lockIcepakOperations(options.pluginClient ?? new IcepakPluginClient(), modelStore)
+  const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
     effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts)
   const pendingLaunchProbes = new Map<string, Promise<IcepakEnvironmentProbe>>()
@@ -101,12 +110,13 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     let freeDiskBytes = 0
     try { freeDiskBytes = heartbeatFreeDiskBytes(await localFreeDiskBytes(dirname(database.path))) }
     catch { /* fail closed: do not advertise capacity when disk cannot be measured */ }
-    const status = freeDiskBytes > 0 ? (effective?.status ?? 'DEGRADED') : 'DEGRADED'
+    const operation = modelStore.reconcileRecoveredOperation()
+    const status = freeDiskBytes > 0 ? (operation ? 'BUSY' : effective?.status ?? 'DEGRADED') : 'DEGRADED'
     return {
       pluginStatus: status,
       aedtVersions: effective?.aedtVersions ?? [],
       maxConcurrent: status === 'READY' ? 1 : 0,
-      activeAttempts: database.listActiveAttempts().length,
+      activeAttempts: Math.max(database.listActiveAttempts().length, operation ? 1 : 0),
       freeDiskBytes,
     }
   }
@@ -121,7 +131,8 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const peerTasks = new PeerTaskInbox(nodeIdentity.nodeId, database, pluginClient, () => remoteInput.wake(true), readinessProbe)
   const peerDispatcher = new PeerTaskDispatcher(nodeIdentity.nodeId, database, artifacts, peerSecure)
   const autoDispatcher = new PeerAutoDispatcher(nodeIdentity.nodeId, database, discovery, peerDispatcher)
-  const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient)
+  const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient, modelStore)
+  const parameterPlans = new ParameterPlanManager(home, database, artifacts, pluginClient, executions)
   const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   const eventStream = new CoreEventStream(database)
@@ -134,7 +145,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, parameterPlans, modelPreparations, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -157,8 +168,11 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
         if (!server.listening) { resolveClose(); return }
         server.close(error => error ? reject(error) : resolveClose())
       })
+      await modelPreparations.close()
+      await parameterPlans.close()
       await executions.close()
       await agentRuntime.close()
+      modelStore.close()
       database.close()
     },
   }
@@ -174,6 +188,8 @@ async function route(
   launchProbe: (version?: string) => Promise<IcepakEnvironmentProbe>,
   sampleProjectPath: string,
   executions: IcepakExecutionManager,
+  parameterPlans: ParameterPlanManager,
+  modelPreparations: ModelPreparationManager,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
   reports: ReportManager,
@@ -383,6 +399,68 @@ async function route(
       modelKind: extension === '.aedt' ? 'AEDT' : 'CAD', projectPath } })
     return
   }
+  const attemptArtifact = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/runs\/([0-9a-f-]{36})\/attempts\/([0-9a-f-]{36})\/artifacts\/([a-f0-9]{64})$/u)
+  if (request.method === 'GET' && attemptArtifact) {
+    const [, taskId, runId, attemptId, sha] = attemptArtifact
+    const run = database.getRun(runId)
+    const attempt = database.getAttempt(attemptId)
+    if (!run || run.taskId !== taskId || !attempt || attempt.runId !== runId || !database.listAttemptArtifacts(attemptId).some(a => a.sha256 === sha)) {
+      throw new RequestError(404, 'ATTEMPT_ARTIFACT_NOT_FOUND', '求解产物不属于指定任务、运行和尝试')
+    }
+    const artifact = database.getArtifact(sha)
+    if (!artifact) throw new RequestError(404, 'ATTEMPT_ARTIFACT_NOT_FOUND', '求解产物不存在')
+    response.writeHead(200, { 'Content-Type': artifact.originalName.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+      'Content-Length': String(artifact.sizeBytes), 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(artifact.originalName)}`,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' })
+    await pipeline(createReadStream(artifacts.resolveArtifact(sha)), response); return
+  }
+  const modelArtifact = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/model-artifacts\/([a-f0-9]{64})$/u)
+  if (request.method === 'GET' && modelArtifact) {
+    const [, taskId, sha] = modelArtifact
+    const context = modelPreparations.context(taskId)
+    if (!context.jobs.some(job => job.artifacts.some(a => a.sha256 === sha))) throw new RequestError(404, 'MODEL_ARTIFACT_NOT_FOUND', '产物不属于当前任务')
+    const artifact = database.getArtifact(sha)
+    if (!artifact) throw new RequestError(404, 'MODEL_ARTIFACT_NOT_FOUND', '产物不存在')
+    const type = artifact.originalName.endsWith('.jpg') ? 'image/jpeg' : artifact.originalName.endsWith('.json') ? 'application/json' : 'application/octet-stream'
+    response.writeHead(200, { 'Content-Type': type, 'Content-Length': String(artifact.sizeBytes),
+      'Content-Disposition': `${type === 'image/jpeg' ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(artifact.originalName)}`,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' })
+    await pipeline(createReadStream(artifacts.resolveArtifact(sha)), response); return
+  }
+  const modelRoute = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/(cad-inspections|model-preparations|model-spec|model-preparation-jobs)(?:\/([0-9a-f-]{36})(?:\/(validate|activate|cancel|initial-spec))?)?$/iu)
+  if (modelRoute) {
+    const [, taskId, collection, id, action] = modelRoute
+    assertLocalOwner(database, taskId, nodeIdentity.nodeId)
+    if (request.method === 'GET' && collection === 'model-preparations' && !id) {
+      writeJson(response, 200, modelPreparations.context(taskId)); return
+    }
+    if (request.method === 'GET' && collection === 'cad-inspections' && id && action === 'initial-spec') {
+      writeJson(response, 200, { spec: modelPreparations.initialSpec(taskId, id) }); return
+    }
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'CAD 建模操作仅限本机 App')
+    assertLocalWriteOrigin(request)
+    const body = await readJsonBody(request, 2 * 1024 * 1024)
+    if (!isObject(body)) throw new RequestError(400, 'INVALID_REQUEST', '建模请求必须为对象')
+    if (request.method === 'POST' && collection === 'cad-inspections' && !id) {
+      writeJson(response, 202, { job: modelPreparations.inspect(taskId, { requestId: String(body.requestId ?? ''), version: String(body.version ?? ''), healing: body.healing as boolean }) }); return
+    }
+    if (request.method === 'PUT' && collection === 'model-spec' && !id) {
+      writeJson(response, 200, { draft: modelPreparations.saveDraft(taskId, body.spec, Number(body.expectedVersion)) }); return
+    }
+    if (request.method === 'POST' && collection === 'model-preparations' && !id) {
+      writeJson(response, 202, { job: modelPreparations.prepare(taskId, { requestId: String(body.requestId ?? ''), draftVersion: Number(body.draftVersion) }) }); return
+    }
+    if (request.method === 'POST' && collection === 'model-preparations' && id && action === 'validate') {
+      writeJson(response, 202, { job: modelPreparations.validate(taskId, id, String(body.requestId ?? '')) }); return
+    }
+    if (request.method === 'POST' && collection === 'model-preparations' && id && action === 'activate') {
+      writeJson(response, 200, { task: await modelPreparations.activate(taskId, id, Number(body.expectedVersion)) }); return
+    }
+    if (request.method === 'POST' && collection === 'model-preparation-jobs' && id && action === 'cancel') {
+      writeJson(response, 200, { job: modelPreparations.cancel(taskId, id) }); return
+    }
+    throw new RequestError(404, 'NOT_FOUND', '不支持的建模操作')
+  }
   const checkModelMatch = url.pathname.match(/^\/api\/models\/([a-f0-9]{64})\/check$/u)
   if (request.method === 'POST' && checkModelMatch) {
     const sha = checkModelMatch[1]
@@ -583,7 +661,7 @@ async function route(
         return { ...attempt, artifacts: linked, resultSummary }
       })),
     })))
-    writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id), skillRun: database.getSkillRunForTask(task.id) })
+    writeJson(response, 200, { task, runs, events: database.listTaskEvents(task.id), parameterPlans: database.listParameterPlans(task.id), skillRun: database.getSkillRunForTask(task.id) })
     return
   }
   const reportMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/report$/iu)
@@ -612,6 +690,7 @@ async function route(
       throw new RequestError(400, 'TRANSITION_REQUIRES_WORKFLOW', 'this task transition must be performed by its controlled workflow')
     }
     if (input.status === 'READY') {
+      if (modelPreparations.hasActiveTask(transitionMatch[1])) throw new RequestError(409, 'MODEL_PREPARATION_ACTIVE', '当前任务仍在导入、生成或验证模型，请完成或取消作业后再确认需求')
       const draft = database.getTask(transitionMatch[1])
       if (!draft) throw new TaskNotFoundError(transitionMatch[1])
       if (draft.requirementSnapshot.intakeVersion === 2) {
@@ -619,6 +698,7 @@ async function route(
         if (typeof snapshot.modelSha256 !== 'string' || !database.getArtifact(snapshot.modelSha256)) {
           throw new RequestError(409, 'MODEL_REQUIRED', 'upload and attach a model before confirming the task')
         }
+        if (snapshot.simulationInput) modelPreparations.assertSimulationInput(draft.id)
         if (snapshot.modelKind !== 'AEDT') {
           throw new RequestError(409, 'ICEPAK_MODEL_REQUIRED', 'CAD intake must be prepared as an Icepak .aedt project before simulation')
         }
@@ -636,6 +716,7 @@ async function route(
       }
     }
     const task = database.transitionTask(transitionMatch[1], input.status, input.expectedVersion, input.reason)
+    if (input.status === 'CANCELLED') modelPreparations.cancelTaskJobs(task.id)
     if (input.status === 'READY') database.updateSkillRunStep(task.id, 'confirm', 'COMPLETED', { taskVersion: task.version })
     writeJson(response, 200, { task })
     return
@@ -661,6 +742,8 @@ async function route(
     if (database.getAutoDispatch(baselineMatch[1])?.status === 'WAITING') {
       throw new RequestError(409, 'AUTO_DISPATCH_PENDING', 'cancel automatic dispatch before starting a local Baseline')
     }
+    if (modelPreparations.busy) throw new IcepakOperationBusyError()
+    if (parameterPlans.busy) throw new RequestError(409, 'PARAMETERS_BUSY', '参数验证进行中，请稍后启动求解')
     const input = parseIcepakProjectOperationInput(await readJsonBody(request))
     const started = await executions.startBaseline(baselineMatch[1], input)
     database.updateSkillRunStep(baselineMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id })
@@ -719,9 +802,56 @@ async function route(
     writeJson(response, 202, await peerDispatcher.retryOffer(retryOfferMatch[1], peer, version))
     return
   }
+  const parameterArtifactMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/parameter-plans\/([0-9a-f-]+)\/(project|evidence)$/iu)
+  if (request.method === 'GET' && parameterArtifactMatch) {
+    const plan = database.getParameterPlan(parameterArtifactMatch[2])
+    if (!plan || plan.taskId !== parameterArtifactMatch[1]) throw new RequestError(404, 'PLAN_NOT_FOUND', '修改方案不存在')
+    const project = parameterArtifactMatch[3] === 'project'
+    const sha = project ? plan.verifiedProjectSha256 : plan.evidenceSha256
+    if (!sha) throw new RequestError(404, 'EVIDENCE_NOT_FOUND', '验证产物尚未生成')
+    const artifact = database.getArtifact(sha)
+    if (!artifact) throw new RequestError(404, 'EVIDENCE_NOT_FOUND', '验证产物不存在')
+    const path = artifacts.resolveArtifact(sha)
+    const info = await stat(path)
+    response.writeHead(200, { 'Content-Type': project ? 'application/octet-stream' : 'application/json',
+      'Content-Length': info.size, 'Content-Disposition': `attachment; filename="parameters-v${plan.revision}.${project ? 'aedt' : 'json'}"`,
+      'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+    await pipeline(createReadStream(path), response)
+    return
+  }
+  const parameterContextMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/parameters$/iu)
+  if (request.method === 'GET' && parameterContextMatch) {
+    writeJson(response, 200, await parameterPlans.context(parameterContextMatch[1]))
+    return
+  }
+  const parameterRefreshMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/parameters\/refresh$/iu)
+  if (request.method === 'POST' && parameterRefreshMatch) {
+    assertLocalWriteOrigin(request)
+    assertLocalOwner(database, parameterRefreshMatch[1], nodeIdentity.nodeId)
+    writeJson(response, 200, await parameterPlans.refreshCatalog(parameterRefreshMatch[1]))
+    return
+  }
+  const parameterPlanMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/parameter-plans(?:\/([0-9a-f-]+)\/execute)?$/iu)
+  if (parameterPlanMatch && request.method === 'POST') {
+    assertLocalWriteOrigin(request)
+    assertLocalOwner(database, parameterPlanMatch[1], nodeIdentity.nodeId)
+    const value = await readJsonBody(request, 64_000)
+    const plan = parameterPlanMatch[2]
+      ? await parameterPlans.execute(parameterPlanMatch[1], parameterPlanMatch[2], parseExpectedVersionInput(value).expectedVersion)
+      : await parameterPlans.submit(parameterPlanMatch[1], value)
+    writeJson(response, 202, { plan })
+    return
+  }
+  if (parameterPlanMatch && request.method === 'GET' && !parameterPlanMatch[2]) {
+    const plans = database.listParameterPlans(parameterPlanMatch[1])
+    writeJson(response, 200, { plans })
+    return
+  }
   const candidateMatch = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]+)\/runs\/candidate$/iu)
   if (request.method === 'POST' && candidateMatch) {
     assertLocalOwner(database, candidateMatch[1], nodeIdentity.nodeId)
+    if (modelPreparations.busy) throw new IcepakOperationBusyError()
+    if (parameterPlans.busy) throw new RequestError(409, 'PARAMETERS_BUSY', '参数验证进行中，请稍后启动求解')
     const input = parseIcepakCandidateInput(await readJsonBody(request))
     const started = await executions.startCandidate(candidateMatch[1], input)
     database.updateSkillRunStep(candidateMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id, kind: 'CANDIDATE' })
@@ -1033,6 +1163,12 @@ function writeError(response: ServerResponse, error: unknown): void {
   if (error instanceof InvalidTaskTransitionError) {
     writeJson(response, 409, { error: { code: 'INVALID_TASK_TRANSITION', message: error.message } })
     return
+  }
+  if (error instanceof ModelPreparationConflict) {
+    writeJson(response, error.status, { error: { code: error.code, message: error.message } }); return
+  }
+  if (error instanceof IcepakOperationBusyError) {
+    writeJson(response, 409, { error: { code: error.code, message: error.message } }); return
   }
   if (error instanceof RequestError) {
     writeJson(response, error.statusCode, { error: { code: error.code, message: error.message } })

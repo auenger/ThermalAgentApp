@@ -2,7 +2,15 @@
 
 当前已生成跨平台试包，但尚未完成真实 Windows 安装包验收。正式构建与运行验证仍应在 Windows x64 主机进行；macOS 的原生依赖不能直接充当 Windows 依赖。代码仓库 `https://github.com/auenger/ThermalAgentApp.git` 为公开仓库。用户已确认 `assets/icepak/Project1.aedt` 是可公开分发的测试工程，随源码提交并由安装包带入；这不代表客户模型也可公开。
 
-## 2026-09-23 跨平台试包（待 Windows 验收）
+Windows 测试可直接打开 [离线 HTML 操作说明](./Thermal-Agent-功能进度与操作说明.html)，按 CAD 到 Baseline 步骤操作并保存或导出测试记录。2026-10-12 的说明和计划更新不代表安装包重新构建；当前试包身份仍以下列 SHA 为准。
+
+## 2026-10-09 CAD 功能跨平台试包（待 Windows 验收）
+
+已重新构建 `release-cross/Thermal-Agent-0.1.0-Windows-x64.exe`，209,763,686 字节，SHA256 为 `e4bdca05ecf34b1450ce6da28bfc23900ce210e51820980dd81ee5e842fa3710`。随包新增 CAD 导入、基础热模型生成和验证模块、受管生命周期与 Windows Job Object 模块、`resources/cad-samples/` 公开 STEP 样本、`resources/cad-acceptance/` 独立验收脚本及契约。`afterPack` 检查必需资源与样本 SHA；实际包内 Core/契约文件已与本次构建输出核对。
+
+包内验收脚本的相对依赖和帮助入口已用 macOS Node 验证。Windows 原生 Node/Python、安装和真实 AEDT/Icepak 仍未运行验收；不能将跨平台试包作为真实仿真通过证据。验收命令、证据目录及剩余门槛见 [CAD 建模实现与验收](./CAD_MODEL_PREPARATION_IMPLEMENTATION.md)。`release-cross/cad-build-evidence.json` 与 `.exe.sha256` 保存本次构建身份，以下历史试包已被本次构建替换。
+
+## 2026-09-23 历史跨平台试包
 
 为便于先在 Windows 安装回归，新增 `pnpm package:win:cross`。它在 macOS 上跳过 Windows 原生模块的重编译和包内 `.exe` 的运行验证，但仍检查必需资源与 Windows 平台模块确实进入解包目录。与下文的 Windows 原生 `pnpm package:win` 不同，它只是试包，不代表运行已验证。
 

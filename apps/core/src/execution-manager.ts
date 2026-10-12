@@ -2,10 +2,11 @@ import { basename, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
 import type { IcepakCandidateInput, IcepakProjectOperationInput, IcepakProjectOperationResult, AttemptRecord, RunRecord, ThermalVerdict } from '@thermal-agent/contracts'
-import type { LocalDatabase } from '@thermal-agent/sqlite-store'
+import type { LocalDatabase, ModelPreparationStore } from '@thermal-agent/sqlite-store'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { provesIcepakSolve } from './icepak-readiness.js'
 import { TaskWorkspace } from './task-workspace.js'
+import { IcepakOperationBusyError } from './icepak-operation-lock.js'
 
 export interface StartedExecution {
   run: RunRecord
@@ -21,12 +22,14 @@ export class IcepakExecutionManager {
     private readonly database: LocalDatabase,
     private readonly artifacts: ArtifactStore,
     private readonly plugin: IcepakPluginPort,
+    private readonly modelStore?: ModelPreparationStore,
   ) {
     this.workspace = new TaskWorkspace(home)
     this.recoverInterruptedAttempts()
   }
 
   async startBaseline(taskId: string, input: IcepakProjectOperationInput): Promise<StartedExecution> {
+    if (this.modelStore?.reconcileRecoveredOperation()) throw new IcepakOperationBusyError()
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
     if (task.executionStatus !== 'READY') throw new Error('task must be READY before starting a baseline run')
@@ -35,6 +38,18 @@ export class IcepakExecutionManager {
     }
 
     const uploadedSha = task.requirementSnapshot.intakeVersion === 2 ? task.requirementSnapshot.modelSha256 : null
+    const simulation = task.requirementSnapshot.simulationInput as { preparationId: string; sha256: string; specSha256: string; validationSha256: string; design: string; setup: string } | undefined
+    if (simulation) {
+      const preparation = this.modelStore?.preparation(simulation.preparationId)
+      if (!preparation || preparation.taskId !== taskId || preparation.status !== 'VERIFIED' || preparation.projectSha256 !== simulation.sha256 ||
+        preparation.specSha256 !== simulation.specSha256 || preparation.validationSha256 !== simulation.validationSha256 || uploadedSha !== preparation.projectSha256 ||
+        task.requirementSnapshot.aedtVersion !== preparation.spec.aedtVersion || task.requirementSnapshot.targetTmaxC !== preparation.spec.targetTmaxC ||
+        simulation.design !== preparation.validatedDesign || simulation.setup !== preparation.validatedSetup) throw new Error('CAD Baseline requires the immutable verified model preparation')
+      if (input.version && input.version !== preparation.spec.aedtVersion || input.design && input.design !== simulation.design || input.setup && input.setup !== simulation.setup ||
+        input.flowConvergenceCriterion !== undefined && input.flowConvergenceCriterion !== preparation.spec.flowConvergence.value) throw new Error('CAD Baseline must be configured with the verified version, design, setup and convergence settings')
+      input = { ...input, version: preparation.spec.aedtVersion, design: simulation.design, setup: simulation.setup,
+        expectedProfile: { artifact: { sha256: simulation.sha256 }, design: simulation.design, setup: simulation.setup, aedtVersion: preparation.spec.aedtVersion } }
+    }
     if (uploadedSha && input.projectPath !== task.requirementSnapshot.projectPath) {
       throw new Error('baseline must use the uploaded model bound to this task')
     }
@@ -49,7 +64,7 @@ export class IcepakExecutionManager {
       executorNodeId: task.ownerNodeId,
       pluginId: 'icepak-pyaedt',
       pluginVersion: '0.2.0',
-      parameters: { ...input, projectPath: undefined },
+      parameters: { ...input, projectPath: undefined, ...(simulation ? { modelPreparationId: simulation.preparationId, modelSpecSha256: simulation.specSha256, modelValidationSha256: simulation.validationSha256 } : {}) },
       inputArtifactSha256: inputArtifact.sha256,
     })
     this.database.linkAttemptArtifact({
@@ -79,6 +94,7 @@ export class IcepakExecutionManager {
   }
 
   async startCandidate(taskId: string, input: IcepakCandidateInput): Promise<StartedExecution> {
+    if (this.modelStore?.reconcileRecoveredOperation()) throw new IcepakOperationBusyError()
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
     if (task.executionStatus !== 'WAITING_FOR_APPROVAL' || task.approvalStatus !== 'PENDING' || task.thermalVerdict !== 'FAIL') {
@@ -97,29 +113,37 @@ export class IcepakExecutionManager {
     const baselineResult = JSON.parse(await readFile(this.artifacts.resolveArtifact(resultArtifact.sha256), 'utf8')) as IcepakProjectOperationResult
     if (!baselineResult.metrics || typeof baselineResult.metrics !== 'object') throw new Error('task must have Baseline temperature metrics')
 
+    const plan = input.parameterPlanId ? this.database.getParameterPlan(input.parameterPlanId) : null
+    if (input.preparedProjectSha256 && (!plan || plan.taskId !== taskId || plan.sourceAttemptId !== baselineAttempt.id ||
+      plan.status !== 'STARTING' || plan.verifiedProjectSha256 !== input.preparedProjectSha256)) throw new Error('verified parameter plan is required')
+    if (!input.preparedProjectSha256 && input.fanSpeedRatio === undefined) throw new Error('candidate action is required')
+    const candidateSourceSha = input.preparedProjectSha256 ?? solved.sha256
+    const expectedProfile = plan ? { design: plan.design, setup: plan.setup, aedtVersion: plan.aedtVersion, artifact: { sha256: candidateSourceSha } } : undefined
     const candidateRoot = join(this.workspace.ensure(taskId), 'runs', `candidate-${Date.now()}`)
     const stagedProject = await this.artifacts.materialize(
-      solved.sha256,
+      candidateSourceSha,
       join(candidateRoot, 'input', basename(baselineResult.workingProject || 'Baseline.aedt')),
     )
     const approved = this.database.approveCandidateAction(
-      taskId, input.expectedVersion ?? task.version, `用户批准风扇转速比例 ${input.fanSpeedRatio}`,
+      taskId, input.expectedVersion ?? task.version, plan ? `参数方案 v${plan.revision} · ${plan.author}：${plan.reason}` : `用户批准风扇转速比例 ${input.fanSpeedRatio}`,
     )
     const created = this.database.createRunWithAttempt({
       taskId, kind: 'CANDIDATE', executorNodeId: task.ownerNodeId,
       pluginId: baselineAttempt.pluginId, pluginVersion: baselineAttempt.pluginVersion,
-      parameters: { ...input, expectedVersion: undefined, baselineAttemptId: baselineAttempt.id }, inputArtifactSha256: solved.sha256,
+      parameters: { ...input, expectedProfile, design: baselineResult.project.activeDesign, expectedVersion: undefined, baselineAttemptId: baselineAttempt.id }, inputArtifactSha256: candidateSourceSha,
     })
     this.database.linkAttemptArtifact({
-      attemptId: created.attempt.id, sha256: solved.sha256, role: 'INPUT_PROJECT', createdAt: new Date().toISOString(),
+      attemptId: created.attempt.id, sha256: candidateSourceSha, role: 'INPUT_PROJECT', createdAt: new Date().toISOString(),
     })
     this.database.transitionAttempt(created.attempt.id, 'STARTING', { progressStage: 'plugin_starting' })
-    this.database.transitionTask(taskId, 'RUNNING', approved.version, '已批准的风扇候选开始求解')
+    this.database.transitionTask(taskId, 'RUNNING', approved.version, '已批准的参数候选开始求解')
     const pluginInput = {
       ...input,
       expectedVersion: undefined,
       projectPath: stagedProject,
       baselineMetrics: baselineResult.metrics,
+      expectedProfile,
+      design: baselineResult.project.activeDesign,
       outputDir: join(this.workspace.ensure(taskId), 'runs', created.attempt.id, 'plugin'),
       nonGraphical: true,
     }
@@ -134,6 +158,7 @@ export class IcepakExecutionManager {
   }
 
   async retryLatestRun(taskId: string, expectedVersion: number): Promise<StartedExecution> {
+    if (this.modelStore?.reconcileRecoveredOperation()) throw new IcepakOperationBusyError()
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
     if (!['FAILED', 'CANCELLED'].includes(task.executionStatus)) throw new Error('task must be failed or cancelled before retry')
@@ -298,7 +323,9 @@ export class IcepakExecutionManager {
     }, 15_000)
     heartbeat.unref()
     try {
-      const result = await this.plugin.fanSolve(input, {
+      const solve = (input as IcepakProjectOperationInput & { parameterPlanId?: string }).parameterPlanId
+        ? this.plugin.solveProject.bind(this.plugin) : this.plugin.fanSolve.bind(this.plugin)
+      const result = await solve(input, {
         signal: controller.signal,
         onProgress: stage => {
           try { this.database.heartbeatAttempt(attemptId, stage) } catch { /* ignore terminal races */ }

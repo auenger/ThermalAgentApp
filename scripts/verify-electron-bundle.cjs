@@ -1,5 +1,6 @@
 const { existsSync, readFileSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
+const { createHash } = require('node:crypto')
 const { join } = require('node:path')
 
 function verifyBundle(appOutDir) {
@@ -18,6 +19,17 @@ function verifyBundle(appOutDir) {
     'Windows Node addon': join(unpacked, 'node_modules', 'node-addon-require-builtin-win32-x64-msvc', 'prebuilt', 'win32-x64-msvc-napi-v9.node'),
     'DSH thermal plugin': join(unpacked, 'plugins', 'dsh-thermal', 'dist', 'index.js'),
     'Icepak plugin': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', '__main__.py'),
+    'CAD import module': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', 'cad.py'),
+    'thermal model builder': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', 'model_preparation.py'),
+    'thermal model validator': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', 'model_validation.py'),
+    'managed process lifetime module': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', 'managed.py'),
+    'Windows job boundary module': join(unpacked, 'plugins', 'icepak-pyaedt', 'python', 'thermal_icepak_plugin', 'windows_job.py'),
+    'CAD reference STEP': join(resources, 'cad-samples', 'reference-natural-convection.step'),
+    'CAD reference metadata': join(resources, 'cad-samples', 'reference-natural-convection.json'),
+    'CAD acceptance script': join(resources, 'cad-acceptance', 'scripts', 'accept-cad-model.mjs'),
+    'CAD acceptance contracts': join(resources, 'cad-acceptance', 'packages', 'contracts', 'dist', 'model-preparation.js'),
+    'CAD acceptance contract entry': join(resources, 'cad-acceptance', 'packages', 'contracts', 'dist', 'index.js'),
+    'CAD acceptance contract package': join(resources, 'cad-acceptance', 'packages', 'contracts', 'package.json'),
     'Icepak sample project': join(resources, 'icepak-sample', 'Project1.aedt'),
     'window icon': join(resources, 'brand', 'app.png'),
     'tray icon': join(resources, 'brand', 'tray.png'),
@@ -29,6 +41,9 @@ function verifyBundle(appOutDir) {
   }
   const missing = Object.entries(required).filter(([, path]) => !existsSync(path)).map(([name]) => name)
   if (missing.length) throw new Error(`Packaged app is missing required resources: ${missing.join(', ')}`)
+  const metadata = JSON.parse(readFileSync(required['CAD reference metadata'], 'utf8'))
+  const actual = createHash('sha256').update(readFileSync(required['CAD reference STEP'])).digest('hex')
+  if (metadata.sha256 !== actual || metadata.cadKernelRoundtrip?.passed !== true) throw new Error('Packaged CAD sample hash or geometry roundtrip metadata is invalid')
 }
 
 exports.default = async function afterPack(context) {

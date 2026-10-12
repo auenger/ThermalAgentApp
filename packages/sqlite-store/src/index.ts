@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type {
+  ParameterPlan,
   AttemptRecord,
   AttemptArtifactRecord,
   AttemptStatus,
@@ -39,6 +40,7 @@ import type {
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
 import { OPTIMIZATION_SKILL_SEEDS, optimizationDefinition } from './optimization-skills.js'
+export { ModelPreparationStore } from './model-preparations.js'
 
 type SqliteRow = Record<string, unknown>
 
@@ -115,6 +117,16 @@ export class LocalDatabase {
         version INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS parameter_plans (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        revision INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        UNIQUE(task_id, revision)
+      );
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (14, datetime('now'));
 
       CREATE TABLE IF NOT EXISTS local_identity (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -1195,7 +1207,7 @@ export class LocalDatabase {
         throw new TaskApprovalConflictError('task is not waiting for candidate approval')
       }
       if (current.thermalVerdict !== 'FAIL') {
-        throw new TaskApprovalConflictError('a fan candidate can only continue a converged FAIL baseline')
+        throw new TaskApprovalConflictError('a candidate can only continue a converged FAIL baseline')
       }
       assertTaskTransition(current.executionStatus, 'QUEUED')
       const now = new Date().toISOString()
@@ -1216,6 +1228,59 @@ export class LocalDatabase {
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error
+    }
+  }
+
+  listParameterPlans(taskId: string): ParameterPlan[] {
+    return (this.db.prepare('SELECT record_json FROM parameter_plans WHERE task_id = ? ORDER BY revision DESC').all(taskId) as SqliteRow[])
+      .map(row => JSON.parse(String(row.record_json)) as ParameterPlan)
+  }
+
+  getParameterPlan(id: string): ParameterPlan | null {
+    const row = this.db.prepare('SELECT record_json FROM parameter_plans WHERE id = ?').get(id) as SqliteRow | undefined
+    return row ? JSON.parse(String(row.record_json)) as ParameterPlan : null
+  }
+
+  createParameterPlan(input: Omit<ParameterPlan, 'id' | 'revision' | 'createdAt' | 'updatedAt'>): ParameterPlan {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM parameter_plans WHERE task_id = ?').get(input.taskId) as SqliteRow
+      const now = new Date().toISOString()
+      const plan = { ...input, id: randomUUID(), revision: Number(row.revision), createdAt: now, updatedAt: now }
+      this.db.prepare('INSERT INTO parameter_plans(id, task_id, revision, status, record_json) VALUES (?, ?, ?, ?, ?)')
+        .run(plan.id, plan.taskId, plan.revision, plan.status, JSON.stringify(plan))
+      this.insertEvent({ id: randomUUID(), taskId: plan.taskId, eventType: 'parameters.submitted', fromStatus: null, toStatus: null,
+        reason: `参数方案 v${plan.revision} · ${plan.author}：${plan.reason}`, payload: { planId: plan.id, revision: plan.revision }, createdAt: now })
+      this.db.exec('COMMIT')
+      return plan
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  updateParameterPlan(id: string, expectedStatus: ParameterPlan['status'], patch: Partial<Pick<ParameterPlan,
+    'status' | 'error' | 'verifiedProjectSha256' | 'evidenceSha256' | 'actionResults' | 'executionTaskId' | 'runId'>>): ParameterPlan {
+    const current = this.getParameterPlan(id)
+    if (!current || current.status !== expectedStatus) throw new Error('参数方案状态已变化，请刷新')
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() }
+    const changed = this.db.prepare('UPDATE parameter_plans SET status = ?, record_json = ? WHERE id = ? AND status = ?')
+      .run(updated.status, JSON.stringify(updated), id, expectedStatus)
+    if (changed.changes !== 1) throw new Error('参数方案状态冲突')
+    this.insertEvent({ id: randomUUID(), taskId: current.taskId, eventType: `parameters.${updated.status.toLowerCase()}`,
+      fromStatus: null, toStatus: null, reason: `参数方案 v${current.revision}：${updated.error ?? ({ CHECKING: '验证中', VERIFIED: '保存后重新读取验证通过', FAILED: '失败', STARTING: '开始执行', EXECUTED: '已提交求解' }[updated.status])}`,
+      payload: { planId: id, revision: current.revision, executionTaskId: updated.executionTaskId, runId: updated.runId }, createdAt: updated.updatedAt })
+    return updated
+  }
+
+  recoverParameterPlans(): void {
+    const rows = this.db.prepare("SELECT id FROM parameter_plans WHERE status IN ('CHECKING', 'STARTING')").all() as SqliteRow[]
+    for (const row of rows) {
+      const plan = this.getParameterPlan(String(row.id))!
+      const taskId = plan.executionTaskId ?? plan.taskId
+      const started = plan.status === 'STARTING' ? this.listTaskRuns(taskId).find(run =>
+        this.listRunAttempts(run.id).some(attempt => attempt.parameters.parameterPlanId === plan.id) ||
+        (plan.purpose === 'operating-condition' && plan.executionTaskId && run.kind === 'BASELINE')) : null
+      this.updateParameterPlan(plan.id, plan.status, started
+        ? { status: 'EXECUTED', executionTaskId: taskId, runId: started.id, error: null }
+        : { status: 'FAILED', error: '应用重启中断了验证或启动。请复制为新版本后重试；已创建的运行仍保留在任务记录中。' })
     }
   }
 
