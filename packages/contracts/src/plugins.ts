@@ -1,5 +1,5 @@
 /** The App host API is independent of the DSH and solver protocol versions. */
-export const PLUGIN_HOST_API = 1
+export const PLUGIN_HOST_API = 2
 
 export interface PluginExecutionIdentity {
   pluginId: string
@@ -21,10 +21,11 @@ export function parsePluginExecutionIdentity(value: unknown): PluginExecutionIde
 }
 
 export interface ManagedPluginManifest {
+  pythonRuntime?: { schemaVersion: 1; wheels: Array<{ name: string; version: string; path: string; sha256: string }> }
   schemaVersion: 1
   id: string
   version: string
-  hostApi: 1
+  hostApi: 1 | 2
   kind: 'icepak' | 'report'
   entry: { root: string; module: string }
   capabilities: string[]
@@ -58,7 +59,7 @@ export function parseManagedPluginManifest(value: unknown): ManagedPluginManifes
     return [...input]
   }
   const m = object(value), entry = object(m.entry), compatibility = object(m.compatibility)
-  if (m.schemaVersion !== 1 || m.hostApi !== PLUGIN_HOST_API) throw new Error('Unsupported plugin host API or manifest schema')
+  if (m.schemaVersion !== 1 || m.hostApi !== 1 && m.hostApi !== PLUGIN_HOST_API) throw new Error('Unsupported plugin host API or manifest schema')
   if (typeof m.id !== 'string' || !safeId.test(m.id) || ['constructor', 'prototype'].includes(m.id) ||
     typeof m.version !== 'string' || !version.test(m.version)) throw new Error('Invalid plugin identity')
   if (m.kind !== 'icepak' && m.kind !== 'report') throw new Error('Unsupported plugin kind')
@@ -69,7 +70,25 @@ export function parseManagedPluginManifest(value: unknown): ManagedPluginManifes
     if (!/^[a-z][a-z0-9-]{0,49}$/u.test(key)) throw new Error('Invalid environment version key')
     versions[key] = list(values)
   }
-  return { schemaVersion: 1, hostApi: 1, id: m.id, version: m.version, kind: m.kind,
+  let pythonRuntime: ManagedPluginManifest['pythonRuntime']
+  if (m.pythonRuntime !== undefined) {
+    if (m.hostApi !== 2) throw new Error('Locked Python runtimes require host API 2')
+    const runtime = object(m.pythonRuntime)
+    if (runtime.schemaVersion !== 1 || !Array.isArray(runtime.wheels) || !runtime.wheels.length || runtime.wheels.length > 100) throw new Error('Invalid Python runtime wheel lock')
+    const names = new Set<string>(), paths = new Set<string>()
+    const wheels = runtime.wheels.map(value => {
+      const wheel = object(value)
+      if (typeof wheel.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,99}$/u.test(wheel.name) || names.has(wheel.name) ||
+        typeof wheel.version !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.!+_-]{0,79}$/u.test(wheel.version) ||
+        typeof wheel.path !== 'string' || !/^wheels\/[a-zA-Z0-9_.-]+\.whl$/u.test(wheel.path) || paths.has(wheel.path.toLowerCase()) ||
+        typeof wheel.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(wheel.sha256)) throw new Error('Invalid locked Python wheel')
+      names.add(wheel.name); paths.add(wheel.path.toLowerCase())
+      return { name: wheel.name, version: wheel.version, path: wheel.path, sha256: wheel.sha256 }
+    })
+    pythonRuntime = { schemaVersion: 1, wheels }
+  }
+  return { schemaVersion: 1, hostApi: m.hostApi, id: m.id, version: m.version, kind: m.kind,
+    ...(pythonRuntime ? { pythonRuntime } : {}),
     entry: { root: entry.root, module: entry.module }, capabilities: list(m.capabilities), permissions: list(m.permissions, true),
     compatibility: { platforms: list(compatibility.platforms), architectures: list(compatibility.architectures), versions } }
 }

@@ -4,7 +4,11 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { OFFLINE_PYTHON_PROBE } from '../scripts/verify-windows-runtime.mjs'
+import { OFFLINE_PYTHON_PROBE, verifyPythonEnvironmentCreation } from '../scripts/verify-windows-runtime.mjs'
+
+test('bundled-runtime preflight creates an offline environment with its own pip', () => {
+  verifyPythonEnvironmentCreation(process.env.THERMAL_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : join(process.cwd(), 'plugins', 'report-reportlab', '.venv', 'bin', 'python')))
+})
 
 test('offline Python probe accepts bundled dependencies and rejects system-package fallback', async t => {
   const python = process.env.THERMAL_TEST_PYTHON ?? join(process.cwd(), 'plugins', 'report-reportlab', '.venv', 'bin', 'python')

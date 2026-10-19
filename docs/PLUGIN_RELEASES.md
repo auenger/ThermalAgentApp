@@ -62,6 +62,8 @@ SHA-256 绑定下载的完整 envelope 字节，公钥签名另外绑定 payload
 
 ## 验证与激活
 
+需要独立依赖的包使用 `hostApi: 2` 和 `pythonRuntime` wheel 锁，详见 [独立 Python 依赖](PLUGIN_PYTHON_ENVIRONMENTS.md)。旧 API 1 插件继续使用基础运行时。
+
 - 包签名绑定完整 payload 字节，包括清单、文件路径与文件内容；宿主校验发布者插件范围，拒绝路径穿越、大小写歧义及超量文件。登记后的版本由已有内容寻址存储保护。
 - 报告更新必须先通过 health 身份检查，再在临时目录生成宿主固定样例。独立 Python/PyPDF 读回核对中文标题、任务 ID、FAIL 判定、页数和宿主计算的 PDF 摘要，并检查未审批任务被拒绝。验证结果绑定插件包与本机 Python 环境摘要。
 - 签名 Icepak 包默认仅登记。Windows 客户端显式配置工程样例与求解授权后，可对限定能力包执行工程副本、独立参数读回与双求解比较，再决定是否激活；详见 [工程升级验证](ENGINEERING_PLUGIN_VALIDATION.md)。签名证明来源，不证明仿真兼容。完整 CAD/风扇能力包仍待对应验证器。

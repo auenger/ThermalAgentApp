@@ -29,7 +29,18 @@ export function verifyOfflinePython(python, runtimeRoot, icepakRoot, reportRoot)
     encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PYTHONPATH: '' },
   })
-  return JSON.parse(output.trim().split(/\r?\n/u).at(-1))
+  const result = JSON.parse(output.trim().split(/\r?\n/u).at(-1))
+  verifyPythonEnvironmentCreation(python)
+  return { ...result, isolatedEnvironments: true }
+}
+
+export function verifyPythonEnvironmentCreation(python) {
+  execFileSync(python, ['-I', '-B', '-c', `import os,pathlib,subprocess,sys,tempfile,venv
+with tempfile.TemporaryDirectory(prefix='thermal-runtime-preflight-') as root:
+ venv.EnvBuilder(with_pip=True,symlinks=sys.platform!='win32').create(root)
+ executable=pathlib.Path(root)/('Scripts/python.exe' if sys.platform=='win32' else 'bin/python')
+ subprocess.run([str(executable),'-I','-B','-m','pip','--isolated','--version'],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+`], { timeout: 120_000, stdio: 'pipe', windowsHide: true, env: { ...process.env, PYTHONPATH: '', PIP_CONFIG_FILE: process.platform === 'win32' ? 'nul' : '/dev/null' } })
 }
 
 export function verifyWindowsRuntime(root = resolve(import.meta.dirname, '..')) {

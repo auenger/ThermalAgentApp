@@ -12,6 +12,7 @@ interface PluginStatus {
   updates: { phase: string; checkedAt: string | null; downloaded: number; cached: number; error?: string;
     sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }> }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
+    dependencyMode?: 'isolated' | 'base'; pythonExecutable?: string;
     aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>;
     engineeringValidation?: { configured: boolean; diagnostic?: string; supportedCapabilities: string[] };
     environment?: { platform: string; architecture: string; versions: Record<string, string> };
@@ -23,6 +24,7 @@ const phases: Record<string, string> = { pending: '等待环境检查', checking
 export function PluginSettings() {
   const [status, setStatus] = useState<PluginStatus | null>(null)
   const [busy, setBusy] = useState(false)
+  const [policyBusy, setPolicyBusy] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => {
     let active = true
@@ -44,7 +46,8 @@ export function PluginSettings() {
   }, [])
 
   async function action(operation: string, value: object = {}) {
-    setBusy(true); setError('')
+    const setPending = operation === 'policy' ? setPolicyBusy : setBusy
+    setPending(true); setError('')
     try {
       const response = await fetch(`/api/plugin-runtime/${operation}`, { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) })
@@ -52,14 +55,14 @@ export function PluginSettings() {
       if (!response.ok) throw new Error(result.error?.message ?? '插件操作失败')
       setStatus(result)
     } catch (reason) { setError(reason instanceof Error ? reason.message : '插件操作失败') }
-    finally { setBusy(false) }
+    finally { setPending(false) }
   }
 
   return <section className="task-detail-section" id="plugin-runtime-settings">
     <h2>插件与自适应升级</h2>
     <p>按本机环境检查已信任的插件版本，在任务空闲时切换。已开始的工程作业会继续使用原版本。</p>
     <div className="model-file-actions">
-      <Switch label="自动获取并选择兼容版本" checked={status?.automaticUpdates ?? false} disabled={busy || !status}
+      <Switch label="自动获取并选择兼容版本" checked={status?.automaticUpdates ?? false} disabled={policyBusy || !status}
         onChange={(_, data) => void action('policy', { automaticUpdates: data.checked })} />
       <Button disabled={busy} onClick={() => void action('reconcile')}>{busy ? '正在处理…' : '立即检查环境与插件'}</Button>
     </div>
@@ -92,6 +95,7 @@ export function PluginSettings() {
         {runtime.environment && <p>{runtime.environment.platform} / {runtime.environment.architecture} · Python {runtime.environment.versions.python}
           {runtime.environment.versions.pyaedt && ` · PyAEDT ${runtime.environment.versions.pyaedt === 'missing' ? '未安装' : runtime.environment.versions.pyaedt}`}</p>}
         {runtime.inspectedAt && <p>最近检查：{new Date(runtime.inspectedAt).toLocaleString()}</p>}
+        {runtime.dependencyMode && <p>依赖环境：{runtime.dependencyMode === 'isolated' ? '此插件版本独立安装' : 'App 基础运行时'}</p>}
         {runtime.aedtInstallations?.map(item => <p key={item.source} style={{ overflowWrap: 'anywhere' }}>
           AEDT：{item.root} · {item.status === 'present' ? `已采集 ${item.fileCount} 个原生运行文件` : '未找到主程序'}
         </p>)}

@@ -17,6 +17,7 @@ import { withIcepakOperation } from './icepak-operation-lock.js'
 import { ENGINEERING_CAPABILITIES, engineeringPolicyBinding, parseEngineeringValidationPolicy, validateEngineeringPlugin, type EngineeringValidationPolicy } from './plugin-engineering-validation.js'
 import { realpath } from 'node:fs/promises'
 import { inspectAedtEnvironment } from './aedt-environment.js'
+import { PluginPythonEnvironments } from './plugin-python-environment.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -32,6 +33,8 @@ interface Runtime {
   engineeringDiagnostic?: string
   aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>
   snapshot?: PythonRuntimeSnapshot
+  baseSnapshot?: PythonRuntimeSnapshot
+  snapshots: Map<string, PythonRuntimeSnapshot>
   inspectedAt: number
   pending?: Promise<void>
   result?: PluginAdaptationResult
@@ -53,6 +56,9 @@ export class PluginHost {
   private readonly updates: PluginUpdateFeed
   private engineeringStore?: ModelPreparationStore
   private validationAbort?: AbortController
+  private readonly preparationAborts = new Set<AbortController>()
+  private readonly preparationTasks = new Map<string, Promise<PythonRuntimeSnapshot>>()
+  private readonly pythonEnvironments: PluginPythonEnvironments
   private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
 
   constructor(private readonly home: string, options: {
@@ -68,6 +74,7 @@ export class PluginHost {
     this.refreshMs = options.refreshMs ?? 5 * 60_000
     mkdirSync(home, { recursive: true })
     this.store = new PluginStore(join(home, 'registry'))
+    this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'))
     this.releases = new PluginReleaseInbox(home, this.store, options.publishers ?? (() => {
       const path = join(home, 'publishers.json')
       return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
@@ -83,9 +90,9 @@ export class PluginHost {
     const report = options.report ?? new ReportClient().runtimeConfiguration()
     this.runtimes = {
       icepak: { id: 'icepak-pyaedt', python: icepak.python, source: icepak.pluginRoot, distributions: ['pyaedt'],
-        permissions: ['engineering-copy-write', 'aedt-launch'], imported: false, inspectedAt: 0 },
+        permissions: ['engineering-copy-write', 'aedt-launch'], imported: false, inspectedAt: 0, snapshots: new Map() },
       report: { id: 'report-reportlab', python: report.python, source: report.pluginRoot, distributions: ['reportlab', 'pypdf'],
-        permissions: ['report-write'], imported: false, inspectedAt: 0 },
+        permissions: ['report-write'], imported: false, inspectedAt: 0, snapshots: new Map() },
     }
     const icepakClient = new IcepakPluginClient({ acquireRuntime: expected => this.acquire('icepak', expected) })
     this.icepak = new Proxy(icepakClient, { get: (target, key) => {
@@ -94,6 +101,9 @@ export class PluginHost {
       if (typeof value !== 'function') return value
       return async (...args: unknown[]) => {
         await this.ensure('icepak')
+        if (key === 'pinRuntime' && (args[0] as PluginExecutionIdentity | undefined)?.packageDigest) {
+          await this.prepareSnapshot('icepak', (args[0] as PluginExecutionIdentity).packageDigest!)
+        }
         return value.apply(target, args)
       }
     } })
@@ -140,6 +150,7 @@ export class PluginHost {
     this.savePolicy({ ...this.policy, automaticUpdates: enabled })
     if (!enabled) this.updates.cancel()
     if (!enabled) this.validationAbort?.abort()
+    if (!enabled) for (const controller of this.preparationAborts) controller.abort()
   }
 
   status() {
@@ -148,6 +159,8 @@ export class PluginHost {
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
+        pythonExecutable: runtime.snapshot?.executable,
+        dependencyMode: registry.revisions.find(item => item.digest === registry.active[runtime.id]?.current)?.manifest.pythonRuntime ? 'isolated' : 'base',
         aedtInstallations: runtime.aedtInstallations,
         busy: this.store.isBusy(runtime.id), result: runtime.result, error: runtime.error,
         engineeringValidation: kind === 'icepak' ? { configured: !!runtime.engineeringPolicy, diagnostic: runtime.engineeringDiagnostic,
@@ -204,9 +217,10 @@ export class PluginHost {
     await this.ensure(kind)
     const previous = this.store.list().active[id]?.previous
     if (!previous || !this.trustedDigests().includes(previous)) throw new Error('No trusted previous plugin revision')
+    const snapshot = await this.prepareSnapshot(kind, previous)
     const oldPolicy = this.policy
     this.savePolicy({ ...this.policy, held: { ...this.policy.held, [id]: previous } })
-    try { this.store.rollback(id, runtime.snapshot!.environment, runtime.permissions) }
+    try { this.store.rollback(id, snapshot.environment, runtime.permissions); runtime.snapshot = snapshot }
     catch (error) { this.savePolicy(oldPolicy); throw error }
   }
 
@@ -226,8 +240,10 @@ export class PluginHost {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
     this.validationAbort?.abort()
+    for (const controller of this.preparationAborts) controller.abort()
     await this.updates.close()
     await Promise.allSettled(Object.values(this.runtimes).flatMap(runtime => runtime.pending ? [runtime.pending] : []))
+    await Promise.allSettled([...this.preparationTasks.values()])
   }
 
   private acquire(kind: Kind, expected?: PluginExecutionIdentity) {
@@ -235,7 +251,38 @@ export class PluginHost {
     if (this.closed || !runtime.snapshot || runtime.error) throw new Error(runtime.error ?? 'Plugin runtime is unavailable')
     const digest = expected?.packageDigest ?? this.store.list().active[runtime.id]?.current
     if (!digest || !this.trustedDigests().includes(digest)) throw new Error('Plugin release is no longer trusted')
-    return managedPythonRuntime(this.store, runtime.id, kind, runtime.snapshot.executable, () => runtime.snapshot!.environment)(expected)
+    const snapshot = runtime.snapshots.get(digest)
+    if (!snapshot) throw new Error('Plugin dependency runtime has not been prepared')
+    return managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected)
+  }
+
+  private prepareSnapshot(kind: Kind, digest: string): Promise<PythonRuntimeSnapshot> {
+    const base = this.runtimes[kind].baseSnapshot
+    const key = `${kind}:${digest}:${base ? pluginEnvironmentDigest(base.environment) : 'uninitialized'}`
+    const existing = this.preparationTasks.get(key)
+    if (existing) return existing
+    const pending = this.prepareSnapshotWork(kind, digest).finally(() => {
+      if (this.preparationTasks.get(key) === pending) this.preparationTasks.delete(key)
+    })
+    this.preparationTasks.set(key, pending)
+    return pending
+  }
+
+  private async prepareSnapshotWork(kind: Kind, digest: string): Promise<PythonRuntimeSnapshot> {
+    const runtime = this.runtimes[kind], base = runtime.baseSnapshot
+    if (this.closed || !base || !this.trustedDigests().includes(digest)) throw new Error('No trusted runtime preparation context')
+    const revision = this.store.verify(digest)
+    if (revision.manifest.id !== runtime.id) throw new Error('Runtime package identity mismatch')
+    const controller = new AbortController()
+    this.preparationAborts.add(controller)
+    try {
+      const snapshot = await this.pythonEnvironments.prepare({ digest, root: join(this.home, 'registry', 'packages', digest, revision.manifest.entry.root),
+        manifest: revision.manifest, base, distributions: runtime.distributions, signal: controller.signal })
+      this.store.verify(digest)
+      if (this.closed || controller.signal.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
+      runtime.snapshots.set(digest, snapshot)
+      return snapshot
+    } finally { this.preparationAborts.delete(controller) }
   }
 
   private async ensure(kind: Kind, force = false): Promise<void> {
@@ -316,13 +363,18 @@ export class PluginHost {
       }
       if (this.closed) throw new Error('Plugin host is closed')
       runtime.snapshot = snapshot
+      runtime.baseSnapshot = snapshot
       runtime.aedtInstallations = aedtInstallations
       const registry = this.store.list(), active = registry.active[runtime.id]?.current
       const held = this.policy.held[runtime.id]
       const trusted = this.trustedDigests().filter(digest => !held || digest === held)
       const selected = !this.policy.automaticUpdates && active ? trusted.filter(digest => digest === active) : trusted
       runtime.result = await this.controllers[kind].reconcile(runtime.id, snapshot.environment,
-        { enabled: true, trustedDigests: selected, permissions: runtime.permissions }, lease => this.validateRelease(kind, lease, snapshot))
+        { enabled: true, trustedDigests: selected, permissions: runtime.permissions },
+        lease => this.validateRelease(kind, lease, runtime.snapshots.get(lease.revision.digest)!),
+        async revision => (await this.prepareSnapshot(kind, revision.digest)).environment)
+      const current = this.store.list().active[runtime.id]?.current
+      if (current && runtime.snapshots.has(current)) runtime.snapshot = runtime.snapshots.get(current)
       if (runtime.result.status === 'unavailable') throw new Error(runtime.result.diagnostics.join('; ') || 'No compatible trusted plugin')
       runtime.error = undefined
       runtime.inspectedAt = Date.now()
@@ -333,6 +385,13 @@ export class PluginHost {
   }
 
   private async validateRelease(kind: Kind, lease: PluginLease, snapshot: PythonRuntimeSnapshot) {
+    const checkPolicy = () => {
+      if (this.closed || !this.policy.automaticUpdates && this.store.list().active[this.runtimes[kind].id]?.current !== lease.revision.digest) {
+        throw Object.assign(new Error('Plugin validation deferred by host policy'), { code: 'VALIDATION_DEFERRED' })
+      }
+    }
+    // Initial bundled activation remains available when automatic discovery is disabled.
+    if (!this.policy.builtinDigests.includes(lease.revision.digest)) checkPolicy()
     // Signed reports have a host fixture; external engineering adapters still require an engineering validator.
     if (!this.trustedDigests().includes(lease.revision.digest)) throw new Error('Plugin is not a trusted executable release')
     const acquireRuntime = () => ({ python: snapshot.executable, pluginRoot: lease.root, module: lease.revision.manifest.entry.module, release() {} })
@@ -341,7 +400,7 @@ export class PluginHost {
     const passed = health.pluginId === lease.revision.manifest.id && health.pluginVersion === lease.revision.manifest.version && health.protocolVersion === '1.0.0' && health.status === 'ok'
     const checks = [{ name: 'release-protocol', passed, detail: 'Code identity and protocol only; engineering compatibility and solve readiness require separate evidence' }]
     if (passed && kind === 'report' && !this.policy.builtinDigests.includes(lease.revision.digest)) {
-      checks.push(...await validateReportRelease(client as ReportClient, snapshot.executable, this.home))
+      checks.push(...await validateReportRelease(client as ReportClient, this.runtimes.report.baseSnapshot!.executable, this.home))
     }
     if (passed && kind === 'icepak' && !this.policy.builtinDigests.includes(lease.revision.digest)) {
       if (this.closed || !this.policy.automaticUpdates) throw Object.assign(new Error('Engineering validation deferred by host policy'), { code: 'VALIDATION_DEFERRED' })
@@ -353,12 +412,12 @@ export class PluginHost {
       try {
         const referenceClient = new IcepakPluginClient({ acquireRuntime: () => {
           this.store.verify(reference.revision.digest)
-          return { python: snapshot.executable, pluginRoot: reference.root, module: reference.revision.manifest.entry.module, release() {} }
+          return { python: runtime.baseSnapshot!.executable, pluginRoot: reference.root, module: reference.revision.manifest.entry.module, release() {} }
         } })
         const results = await withIcepakOperation(this.engineeringStore, 'plugin-upgrade-validation', options => validateEngineeringPlugin({
           home: this.home, policy: runtime.engineeringPolicy!, candidate: client as IcepakPluginClient, reference: referenceClient,
           candidateIdentity: { pluginId: lease.revision.manifest.id, pluginVersion: lease.revision.manifest.version, packageDigest: lease.revision.digest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) },
-          referenceIdentity: { pluginId: reference.revision.manifest.id, pluginVersion: reference.revision.manifest.version, packageDigest: reference.revision.digest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) },
+          referenceIdentity: { pluginId: reference.revision.manifest.id, pluginVersion: reference.revision.manifest.version, packageDigest: reference.revision.digest, environmentDigest: pluginEnvironmentDigest(runtime.baseSnapshot!.environment) },
           options: { ...options, signal: controller.signal },
         }))
         this.store.verify(reference.revision.digest)
@@ -369,6 +428,7 @@ export class PluginHost {
         throw error
       } finally { reference.release(); if (this.validationAbort === controller) this.validationAbort = undefined }
     }
+    if (!this.policy.builtinDigests.includes(lease.revision.digest)) checkPolicy()
     return checks
   }
 }

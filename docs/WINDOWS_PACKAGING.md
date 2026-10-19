@@ -44,7 +44,7 @@ Windows 安装测试请先核对下载文件 SHA-256，再依次检查：安装/
 
 1. 在 Windows x64 上安装 Node 22.22.x、pnpm 11、Python 3 和 uv，并运行 `pnpm install`、`pnpm test`。
 2. 准备 `packaging/windows-runtime/node/node.exe`，采用可再分发的 Windows x64 Node 22.22.x 或兼容版本。构建前脚本会检查版本和 DSH CLI 语法。
-3. 准备 `packaging/windows-runtime/python/python.exe` 及完整的 Windows x64 Python 3.10+ 运行目录。在该内置解释器中安装与 Windows AEDT 匹配的 PyAEDT、`reportlab>=4.2,<5`、`pypdf>=5,<7`。如果使用 Python embeddable distribution，需确保其 `._pth` 配置启用所需 `site-packages`。预检以 `python -I` 运行，并要求第三方模块实际从待打包 Python 目录加载；依赖构建机用户 site-packages 或 `PYTHONPATH` 会失败。
+3. 准备 `packaging/windows-runtime/python/python.exe` 及完整的 Windows x64 Python 3.10+ 运行目录。在该内置解释器中安装与 Windows AEDT 匹配的 PyAEDT、`reportlab>=4.2,<5`、`pypdf>=5,<7`，并保留 `venv`、`ensurepip` 及其离线 wheel。预检以 `python -I` 运行，要求第三方模块实际从待打包 Python 目录加载，并实际创建独立环境及运行其中的 pip；依赖用户 site-packages、`PYTHONPATH` 或不支持创建 venv 的精简嵌入发行版会失败。
    DSH 作为 App 的直接依赖随 `node_modules` 打包，配套的散热 Agent 插件也随包提供；用户不需要另行安装 DSH。构建前和 `afterPack` 均校验 DSH CLI、包文件与插件。
 4. 目标用户机器仍需有合法 AEDT/Icepak 安装及相应许可证；安装包不会内置 Ansys 产品或许可证。报告字体优先使用 Windows 系统中的可嵌入中文字体，也可设置 `REPORT_FONT_PATH`。
 5. 安装包会携带 `assets/icepak/Project1.aedt` 作为三级环境自检的固定示例（SHA-256：`c8b1282d07bce6f0d29cfcba6deecf8b7736f66fc6cd026ad726933b3cd003d7`）。这是用户批准公开分发的测试工程。自检只在本机识别到 AEDT/PyAEDT 且独立会话可启动时，在副本上打开工程，不会自动求解，也不能证明任意客户工程兼容。

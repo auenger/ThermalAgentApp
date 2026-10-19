@@ -27,6 +27,7 @@ try {
   await settings.getByText(/获取失败，保留本地可用版本/).waitFor()
   await settings.getByText(/company · 新包 0/).waitFor()
   await settings.getByText(/新的仿真候选暂不自动启用/).waitFor()
+  await settings.getByText('依赖环境：App 基础运行时').first().waitFor()
   const receipts = settings.locator('details').filter({ has: page.locator(':scope > summary', { hasText: '最近验证记录' }) })
   assert.ok(await receipts.count() >= 1)
   await receipts.first().locator(':scope > summary').click()
@@ -34,8 +35,15 @@ try {
   await settings.getByText(/插件摘要：/).first().waitFor()
   const automatic = settings.getByRole('switch', { name: '自动获取并选择兼容版本' })
   assert.equal(await automatic.isChecked(), true)
-  await automatic.click()
+  let releaseCheck
+  const checking = new Promise(resolve => { releaseCheck = resolve })
+  await page.route('**/api/plugin-runtime/reconcile', async route => { await checking; await route.continue() })
+  await settings.getByRole('button', { name: '立即检查环境与插件' }).click()
+  await settings.getByRole('button', { name: '正在处理…' }).waitFor()
+  assert.equal(await automatic.isEnabled(), true, 'policy cancellation stays available during a manual check')
+  try { await automatic.click() } finally { releaseCheck() }
   await settings.getByRole('button', { name: '立即检查环境与插件' }).waitFor()
+  await page.unroute('**/api/plugin-runtime/reconcile')
   assert.equal(await automatic.isChecked(), false)
   const before = networkCalls
   await settings.getByRole('button', { name: '立即检查环境与插件' }).click()
