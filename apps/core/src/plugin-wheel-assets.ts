@@ -6,10 +6,65 @@ import { MAX_PLUGIN_WHEEL_ASSET_BYTES, type ManagedPluginManifest } from '@therm
 
 export type LockedPythonWheel = NonNullable<ManagedPluginManifest['pythonRuntime']>['wheels'][number]
 const CACHE_BYTES = 4 * 1024 ** 3
+const partialName = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.partial$/u
+export interface WheelAssetCollection {
+  checkedAt?: string; removed: number; removedBytes: number; retained: Record<string, number>; deferred?: boolean; error?: string
+}
 
 /** Immutable content-addressed download cache; no wheel is imported or executed here. */
 export class PluginWheelAssets {
+  private uses = 0
+  private collecting?: Promise<WheelAssetCollection>
+  private collection: WheelAssetCollection = { removed: 0, removedBytes: 0, retained: {} }
   constructor(private readonly home: string) {}
+
+  collectionStatus(): WheelAssetCollection { return structuredClone(this.collection) }
+  collectionError(error: unknown): void {
+    this.collection = { checkedAt: new Date().toISOString(), removed: 0, removedBytes: 0, retained: {}, error: error instanceof Error ? error.message : String(error) }
+  }
+
+  private async use<T>(work: () => Promise<T>): Promise<T> {
+    while (this.collecting) await this.collecting
+    this.uses++
+    try { return await work() } finally { this.uses-- }
+  }
+
+  collect(input: { keep: Set<string>; allowed: () => boolean; now?: number }): Promise<WheelAssetCollection> {
+    if (this.collecting) return this.collecting
+    if (this.uses) {
+      this.collection = { checkedAt: new Date().toISOString(), removed: 0, removedBytes: 0, retained: {}, deferred: true }
+      return Promise.resolve(this.collectionStatus())
+    }
+    const pending = this.collectUnused(input).finally(() => { if (this.collecting === pending) this.collecting = undefined })
+    this.collecting = pending
+    return pending
+  }
+
+  private async collectUnused(input: { keep: Set<string>; allowed: () => boolean; now?: number }): Promise<WheelAssetCollection> {
+    const now = input.now ?? Date.now()
+    const result: WheelAssetCollection = { checkedAt: new Date(now).toISOString(), removed: 0, removedBytes: 0, retained: {} }
+    const retain = (reason: string) => { result.retained[reason] = (result.retained[reason] ?? 0) + 1 }
+    try {
+      try { await this.directory() } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; this.collection = result; return this.collectionStatus() }
+      const names = await readdir(this.home)
+      if (names.length > 10_000) throw new Error('Wheel asset inventory exceeds 10000 entries')
+      for (const name of names.sort()) {
+        if (!input.allowed()) break
+        const path = join(this.home, name), stat = await lstat(path)
+        const asset = /^[a-f0-9]{64}\.whl$/u.test(name), partial = partialName.test(name)
+        if (!stat.isFile() || stat.isSymbolicLink() || !asset && !partial) { retain('unknown entry'); continue }
+        if (asset && input.keep.has(name.slice(0, -4))) { retain('required by retained version'); continue }
+        // A newly copied offline asset can carry an old mtime; its creation/change time still protects it.
+        if (now - Math.max(stat.mtimeMs, stat.ctimeMs, stat.birthtimeMs) < (partial ? 1 : 7) * 24 * 60 * 60_000) { retain('retention period'); continue }
+        if (result.removed >= 64) { retain('collection batch limit'); continue }
+        if (!input.allowed()) break
+        await rm(path)
+        result.removed++; result.removedBytes += stat.size
+      }
+    } catch (error) { result.error = error instanceof Error ? error.message : String(error) }
+    this.collection = result
+    return this.collectionStatus()
+  }
 
   private path(wheel: LockedPythonWheel): string {
     if (!wheel.asset || !Number.isSafeInteger(wheel.asset.sizeBytes) || wheel.asset.sizeBytes <= 0 || wheel.asset.sizeBytes > MAX_PLUGIN_WHEEL_ASSET_BYTES ||
@@ -40,12 +95,18 @@ export class PluginWheelAssets {
   }
 
   async has(wheel: LockedPythonWheel, signal?: AbortSignal): Promise<boolean> {
+    return this.use(() => this.hasUnlocked(wheel, signal))
+  }
+  private async hasUnlocked(wheel: LockedPythonWheel, signal?: AbortSignal): Promise<boolean> {
     const path = this.path(wheel)
     try { await this.directory(); await this.verify(path, wheel, signal); return true }
     catch { signal?.throwIfAborted(); return false }
   }
 
   async materialize(wheel: LockedPythonWheel, directory: string, signal?: AbortSignal): Promise<string> {
+    return this.use(() => this.materializeUnlocked(wheel, directory, signal))
+  }
+  private async materializeUnlocked(wheel: LockedPythonWheel, directory: string, signal?: AbortSignal): Promise<string> {
     const source = this.path(wheel)
     try { await this.directory(); await this.verify(source, wheel, signal) }
     catch {
@@ -63,6 +124,9 @@ export class PluginWheelAssets {
 
   async download(wheel: LockedPythonWheel, url: string, fetcher: typeof fetch, signal: AbortSignal,
     consumed: (bytes: number) => void = () => {}): Promise<void> {
+    return this.use(() => this.downloadUnlocked(wheel, url, fetcher, signal, consumed))
+  }
+  private async downloadUnlocked(wheel: LockedPythonWheel, url: string, fetcher: typeof fetch, signal: AbortSignal, consumed: (bytes: number) => void): Promise<void> {
     const target = this.path(wheel), address = new URL(url)
     if (address.protocol !== 'https:' || address.username || address.password || address.hash) throw new Error('Wheel assets require HTTPS without credentials or fragments')
     signal.throwIfAborted()
@@ -73,7 +137,7 @@ export class PluginWheelAssets {
     for (const name of names) {
       const path = join(this.home, name), stat = await lstat(path)
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Invalid wheel asset cache entry')
-      if (/^[a-f0-9-]{36}\.partial$/u.test(name) && Date.now() - stat.mtimeMs > 24 * 60 * 60_000) { await rm(path); continue }
+      if (partialName.test(name) && Date.now() - stat.mtimeMs > 24 * 60 * 60_000) { await rm(path); continue }
       stored += stat.size
     }
     if (stored + wheel.asset!.sizeBytes > CACHE_BYTES) throw new Error('Wheel asset cache exceeds 4 GiB')

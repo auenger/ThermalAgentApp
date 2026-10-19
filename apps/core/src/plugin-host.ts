@@ -1,7 +1,7 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { PluginExecutionIdentity } from '@thermal-agent/contracts'
+import type { ManagedPluginManifest, PluginExecutionIdentity } from '@thermal-agent/contracts'
 import { parseManagedPluginManifest } from '@thermal-agent/contracts'
 import { PluginStore, pluginEnvironmentDigest, type PluginLease } from './plugin-store.js'
 import { PluginAdaptationController, type PluginAdaptationResult } from './plugin-adaptation.js'
@@ -66,6 +66,8 @@ export class PluginHost {
   private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
   private maintenance?: Promise<void>
   private runtimeRequests = 0
+  private assetRetention?: Set<string>
+  private readonly assetRequests = new Map<string, number>()
   private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
 
   constructor(private readonly home: string, options: {
@@ -92,7 +94,7 @@ export class PluginHost {
       this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
         const path = join(home, 'update-sources.json')
         return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
-      }), options.fetchUpdates)
+      }), options.fetchUpdates, 15_000, 300_000, manifest => this.cachedAssetsNeeded(manifest))
       this.controllers = { icepak: new PluginAdaptationController(this.store), report: new PluginAdaptationController(this.store) }
       this.policyPath = join(home, 'policy.json')
       this.policy = existsSync(this.policyPath) ? this.readPolicy() : { automaticUpdates: true, builtinDigests: [], held: {} }
@@ -142,14 +144,49 @@ export class PluginHost {
     this.runtimeReferences = provider
   }
 
+  private cachedAssetsNeeded(manifest: ManagedPluginManifest): boolean {
+    // Without a complete reference scan, embedded hosts keep the previous conservative behavior.
+    if (!this.assetRetention) return true
+    const registry = this.store.list()
+    const revision = registry.revisions.find(item => item.manifest.id === manifest.id && item.manifest.version === manifest.version)
+    if (!revision) return true
+    const active = registry.active[manifest.id]
+    return this.assetRetention.has(revision.digest) || active?.current === revision.digest || active?.previous === revision.digest ||
+      this.policy.held[manifest.id] === revision.digest || (this.assetRequests.get(revision.digest) ?? 0) > Date.now() - 24 * 60 * 60_000
+  }
+
   private async collectRuntimes(): Promise<void> {
     if (this.maintenance) return this.maintenance
-    if (this.closed || !this.policy.automaticUpdates || !this.runtimeReferences || this.preparationTasks.size || this.runtimeRequests ||
+    if (this.closed || !this.policy.automaticUpdates || !this.runtimeReferences || this.preparationTasks.size || this.runtimeRequests || this.updates.status().phase === 'checking' ||
       Object.values(this.runtimes).some(runtime => runtime.pending || this.store.isBusy(runtime.id)) || this.engineeringStore?.reconcileRecoveredOperation()) return
     const work = async () => {
+      this.releaseStatus = this.releases.scan()
       const registry = this.store.list()
       const packages = new Set([...Object.values(registry.active).flatMap(value => [value.current, ...(value.previous ? [value.previous] : [])]), ...Object.values(this.policy.held)])
       const references = await this.runtimeReferences!()
+      const assetPackages = new Set([...packages, ...references.flatMap(identity => identity.packageDigest ? [identity.packageDigest] : [])])
+      const trusted = new Set(this.trustedDigests())
+      for (const [digest, requestedAt] of this.assetRequests) {
+        if (!trusted.has(digest) || requestedAt <= Date.now() - 24 * 60 * 60_000) this.assetRequests.delete(digest)
+        else assetPackages.add(digest)
+      }
+      for (const runtime of Object.values(this.runtimes)) {
+        const latest = registry.revisions.filter(item => trusted.has(item.digest) && item.manifest.id === runtime.id && !item.manifest.version.includes('-') &&
+          item.manifest.compatibility.platforms.includes(process.platform) && item.manifest.compatibility.architectures.includes(process.arch) &&
+          item.manifest.permissions.every(permission => runtime.permissions.includes(permission))).sort((a, b) => {
+            const left = a.manifest.version.split('.').map(Number), right = b.manifest.version.split('.').map(Number)
+            return right[0] - left[0] || right[1] - left[1] || right[2] - left[2]
+          })[0]
+        if (latest) assetPackages.add(latest.digest)
+      }
+      const keepAssets = new Set<string>()
+      for (const digest of assetPackages) {
+        // Remote executor identities may refer to packages never registered on this client.
+        if (!registry.revisions.some(item => item.digest === digest)) continue
+        for (const wheel of this.store.verify(digest).manifest.pythonRuntime?.wheels ?? []) if (wheel.asset) keepAssets.add(wheel.sha256)
+      }
+      this.assetRetention = assetPackages
+      await this.releases.assets.collect({ keep: keepAssets, allowed: () => !this.closed && this.policy.automaticUpdates })
       const environments = new Set(references.flatMap(identity => identity.environmentDigest ? [identity.environmentDigest] : []))
       const directories = new Set(Object.values(this.runtimes).flatMap(runtime => runtime.snapshot ? [resolve(dirname(dirname(runtime.snapshot.executable)))] : []))
       await this.runtimeStorage.collect({ packages, environments, directories,
@@ -163,7 +200,11 @@ export class PluginHost {
         } })
     }
     // Set the gate before asynchronous reference reads; all new execution/preparation waits for it.
-    const pending = work().catch(error => this.runtimeStorage.collectionError(error))
+    const pending = work().catch(error => {
+      this.assetRetention = undefined
+      this.runtimeStorage.collectionError(error)
+      this.releases.assets.collectionError(error)
+    })
     this.maintenance = pending
     try { await pending } finally { if (this.maintenance === pending) this.maintenance = undefined }
   }
@@ -208,6 +249,7 @@ export class PluginHost {
     return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
       runtimeRepairs: this.pythonEnvironments.status(),
       runtimeStorage: this.runtimeStorage.status(),
+      wheelAssets: this.releases.assets.collectionStatus(),
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
@@ -235,6 +277,7 @@ export class PluginHost {
     }
     // Make local versions available first; an unreachable update server must not hold startup hostage.
     if (this.closed) return this.status()
+    while (this.maintenance) await this.maintenance
     const updates = await this.updates.poll(this.policy.automaticUpdates)
     if (updates.downloaded && !this.closed) {
       for (const kind of ['icepak', 'report'] as const) {
@@ -344,8 +387,10 @@ export class PluginHost {
       this.store.verify(digest)
       if (this.closed || controller.signal.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
       runtime.snapshots.set(digest, snapshot)
+      this.assetRequests.delete(digest)
       return snapshot
     } catch (error) {
+      if ((error as { code?: string })?.code === 'RUNTIME_ASSET_UNAVAILABLE') this.assetRequests.set(digest, Date.now())
       runtime.snapshots.delete(digest)
       if (this.store.list().active[runtime.id]?.current === digest) runtime.snapshot = undefined
       throw error

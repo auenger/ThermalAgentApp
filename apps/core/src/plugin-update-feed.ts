@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { MAX_PLUGIN_RELEASE_BYTES, type PluginReleaseInbox } from './plugin-release.js'
+import type { ManagedPluginManifest } from '@thermal-agent/contracts'
 
 export interface PluginUpdateSource { id: string; url: string }
 export interface PluginUpdateStatus {
@@ -54,7 +55,8 @@ export class PluginUpdateFeed {
   private closed = false
   private readonly retryAfter = new Map<string, number>()
   constructor(private readonly inbox: PluginReleaseInbox, private readonly sources: () => unknown,
-    private readonly fetcher: typeof fetch = fetch, private readonly requestTimeoutMs = 15_000, private readonly assetTimeoutMs = 300_000) {}
+    private readonly fetcher: typeof fetch = fetch, private readonly requestTimeoutMs = 15_000, private readonly assetTimeoutMs = 300_000,
+    private readonly cachedAssetsNeeded: (manifest: ManagedPluginManifest) => boolean = () => true) {}
 
   status(): PluginUpdateStatus { return structuredClone(this.state) }
   cancel(): void { this.controller?.abort(new Error('Plugin update cancelled')) }
@@ -126,7 +128,7 @@ export class PluginUpdateFeed {
               if (createHash('sha256').update(bytes).digest('hex') !== release.sha256) throw new Error('Downloaded release digest mismatch')
               // Authenticate the code, publisher scope and wheel descriptors before requesting any asset.
               const { manifest } = this.inbox.describe(bytes)
-              if (manifest.compatibility.platforms.includes(process.platform) && manifest.compatibility.architectures.includes(process.arch)) {
+              if ((!cached || this.cachedAssetsNeeded(manifest)) && manifest.compatibility.platforms.includes(process.platform) && manifest.compatibility.architectures.includes(process.arch)) {
                 for (const wheel of manifest.pythonRuntime?.wheels ?? []) {
                   if (!wheel.asset) continue
                   if (await this.inbox.assets.has(wheel, signal)) { this.state.assetCached++; continue }
