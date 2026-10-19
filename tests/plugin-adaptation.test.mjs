@@ -90,6 +90,24 @@ test('failed newest revision is quarantined and automatic selection falls back t
   assert.equal(failures, 1)
 })
 
+test('repair evidence uses each attempted dependency environment and disappears when a usable revision is found', async t => {
+  const f = await fixture(t)
+  const first = await f.install('1.0.0'), second = await f.install('2.0.0', { versions: ['2'] })
+  const resolveEnvironment = async revision => ({ ...environment, versions: { fixture: revision.digest === second.digest ? '2' : '1' } })
+  const fail = async () => [{ name: 'compatibility', passed: false, detail: 'fixture failure' }]
+  const result = await f.controller.reconcile(f.id, environment, f.policy(), fail, resolveEnvironment)
+  assert.equal(result.status, 'unavailable')
+  const expected = await Promise.all([second, first].map(async revision => ({ basePackageDigest: revision.digest,
+    environmentDigest: pluginEnvironmentDigest(await resolveEnvironment(revision)) })))
+  assert.deepEqual(result.failedCandidates, expected)
+  const repeated = await f.controller.reconcile(f.id, environment, f.policy(), () => { throw new Error('must reuse receipts') }, resolveEnvironment)
+  assert.deepEqual(repeated.failedCandidates, expected)
+  await f.store.validate(first.digest, await resolveEnvironment(first), f.validate)
+  const recovered = await f.controller.reconcile(f.id, environment, f.policy(), f.validate, resolveEnvironment)
+  assert.equal(recovered.digest, first.digest)
+  assert.equal(recovered.failedCandidates, undefined, 'a failed newer version alone does not request repair after fallback succeeds')
+})
+
 test('temporary engineering gate deferral is retriable and does not quarantine the package', async t => {
   const f = await fixture(t)
   const revision = await f.install('1.0.0')

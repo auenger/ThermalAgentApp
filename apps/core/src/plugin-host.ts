@@ -43,6 +43,7 @@ interface Runtime {
   inspectedAt: number
   pending?: Promise<void>
   result?: PluginAdaptationResult
+  repairTargets?: NonNullable<PluginAdaptationResult['failedCandidates']>
   error?: string
   retry?: { consecutiveFailures: number; failedAt: string; nextRetryAt: string; reason: string }
 }
@@ -260,11 +261,12 @@ export class PluginHost {
   repairJobInputs(): RepairJobInputs {
     const registry = this.store.list(), trusted = this.trustedDigests()
     const targets = Object.values(this.runtimes).flatMap(runtime => {
-      const basePackageDigest = registry.active[runtime.id]?.current
-      if (!runtime.error || !runtime.snapshot || this.policy.held[runtime.id] || !basePackageDigest || !trusted.includes(basePackageDigest)) return []
-      const environmentDigest = pluginEnvironmentDigest(runtime.snapshot.environment)
-      return registry.validations.some(item => item.packageDigest === basePackageDigest && item.environmentDigest === environmentDigest && !item.passed)
-        ? [{ basePackageDigest, environmentDigest }] : []
+      if (!runtime.error || this.policy.held[runtime.id]) return []
+      return (runtime.repairTargets ?? []).filter(({ basePackageDigest, environmentDigest }) => {
+        const snapshot = runtime.snapshots.get(basePackageDigest)
+        return trusted.includes(basePackageDigest) && snapshot && pluginEnvironmentDigest(snapshot.environment) === environmentDigest &&
+          registry.validations.some(item => item.packageDigest === basePackageDigest && item.environmentDigest === environmentDigest && !item.passed)
+      }).map(target => ({ ...target }))
     })
     const candidates = this.repairCandidates.list()
     return { enabled: !this.closed && this.policy.automaticUpdates && this.policy.automaticRepair === true && !candidates.errors.length,
@@ -433,8 +435,11 @@ export class PluginHost {
       protocolFailure: (method: string, error: Error) => {
         this.recoveryRequested.add(kind)
         this.invalidateRetry(runtime)
-        if (this.store.list().active[runtime.id]?.current === digest) runtime.error = `Plugin protocol failure: ${error.message}`
         this.store.recordProtocolFailure(digest, pluginEnvironmentDigest(snapshot.environment), method, error.message)
+        if (this.store.list().active[runtime.id]?.current === digest) {
+          runtime.error = `Plugin protocol failure: ${error.message}`
+          runtime.repairTargets = [{ basePackageDigest: digest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) }]
+        }
       },
       release: () => {
         lease.release()
@@ -524,6 +529,7 @@ export class PluginHost {
 
   private async refresh(kind: Kind, rollback?: { current: string; previous: string }): Promise<void> {
     const runtime = this.runtimes[kind]
+    let repairTargets: Runtime['repairTargets'] = []
     try {
       if (!runtime.imported) this.importBuiltin(kind)
       this.releaseStatus = this.releases.scan()
@@ -594,6 +600,7 @@ export class PluginHost {
         catch (error) { this.savePolicy(oldPolicy); throw error }
         runtime.snapshot = previous
         runtime.result = { status: 'activated', digest: rollback.previous, diagnostics: ['Restored the previously validated revision under the current environment'] }
+        runtime.repairTargets = []
         runtime.error = undefined
         runtime.retry = undefined
         runtime.inspectedAt = Date.now()
@@ -607,6 +614,8 @@ export class PluginHost {
         { enabled: true, trustedDigests: selected, permissions: runtime.permissions },
         lease => this.validateRelease(kind, lease, runtime.snapshots.get(lease.revision.digest)!),
         async revision => (await this.prepareSnapshot(kind, revision.digest)).environment)
+      repairTargets = runtime.result.failedCandidates ?? []
+      runtime.repairTargets = repairTargets
       const current = this.store.list().active[runtime.id]?.current
       if (current && runtime.snapshots.has(current)) runtime.snapshot = runtime.snapshots.get(current)
       if (runtime.result.status === 'unavailable') throw new Error(runtime.result.diagnostics.join('; ') || 'No compatible trusted plugin')
@@ -614,6 +623,8 @@ export class PluginHost {
       runtime.retry = undefined
       runtime.inspectedAt = Date.now()
     } catch (error) {
+      // Retain targets during the scan, but never reuse old evidence after an incomplete scan fails.
+      runtime.repairTargets = repairTargets
       runtime.error = error instanceof Error ? error.message : String(error)
       if (!this.closed && (error as { code?: string })?.code !== 'VALIDATION_DEFERRED') {
         const consecutiveFailures = Math.min((runtime.retry?.consecutiveFailures ?? 0) + 1, Number.MAX_SAFE_INTEGER)

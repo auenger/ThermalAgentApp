@@ -229,7 +229,7 @@ test('Core plugin management API uses the managed default client and rejects for
   assert.equal(JSON.parse(await readFile(join(f.home, 'policy.json'), 'utf8')).automaticUpdates, false)
 })
 
-test('host admits automatic repair only for a failed active environment and persists the separate policy', async t => {
+test('host admits automatic repair for a failed active environment and persists the separate policy', async t => {
   const f = await fixture(t)
   const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py'), marker = join(f.root, 'break-protocol')
   await writeFile(entry, (await readFile(entry, 'utf8')).replace('print(json.dumps',
@@ -266,6 +266,64 @@ test('host admits automatic repair only for a failed active environment and pers
   await host.reconcile()
   await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
   assert.equal(dispatched, 1)
+})
+
+test('first-start validation failure admits one repair without an active revision and refresh rejects stale evidence', async t => {
+  const f = await fixture(t)
+  const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py')
+  await writeFile(entry, (await readFile(entry, 'utf8')).replace("'status':'ok'", "'status':'broken'"))
+  let unavailable = false
+  let inspectionGate, inspectionEntered
+  f.options.inspect = async () => {
+    if (inspectionGate) { inspectionEntered(); await inspectionGate }
+    if (unavailable) throw new Error('environment inspection unavailable')
+    return { executable, environment: structuredClone(environment) }
+  }
+  let host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  host.setAutomaticRepair(true)
+  await host.reconcile()
+  assert.equal(host.status().active['icepak-pyaedt'], undefined)
+  const targets = host.repairJobInputs().targets
+  assert.equal(targets.length, 1)
+  const evidence = host.repairContext(targets[0].basePackageDigest).validations
+  assert.ok(evidence.some(item => !item.passed && item.environmentDigest === targets[0].environmentDigest))
+  let dispatched = 0, stopped = 0
+  const transport = { dispatch: async () => { dispatched++ }, stop: async () => { stopped++ } }
+  await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
+  assert.equal(dispatched, 1)
+  await host.close()
+  host = new PluginHost(f.home, f.options)
+  assert.deepEqual(host.repairJobInputs().targets, [], 'restart requires a current environment scan')
+  await host.reconcile()
+  assert.deepEqual(host.repairJobInputs().targets, targets)
+  await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
+  assert.equal(dispatched, 1, 'first-start failure deduplicates across restart')
+  assert.equal(stopped, 1)
+  unavailable = true
+  let resumeInspection, markInspectionEntered
+  const entered = new Promise(resolve => { markInspectionEntered = resolve })
+  inspectionEntered = markInspectionEntered
+  inspectionGate = new Promise(resolve => { resumeInspection = resolve })
+  host.setAutomaticUpdates(false); host.setAutomaticUpdates(true)
+  const checking = host.reconcile()
+  try {
+    await entered
+    assert.deepEqual(host.repairJobInputs().targets, targets, 'a scan in progress does not invalidate a running repair')
+    assert.equal(host.repairJobInputs().canDispatch, false)
+  } finally { resumeInspection(); await checking; inspectionGate = undefined }
+  assert.deepEqual(host.repairJobInputs().targets, [], 'failed new inspection cannot reuse the previous failure as current evidence')
+  unavailable = false
+  host.setAutomaticUpdates(false); host.setAutomaticUpdates(true)
+  await host.reconcile()
+  assert.deepEqual(host.repairJobInputs().targets, targets)
+  const context = host.repairContext(targets[0].basePackageDigest, 'python/adapter/__main__.py')
+  const candidate = host.stageRepairCandidate({ schemaVersion: 1, ...targets[0], version: '1.0.1', reason: 'First-start health compatibility fixture',
+    files: [{ path: context.source.path, content: context.source.content.replace("'status':'broken'", "'status':'ok'") }] })
+  assert.equal(candidate.status, 'awaiting-isolated-validation')
+  assert.equal(host.status().active['icepak-pyaedt'], undefined, 'source staging does not grant execution permission')
+  host.setAutomaticRepair(false)
+  assert.equal(host.repairJobInputs().enabled, false)
 })
 
 test('host repairs missing AEDT launch variables in real Python calls and preserves pinned launch settings', async t => {

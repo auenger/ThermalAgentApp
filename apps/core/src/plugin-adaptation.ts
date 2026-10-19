@@ -11,6 +11,7 @@ export interface PluginAdaptationResult {
   status: 'disabled' | 'busy' | 'unchanged' | 'activated' | 'unavailable'
   digest?: string
   diagnostics: string[]
+  failedCandidates?: Array<{ basePackageDigest: string; environmentDigest: string }>
 }
 
 /** An automatic selection cycle. Call at startup and after environment/catalog changes. */
@@ -31,6 +32,7 @@ export class PluginAdaptationController {
       const snapshot = this.store.list()
       const current = snapshot.active[id]?.current
       const diagnostics: string[] = []
+      const failedCandidates: NonNullable<PluginAdaptationResult['failedCandidates']> = []
       const candidates = snapshot.revisions.filter(revision => {
         if (revision.manifest.id !== id || !trusted.has(revision.digest)) return false
         if (revision.manifest.version.includes('-')) return false // Prereleases require explicit activation.
@@ -55,10 +57,16 @@ export class PluginAdaptationController {
         const envDigest = pluginEnvironmentDigest(selected)
         const receipt = snapshot.validations.find(item => item.packageDigest === candidate.digest && item.environmentDigest === envDigest)
         // Failed revisions are quarantined for this exact environment until explicitly revalidated.
-        if (receipt?.passed === false) { diagnostics.push(`${candidate.manifest.version}: Previous validation failed`); continue }
+        if (receipt?.passed === false) {
+          failedCandidates.push({ basePackageDigest: candidate.digest, environmentDigest: envDigest })
+          diagnostics.push(`${candidate.manifest.version}: Previous validation failed`); continue
+        }
         try {
           const validation = receipt ?? await this.store.validate(candidate.digest, selected, lease => validator(lease, selected))
-          if (!validation.passed) { diagnostics.push(`${candidate.manifest.version}: Validation failed`); continue }
+          if (!validation.passed) {
+            failedCandidates.push({ basePackageDigest: candidate.digest, environmentDigest: envDigest })
+            diagnostics.push(`${candidate.manifest.version}: Validation failed`); continue
+          }
           this.store.activate(candidate.digest, selected, allowed)
           return { status: candidate.digest === current ? 'unchanged' : 'activated', digest: candidate.digest, diagnostics }
         } catch (error) {
@@ -66,7 +74,7 @@ export class PluginAdaptationController {
           diagnostics.push(`${candidate.manifest.version}: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
-      return { status: 'unavailable', diagnostics }
+      return { status: 'unavailable', diagnostics, failedCandidates }
     } finally { this.running = false }
   }
 }
