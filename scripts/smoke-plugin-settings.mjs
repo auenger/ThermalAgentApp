@@ -26,6 +26,7 @@ try {
       detectedAt: '2026-10-19T00:00:00Z', reason: 'UI fixture: dependency file changed; not an AEDT validation certificate' }]
     value.runtimeStorage = { checkedAt: '2026-10-19T00:00:00Z', removed: ['ui-fixture-removed'],
       retained: [{ directory: 'ui-fixture-retained', reason: 'saved workflow or readiness reference' }] }
+    value.runtimes[0].retry = { consecutiveFailures: 2, nextRetryAt: '2026-10-19T00:05:00Z', reason: 'UI retry fixture' }
     value.updates = { ...value.updates, assetDownloaded: 1, assetCached: 3, assetBytes: 34 * 1024 * 1024 }
     await route.fulfill({ response, json: value })
   })
@@ -65,6 +66,7 @@ try {
   await settings.getByText('依赖环境存储', { exact: true }).click()
   await settings.getByText(/历史作业或就绪证据仍有引用/).waitFor()
   await settings.getByText(/依赖资产：已下载 1 个/).waitFor()
+  await settings.getByText(/连续失败 2 次/).waitFor()
   const directory = resolve('.thermal-agent/screenshots/plugin-settings')
   await mkdir(directory, { recursive: true })
   await page.screenshot({ path: join(directory, 'desktop.png'), fullPage: true })

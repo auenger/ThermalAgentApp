@@ -41,6 +41,7 @@ interface Runtime {
   pending?: Promise<void>
   result?: PluginAdaptationResult
   error?: string
+  retry?: { consecutiveFailures: number; failedAt: string; nextRetryAt: string; reason: string }
 }
 
 /** Local Core owns installation, environment facts, policy, and activation. DSH consumes these services. */
@@ -239,7 +240,9 @@ export class PluginHost {
   }
 
   setAutomaticUpdates(enabled: boolean): void {
+    const changed = enabled !== this.policy.automaticUpdates
     this.savePolicy({ ...this.policy, automaticUpdates: enabled })
+    if (changed) for (const runtime of Object.values(this.runtimes)) this.invalidateRetry(runtime)
     if (!enabled) this.updates.cancel()
     if (!enabled) this.validationAbort?.abort()
     if (!enabled) for (const controller of this.preparationAborts) controller.abort()
@@ -258,6 +261,7 @@ export class PluginHost {
         dependencyMode: registry.revisions.find(item => item.digest === registry.active[runtime.id]?.current)?.manifest.pythonRuntime ? 'isolated' : 'base',
         aedtInstallations: runtime.aedtInstallations,
         busy: this.store.isBusy(runtime.id), result: runtime.result, error: runtime.error,
+        retry: runtime.retry ? { ...runtime.retry } : undefined,
         engineeringValidation: kind === 'icepak' ? { configured: !!runtime.engineeringPolicy, diagnostic: runtime.engineeringDiagnostic,
           supportedCapabilities: ENGINEERING_CAPABILITIES } : undefined })), ...registry }
   }
@@ -282,6 +286,7 @@ export class PluginHost {
     const updates = await this.updates.poll(this.policy.automaticUpdates)
     if (updates.downloaded && !this.closed) {
       for (const kind of ['icepak', 'report'] as const) {
+        this.invalidateRetry(this.runtimes[kind])
         try { await this.ensure(kind, true) }
         catch { /* A rejected update keeps diagnostics and the last usable trusted version. */ }
       }
@@ -291,10 +296,12 @@ export class PluginHost {
 
   installRelease(bytes: Buffer) {
     if (this.closed) throw new Error('Plugin host is closed')
+    const known = new Set(this.store.list().revisions.map(revision => revision.digest))
     const release = this.releases.accept(bytes)
     this.releaseStatus = this.releases.scan()
     // Registration never activates a candidate or executes its code.
-    for (const runtime of Object.values(this.runtimes)) runtime.inspectedAt = 0
+    const runtime = Object.values(this.runtimes).find(item => item.id === release.id)
+    if (runtime && !known.has(release.digest)) this.invalidateRetry(runtime)
     return release
   }
 
@@ -311,6 +318,7 @@ export class PluginHost {
 
   async rollback(id: string): Promise<void> {
     const kind = this.kindFor(id), runtime = this.runtimes[kind]
+    runtime.retry = undefined
     await this.ensure(kind)
     const previous = this.store.list().active[id]?.previous
     if (!previous || !this.trustedDigests().includes(previous)) throw new Error('No trusted previous plugin revision')
@@ -322,9 +330,15 @@ export class PluginHost {
   }
 
   resume(id: string): void {
-    this.kindFor(id)
+    const kind = this.kindFor(id), changed = !!this.policy.held[id]
     const held = { ...this.policy.held }; delete held[id]
     this.savePolicy({ ...this.policy, held })
+    if (changed) this.invalidateRetry(this.runtimes[kind])
+  }
+
+  private invalidateRetry(runtime: Runtime): void {
+    runtime.retry = undefined
+    runtime.inspectedAt = 0
   }
 
   private kindFor(id: string): Kind {
@@ -358,7 +372,7 @@ export class PluginHost {
     return { ...lease, spawn: this.runtimeStorage.forExecutable(snapshot.executable),
       protocolFailure: (method: string, error: Error) => {
         this.recoveryRequested.add(kind)
-        runtime.inspectedAt = 0
+        this.invalidateRetry(runtime)
         if (this.store.list().active[runtime.id]?.current === digest) runtime.error = `Plugin protocol failure: ${error.message}`
         this.store.recordProtocolFailure(digest, pluginEnvironmentDigest(snapshot.environment), method, error.message)
       },
@@ -421,6 +435,8 @@ export class PluginHost {
       if (!runtime.snapshot) throw new Error('Plugin runtime is busy before initialization')
       return
     }
+    // Explicit reconciliation also honors this window: Agent loops must not repeatedly hash or launch an unavailable runtime.
+    if (runtime.retry && Date.now() < Date.parse(runtime.retry.nextRetryAt)) throw new Error(runtime.retry.reason)
     // A deferred cycle may have sampled new facts without validating the retained version.
     // Never cache it as ready: the next call must reconcile before acquiring a lease.
     if (!force && runtime.snapshot && !runtime.error && runtime.result?.status !== 'busy' && Date.now() - runtime.inspectedAt < this.refreshMs) return
@@ -505,9 +521,15 @@ export class PluginHost {
       if (current && runtime.snapshots.has(current)) runtime.snapshot = runtime.snapshots.get(current)
       if (runtime.result.status === 'unavailable') throw new Error(runtime.result.diagnostics.join('; ') || 'No compatible trusted plugin')
       runtime.error = undefined
+      runtime.retry = undefined
       runtime.inspectedAt = Date.now()
     } catch (error) {
       runtime.error = error instanceof Error ? error.message : String(error)
+      if (!this.closed && (error as { code?: string })?.code !== 'VALIDATION_DEFERRED') {
+        const consecutiveFailures = Math.min((runtime.retry?.consecutiveFailures ?? 0) + 1, Number.MAX_SAFE_INTEGER)
+        const now = Date.now(), delay = Math.min(30_000 * 2 ** Math.min(consecutiveFailures - 1, 4), 5 * 60_000)
+        runtime.retry = { consecutiveFailures, failedAt: new Date(now).toISOString(), nextRetryAt: new Date(now + delay).toISOString(), reason: runtime.error }
+      }
       throw error
     }
   }

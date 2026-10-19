@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, generateKeyPairSync, sign, createHash } from 'node:crypto'
 import { PluginRuntimeStorage } from '../apps/core/dist/plugin-runtime-storage.js'
 import { PluginHost } from '../apps/core/dist/plugin-host.js'
 import { createCoreApp } from '../apps/core/dist/server.js'
@@ -271,4 +271,68 @@ for (const automatic of [true, false]) test(`runtime protocol quarantine respect
   host = new PluginHost(f.home, f.options)
   assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
   assert.equal(host.status().events.filter(event => event.action === 'runtime-protocol-failed' && event.digest === broken).length, 1)
+})
+
+test('unavailable runtime retries back off across calls and reconcile, then reset on real policy changes', async t => {
+  const f = await fixture(t)
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  let inspections = 0, failing = true
+  const inspect = f.options.inspect
+  const host = new PluginHost(f.home, { ...f.options, inspect: async (python, distributions) => {
+    if (distributions.includes('pyaedt')) { inspections++; if (failing) throw new Error('Python unavailable fixture') }
+    return inspect(python, distributions)
+  } })
+  t.after(() => host.close())
+  await assert.rejects(host.icepak.probeEnvironment(), /Python unavailable/)
+  const first = host.status().runtimes.find(item => item.id === 'icepak-pyaedt').retry
+  assert.equal(Date.parse(first.nextRetryAt) - Date.now(), 30_000)
+  for (let i = 0; i < 4; i++) {
+    await assert.rejects(host.icepak.probeEnvironment(), /Python unavailable/)
+    await host.reconcile()
+  }
+  assert.equal(inspections, 1, 'DSH reconciliation cannot bypass unavailable runtime throttling')
+  host.setAutomaticUpdates(true)
+  await assert.rejects(host.icepak.probeEnvironment(), /Python unavailable/)
+  assert.equal(inspections, 1, 'writing an unchanged policy is not new evidence')
+  for (const expectedDelay of [60_000, 120_000, 240_000, 300_000, 300_000]) {
+    const retry = host.status().runtimes.find(item => item.id === 'icepak-pyaedt').retry
+    t.mock.timers.tick(Date.parse(retry.nextRetryAt) - Date.now())
+    await assert.rejects(host.icepak.probeEnvironment(), /Python unavailable/)
+    assert.equal(Date.parse(host.status().runtimes.find(item => item.id === 'icepak-pyaedt').retry.nextRetryAt) - Date.now(), expectedDelay)
+  }
+  assert.equal(inspections, 6)
+  failing = false
+  host.setAutomaticUpdates(false)
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+  assert.equal(inspections, 7)
+  assert.equal(host.status().runtimes.find(item => item.id === 'icepak-pyaedt').retry, undefined)
+})
+
+
+for (const delivery of ['import', 'feed']) test(`new signed release via ${delivery} bypasses retry delay once; duplicate import does not`, async t => {
+  const f = await fixture(t), { privateKey, publicKey } = generateKeyPairSync('ed25519')
+  let inspections = 0, release
+  const host = new PluginHost(f.home, { ...f.options,
+    updateSources: () => delivery === 'feed' ? [{ id: 'fixture', url: 'https://updates.test/index.json' }] : [],
+    fetchUpdates: async url => url.endsWith('index.json') ? Response.json({ schemaVersion: 1, releases: [{ url: 'release.json', sha256: createHash('sha256').update(release).digest('hex') }] }) : new Response(release),
+    publishers: () => [{ id: 'fixture', pluginIds: ['report-reportlab'], publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }],
+    inspect: async (python, distributions) => {
+      if (distributions.includes('reportlab')) { inspections++; throw new Error('report unavailable fixture') }
+      return f.options.inspect(python, distributions)
+    } })
+  t.after(() => host.close())
+  await assert.rejects(host.report.renderTaskReport({}), /report unavailable/)
+  const source = await f.source('report', '2.0.0')
+  const payload = Buffer.from(JSON.stringify({ schemaVersion: 1, publishedAt: '2026-10-19T00:00:00Z', files: {
+    'plugin.json': (await readFile(join(source.pluginRoot, 'plugin.json'))).toString('base64'),
+    'python/adapter/__main__.py': (await readFile(join(source.pluginRoot, 'adapter', '__main__.py'))).toString('base64'),
+  } }))
+  release = Buffer.from(JSON.stringify({ schemaVersion: 1, publisherId: 'fixture', payload: payload.toString('base64'), signature: sign(null, payload, privateKey).toString('base64') }))
+  if (delivery === 'feed') await host.reconcile()
+  else host.installRelease(release)
+  await assert.rejects(host.report.renderTaskReport({}), /report unavailable/)
+  assert.equal(inspections, 2)
+  host.installRelease(release)
+  await assert.rejects(host.report.renderTaskReport({}), /report unavailable/)
+  assert.equal(inspections, 2)
 })

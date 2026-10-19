@@ -15,6 +15,7 @@ interface PluginStatus {
     assetDownloaded?: number; assetCached?: number; assetBytes?: number;
     sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }> }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
+    retry?: { consecutiveFailures: number; nextRetryAt: string; reason: string };
     dependencyMode?: 'isolated' | 'base'; pythonExecutable?: string;
     aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>;
     engineeringValidation?: { configured: boolean; diagnostic?: string; supportedCapabilities: string[] };
@@ -134,6 +135,7 @@ export function PluginSettings() {
           AEDT：{item.root} · {item.status === 'present' ? `已采集 ${item.fileCount} 个原生运行文件` : '未找到主程序'}
         </p>)}
         {runtime.error && <p role="alert">{runtime.error}</p>}
+        {runtime.retry && <p>本轮检查未完成，后续检查最早于 {new Date(runtime.retry.nextRetryAt).toLocaleString()} 重试（连续失败 {runtime.retry.consecutiveFailures} 次）。发现新版本或更新策略变化后会提前重新检查。</p>}
         {runtime.engineeringValidation && <p>{runtime.engineeringValidation.configured
           ? '工程升级验证已配置：检查参数发现、保存后读回及样例求解；不覆盖 CAD 导入和风扇变更。'
           : '工程升级验证未配置或不可用：新的仿真候选暂不自动启用。'}</p>}
