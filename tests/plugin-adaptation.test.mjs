@@ -21,7 +21,7 @@ async function fixture(t, kind = 'icepak') {
     const source = join(root, version)
     await mkdir(join(source, 'python', 'adapter'), { recursive: true })
     await writeFile(join(source, 'plugin.json'), JSON.stringify({ schemaVersion: 1, hostApi: 1, id, version, kind,
-      entry: { root: 'python', module: 'adapter' }, capabilities: ['environment_probe'], permissions: options.permissions ?? [],
+      entry: { root: 'python', module: 'adapter' }, capabilities: kind === 'report' ? ['render-task-report'] : ['environment_probe'], permissions: options.permissions ?? [],
       compatibility: { platforms: [process.platform], architectures: [process.arch], versions: { fixture: options.versions ?? ['1'] } } }))
     await writeFile(join(source, 'python', 'adapter', '__init__.py'), '')
     await writeFile(join(source, 'python', 'adapter', '__main__.py'), `import json, sys, time\nr=json.loads(sys.stdin.readline())\ntime.sleep(${options.delay ?? 0})\nprint(json.dumps({'id':r['id'],'ok':True,'result':{'pluginId':'${id}','pluginVersion':'${version}'}}))\n`)
@@ -69,6 +69,26 @@ test('failed newest revision is quarantined and automatic selection falls back t
   assert.equal(failures, 1)
   assert.equal((await f.controller.reconcile(f.id, environment, f.policy(), validator)).status, 'unchanged')
   assert.equal(failures, 1)
+})
+
+test('temporary engineering gate deferral is retriable and does not quarantine the package', async t => {
+  const f = await fixture(t)
+  const revision = await f.install('1.0.0')
+  const deferred = await f.controller.reconcile(f.id, environment, f.policy(), async () => {
+    throw Object.assign(new Error('shared gate is busy'), { code: 'VALIDATION_DEFERRED' })
+  })
+  assert.equal(deferred.status, 'busy'); assert.equal(f.store.list().validations.length, 0)
+  assert.equal((await f.controller.reconcile(f.id, environment, f.policy(), f.validate)).digest, revision.digest)
+})
+
+test('managed clients reject undeclared engineering capabilities before executing plugin code', async t => {
+  const f = await fixture(t)
+  await f.install('1.0.0'); await f.controller.reconcile(f.id, environment, f.policy(), f.validate)
+  const client = new IcepakPluginClient({ acquireRuntime: managedPythonRuntime(f.store, f.id, 'icepak', python, () => environment) })
+  await assert.rejects(client.checkChanges({}), /does not declare capability/)
+  await assert.rejects(client.prepareModel({}), /does not declare capability/)
+  assert.equal(f.store.isBusy(f.id), false)
+  assert.equal((await client.probeEnvironment()).pluginVersion, '1.0.0')
 })
 
 test('automatic adaptation respects trust, permission growth, prereleases and live Python work', async t => {

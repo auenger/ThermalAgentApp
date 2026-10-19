@@ -3,7 +3,7 @@ import { basename, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { PluginExecutionIdentity } from '@thermal-agent/contracts'
 import { parseManagedPluginManifest } from '@thermal-agent/contracts'
-import { PluginStore, type PluginLease } from './plugin-store.js'
+import { PluginStore, pluginEnvironmentDigest, type PluginLease } from './plugin-store.js'
 import { PluginAdaptationController, type PluginAdaptationResult } from './plugin-adaptation.js'
 import { managedPythonRuntime } from './plugin-python-runtime.js'
 import { inspectPythonRuntime, type PythonRuntimeSnapshot } from './python-environment.js'
@@ -12,6 +12,10 @@ import { ReportClient, type ReportPort } from './report-client.js'
 import { PluginReleaseInbox, parsePluginPublishers, type PluginPublisher } from './plugin-release.js'
 import { validateReportRelease } from './plugin-report-validation.js'
 import { PluginUpdateFeed } from './plugin-update-feed.js'
+import type { ModelPreparationStore } from '@thermal-agent/sqlite-store'
+import { withIcepakOperation } from './icepak-operation-lock.js'
+import { ENGINEERING_CAPABILITIES, engineeringPolicyBinding, parseEngineeringValidationPolicy, validateEngineeringPlugin, type EngineeringValidationPolicy } from './plugin-engineering-validation.js'
+import { realpath } from 'node:fs/promises'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -22,6 +26,9 @@ interface Runtime {
   distributions: string[]
   permissions: string[]
   imported: boolean
+  builtinDigest?: string
+  engineeringPolicy?: EngineeringValidationPolicy
+  engineeringDiagnostic?: string
   snapshot?: PythonRuntimeSnapshot
   inspectedAt: number
   pending?: Promise<void>
@@ -42,6 +49,8 @@ export class PluginHost {
   private closed = false
   private readonly releases: PluginReleaseInbox
   private readonly updates: PluginUpdateFeed
+  private engineeringStore?: ModelPreparationStore
+  private validationAbort?: AbortController
   private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
 
   constructor(private readonly home: string, options: {
@@ -78,6 +87,7 @@ export class PluginHost {
     }
     const icepakClient = new IcepakPluginClient({ acquireRuntime: expected => this.acquire('icepak', expected) })
     this.icepak = new Proxy(icepakClient, { get: (target, key) => {
+      if (key === 'prepareRuntime') return () => this.ensure('icepak')
       const value = Reflect.get(target, key)
       if (typeof value !== 'function') return value
       return async (...args: unknown[]) => {
@@ -91,6 +101,11 @@ export class PluginHost {
 
   private readonly inspect: typeof inspectPythonRuntime
   private readonly refreshMs: number
+
+  attachEngineeringStore(store: ModelPreparationStore): void {
+    if (this.engineeringStore && this.engineeringStore !== store) throw new Error('Engineering validation store is already attached')
+    this.engineeringStore = store
+  }
 
   private readPolicy(): Policy {
     const value = JSON.parse(readFileSync(this.policyPath, 'utf8')) as Policy
@@ -112,6 +127,7 @@ export class PluginHost {
   setAutomaticUpdates(enabled: boolean): void {
     this.savePolicy({ ...this.policy, automaticUpdates: enabled })
     if (!enabled) this.updates.cancel()
+    if (!enabled) this.validationAbort?.abort()
   }
 
   status() {
@@ -120,7 +136,9 @@ export class PluginHost {
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
-        busy: this.store.isBusy(runtime.id), result: runtime.result, error: runtime.error })), ...registry }
+        busy: this.store.isBusy(runtime.id), result: runtime.result, error: runtime.error,
+        engineeringValidation: kind === 'icepak' ? { configured: !!runtime.engineeringPolicy, diagnostic: runtime.engineeringDiagnostic,
+          supportedCapabilities: ENGINEERING_CAPABILITIES } : undefined })), ...registry }
   }
 
   /** The CLI starts this loop; embedded Core users can rely on lazy first-call initialization. */
@@ -158,7 +176,14 @@ export class PluginHost {
   }
 
   private trustedDigests(): string[] {
-    return [...this.policy.builtinDigests, ...this.releaseStatus.releases.filter(release => release.id === 'report-reportlab').map(release => release.digest)]
+    const revisions = this.store.list().revisions
+    return [...this.policy.builtinDigests, ...this.releaseStatus.releases.filter(release => {
+      if (release.id === 'report-reportlab') return true
+      if (release.id !== 'icepak-pyaedt' || !this.runtimes.icepak.engineeringPolicy || !this.engineeringStore) return false
+      const manifest = revisions.find(revision => revision.digest === release.digest)?.manifest
+      return manifest?.kind === 'icepak' && ENGINEERING_CAPABILITIES.every(capability => manifest.capabilities.includes(capability)) &&
+        manifest.capabilities.every(capability => (ENGINEERING_CAPABILITIES as readonly string[]).includes(capability))
+    }).map(release => release.digest)]
   }
 
   async rollback(id: string): Promise<void> {
@@ -187,6 +212,7 @@ export class PluginHost {
   async close(): Promise<void> {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
+    this.validationAbort?.abort()
     await this.updates.close()
     await Promise.allSettled(Object.values(this.runtimes).flatMap(runtime => runtime.pending ? [runtime.pending] : []))
   }
@@ -225,6 +251,7 @@ export class PluginHost {
       cpSync(runtime.source, join(staging, manifest.entry.root), { recursive: true, dereference: false,
         filter: source => source === runtime.source || !['__pycache__', 'plugin.json', '.DS_Store'].includes(basename(source)) && !/\.py[co]$/u.test(source) })
       const revision = this.store.install(staging)
+      runtime.builtinDigest = revision.digest
       if (!this.policy.builtinDigests.includes(revision.digest)) this.savePolicy({ ...this.policy, builtinDigests: [...this.policy.builtinDigests, revision.digest] })
       runtime.imported = true
     } finally { rmSync(staging, { recursive: true, force: true }) }
@@ -239,6 +266,28 @@ export class PluginHost {
       if (this.closed) throw new Error('Plugin host is closed')
       // A workflow may have started while the environment scan was in flight. Never change its facts.
       if (this.store.isBusy(runtime.id)) { runtime.result = { status: 'busy', diagnostics: [] }; return }
+      if (kind === 'icepak') {
+        // Busy engineering work keeps both the old runtime facts and its process fence.
+        if (this.engineeringStore?.reconcileRecoveredOperation()) {
+          runtime.result = { status: 'busy', diagnostics: ['Waiting for the shared AEDT operation gate'] }
+          if (!runtime.snapshot) throw new Error('Engineering operation is busy before plugin initialization')
+          return
+        }
+        runtime.engineeringPolicy = undefined
+        runtime.engineeringDiagnostic = undefined
+        const path = join(this.home, 'engineering-validation.json')
+        if (existsSync(path)) {
+          try {
+            const policy = parseEngineeringValidationPolicy(JSON.parse(readFileSync(path, 'utf8')))
+            if (!this.engineeringStore || snapshot.environment.platform !== 'win32') throw new Error('Engineering upgrades require the Windows Core operation gate')
+            const match = /^(20\d{2})\.([1-9])$/u.exec(policy.aedtVersion)
+            const install = match ? process.env[`ANSYSEM_ROOT${match[1].slice(2)}${match[2]}`] : undefined
+            if (!install || (await realpath(join(install, 'ansysedt.exe'))).toLowerCase() !== (await realpath(policy.aedtExecutablePath)).toLowerCase()) throw new Error('Configured AEDT executable must match the selected ANSYSEM_ROOT installation')
+            snapshot.environment.versions['engineering-validation'] = await engineeringPolicyBinding(policy, runtime.builtinDigest!)
+            runtime.engineeringPolicy = policy
+          } catch (error) { runtime.engineeringDiagnostic = error instanceof Error ? error.message : String(error) }
+        }
+      }
       runtime.snapshot = snapshot
       const registry = this.store.list(), active = registry.active[runtime.id]?.current
       const held = this.policy.held[runtime.id]
@@ -265,6 +314,32 @@ export class PluginHost {
     const checks = [{ name: 'release-protocol', passed, detail: 'Code identity and protocol only; engineering compatibility and solve readiness require separate evidence' }]
     if (passed && kind === 'report' && !this.policy.builtinDigests.includes(lease.revision.digest)) {
       checks.push(...await validateReportRelease(client as ReportClient, snapshot.executable, this.home))
+    }
+    if (passed && kind === 'icepak' && !this.policy.builtinDigests.includes(lease.revision.digest)) {
+      if (this.closed || !this.policy.automaticUpdates) throw Object.assign(new Error('Engineering validation deferred by host policy'), { code: 'VALIDATION_DEFERRED' })
+      const runtime = this.runtimes.icepak
+      if (!runtime.engineeringPolicy || !this.engineeringStore) throw new Error('Engineering validation is not configured')
+      const reference = this.store.acquireValidationReference(runtime.builtinDigest!)
+      const controller = new AbortController()
+      this.validationAbort = controller
+      try {
+        const referenceClient = new IcepakPluginClient({ acquireRuntime: () => {
+          this.store.verify(reference.revision.digest)
+          return { python: snapshot.executable, pluginRoot: reference.root, module: reference.revision.manifest.entry.module, release() {} }
+        } })
+        const results = await withIcepakOperation(this.engineeringStore, 'plugin-upgrade-validation', options => validateEngineeringPlugin({
+          home: this.home, policy: runtime.engineeringPolicy!, candidate: client as IcepakPluginClient, reference: referenceClient,
+          candidateIdentity: { pluginId: lease.revision.manifest.id, pluginVersion: lease.revision.manifest.version, packageDigest: lease.revision.digest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) },
+          referenceIdentity: { pluginId: reference.revision.manifest.id, pluginVersion: reference.revision.manifest.version, packageDigest: reference.revision.digest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) },
+          options: { ...options, signal: controller.signal },
+        }))
+        this.store.verify(reference.revision.digest)
+        if (controller.signal.aborted) throw Object.assign(new Error('Engineering validation cancelled'), { code: 'VALIDATION_DEFERRED' })
+        checks.push(...results)
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'ICEPAK_BUSY') throw Object.assign(new Error('Engineering validation waits for idle AEDT'), { code: 'VALIDATION_DEFERRED' })
+        throw error
+      } finally { reference.release(); if (this.validationAbort === controller) this.validationAbort = undefined }
     }
     return checks
   }

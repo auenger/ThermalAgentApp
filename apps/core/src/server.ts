@@ -90,6 +90,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
   const plugins = options.pluginHost ?? new PluginHost(join(home, 'plugins'))
+  plugins.attachEngineeringStore(modelStore)
   const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>

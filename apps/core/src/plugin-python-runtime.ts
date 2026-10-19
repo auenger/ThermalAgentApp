@@ -13,6 +13,7 @@ export function managedPythonRuntime(store: PluginStore, id: string, kind: 'icep
     if (lease.revision.manifest.kind !== kind) { lease.release(); throw new Error('Plugin kind does not match the client') }
     if (expected && expected.pluginVersion !== lease.revision.manifest.version) { lease.release(); throw new Error('Pinned plugin version mismatch') }
     return { python, pluginRoot: lease.root, module: lease.revision.manifest.entry.module,
+      capabilities: lease.revision.manifest.capabilities,
       identity: { pluginId: id, pluginVersion: lease.revision.manifest.version, packageDigest: lease.revision.digest, environmentDigest }, release: lease.release }
   }
 }

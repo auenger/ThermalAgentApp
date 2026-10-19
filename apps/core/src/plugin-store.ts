@@ -179,7 +179,10 @@ export class PluginStore {
         this.verify(digest)
         if (!Array.isArray(checks) || !checks.length || checks.some(check => typeof check.name !== 'string' || !check.name ||
           typeof check.passed !== 'boolean' || typeof check.detail !== 'string')) throw new Error('Validator returned invalid checks')
-      } catch (error) { checks = [{ name: 'host-validation', passed: false, detail: error instanceof Error ? error.message : String(error) }] }
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'VALIDATION_DEFERRED') throw error
+        checks = [{ name: 'host-validation', passed: false, detail: error instanceof Error ? error.message : String(error) }]
+      }
       const receipt: PluginValidation = { packageDigest: digest, environmentDigest,
         passed: checks.every(check => check.passed), checks, validatedAt: new Date().toISOString() }
       const next = structuredClone(this.state)
@@ -221,6 +224,13 @@ export class PluginStore {
     const problems = pluginCompatibility(revision.manifest, environment)
     if (problems.length) throw new Error(problems.join('; '))
     if (!this.state.validations[`${digest}:${pluginEnvironmentDigest(environment)}`]?.passed) throw new Error('Plugin environment changed; validation required')
+    return this.acquireRevision(digest)
+  }
+
+  /** Host validators may pin a shipped reference while the same plugin ID is exclusively under validation. */
+  acquireValidationReference(digest: string): PluginLease {
+    const revision = this.verify(digest)
+    if (!this.validating.has(revision.manifest.id)) throw new Error('Reference access requires an active validation')
     return this.acquireRevision(digest)
   }
 

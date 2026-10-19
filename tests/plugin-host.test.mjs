@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { PluginHost } from '../apps/core/dist/plugin-host.js'
 import { createCoreApp } from '../apps/core/dist/server.js'
+import { LocalDatabase, ModelPreparationStore } from '@thermal-agent/sqlite-store'
+import { lockIcepakOperations } from '../apps/core/dist/icepak-operation-lock.js'
 
 const python = process.platform === 'win32' ? 'python' : 'python3'
 const executable = execFileSync(python, ['-I', '-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
@@ -28,6 +30,20 @@ async function fixture(t) {
     inspect: async () => ({ executable, environment: structuredClone(environment) }) }
   return { root, home: join(root, 'plugins'), options, source }
 }
+
+test('a cold managed engineering call initializes before acquiring its operation gate', async t => {
+  const f = await fixture(t)
+  const database = new LocalDatabase(join(f.root, 'cold.sqlite'))
+  const store = new ModelPreparationStore(database.path)
+  const host = new PluginHost(f.home, f.options)
+  host.attachEngineeringStore(store)
+  try {
+    const port = lockIcepakOperations(host.icepak, store)
+    assert.equal((await port.probeLaunchability({})).pluginVersion, '1.0.0')
+    assert.equal(Boolean(store.reconcileRecoveredOperation()), false)
+    assert.equal(host.status().runtimes.find(runtime => runtime.kind === 'icepak').phase, 'ready')
+  } finally { await host.close(); store.close(); database.close() }
+})
 
 test('default clients run immutable registered code, updates and rollback survive app restart', async t => {
   const f = await fixture(t)

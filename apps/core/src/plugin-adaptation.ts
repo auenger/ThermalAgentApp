@@ -51,7 +51,7 @@ export class PluginAdaptationController {
           this.store.activate(candidate.digest, captured, allowed)
           return { status: candidate.digest === current ? 'unchanged' : 'activated', digest: candidate.digest, diagnostics }
         } catch (error) {
-          if (this.store.isBusy(id)) return { status: 'busy', diagnostics }
+          if (this.store.isBusy(id) || (error as { code?: string })?.code === 'VALIDATION_DEFERRED') return { status: 'busy', diagnostics }
           diagnostics.push(`${candidate.manifest.version}: ${error instanceof Error ? error.message : String(error)}`)
         }
       }

@@ -13,8 +13,15 @@ export function pythonPluginEnv(): NodeJS.ProcessEnv {
 
 export interface PythonPluginLease {
   identity?: import('@thermal-agent/contracts').PluginExecutionIdentity
+  capabilities?: readonly string[]
   python: string
   pluginRoot: string
   module: string
   release(): void
+}
+
+export function requirePluginCapability(runtime: PythonPluginLease | undefined, method: string, accepted: readonly string[]): void {
+  if (runtime?.capabilities && method !== 'health' && !accepted.some(capability => runtime.capabilities!.includes(capability))) {
+    throw new Error(`Active plugin does not declare capability for ${method}`)
+  }
 }

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv, type PythonPluginLease } from './python-plugin-launch.js'
+import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, type PythonPluginLease } from './python-plugin-launch.js'
 import type {
   IcepakEnvironmentProbe,
   IcepakProjectOperationInput,
@@ -32,6 +32,8 @@ export interface PluginCallOptions {
 }
 
 export interface IcepakPluginPort {
+  /** Warm managed runtime selection before acquiring the shared engineering-process gate. */
+  prepareRuntime?(): Promise<void>
   pinRuntime?(expected?: PluginExecutionIdentity): Promise<PinnedIcepakPlugin>
   inspectCad?(input: CadPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
   prepareModel?(input: ModelPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
@@ -143,6 +145,13 @@ export class IcepakPluginClient {
   }
 
   private async callWithRuntime(method: string, params: object, options: PluginCallOptions, runtime?: PythonPluginLease): Promise<unknown> {
+    const capabilities: Record<string, string[]> = {
+      probe_environment: ['environment_probe'], probe_launchability: ['environment_probe'],
+      inspect_cad: ['cad_inspect'], prepare_model: ['model_prepare'], validate_model: ['model_validate'],
+      inspect_project: ['project_inspect'], check_changes: ['parameter_check'],
+      fan_check: ['fan_check', 'fan_solve'], solve_project: ['baseline_solve'], fan_solve: ['fan_solve'],
+    }
+    requirePluginCapability(runtime, method, capabilities[method] ?? [])
     if (options.signal?.aborted) throw new Error(`Icepak plugin ${method} was cancelled before launch`)
     const id = randomUUID()
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
