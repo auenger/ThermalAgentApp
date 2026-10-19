@@ -85,6 +85,13 @@ test('engineering signed update reaches independent validation, activation and p
   let host = await f.restart()
   await host.reconcile()
   const builtin = host.status().active['icepak-pyaedt'].current
+  const initialProbe = await host.icepak.probeEnvironment()
+  await writeFile(join(f.root, 'installation', 'solver.dll'), 'TEST DOUBLE native runtime')
+  await host.reconcile()
+  assert.equal(host.status().active['icepak-pyaedt'].current, builtin)
+  assert.notEqual((await host.icepak.probeEnvironment()).pluginRuntime.environmentDigest, initialProbe.pluginRuntime.environmentDigest,
+    'native installation bytes affect builtin identity even without engineering-validation.json')
+  assert.equal(host.isCurrentIcepakRuntime(initialProbe.pluginRuntime), false)
   const good = f.release('1.0.1')
   await host.reconcile()
   assert.equal(host.status().active['icepak-pyaedt'].current, builtin, 'no solve authorization means staging only')

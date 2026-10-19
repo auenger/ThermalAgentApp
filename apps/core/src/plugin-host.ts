@@ -16,6 +16,7 @@ import type { ModelPreparationStore } from '@thermal-agent/sqlite-store'
 import { withIcepakOperation } from './icepak-operation-lock.js'
 import { ENGINEERING_CAPABILITIES, engineeringPolicyBinding, parseEngineeringValidationPolicy, validateEngineeringPlugin, type EngineeringValidationPolicy } from './plugin-engineering-validation.js'
 import { realpath } from 'node:fs/promises'
+import { inspectAedtEnvironment } from './aedt-environment.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -29,6 +30,7 @@ interface Runtime {
   builtinDigest?: string
   engineeringPolicy?: EngineeringValidationPolicy
   engineeringDiagnostic?: string
+  aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>
   snapshot?: PythonRuntimeSnapshot
   inspectedAt: number
   pending?: Promise<void>
@@ -146,6 +148,7 @@ export class PluginHost {
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
+        aedtInstallations: runtime.aedtInstallations,
         busy: this.store.isBusy(runtime.id), result: runtime.result, error: runtime.error,
         engineeringValidation: kind === 'icepak' ? { configured: !!runtime.engineeringPolicy, diagnostic: runtime.engineeringDiagnostic,
           supportedCapabilities: ENGINEERING_CAPABILITIES } : undefined })), ...registry }
@@ -275,6 +278,7 @@ export class PluginHost {
       if (!runtime.imported) this.importBuiltin(kind)
       this.releaseStatus = this.releases.scan()
       const snapshot = await this.inspect(runtime.python, runtime.distributions)
+      let aedtInstallations: Runtime['aedtInstallations']
       if (this.closed) throw new Error('Plugin host is closed')
       // A workflow may have started while the environment scan was in flight. Never change its facts.
       if (this.store.isBusy(runtime.id)) { runtime.result = { status: 'busy', diagnostics: [] }; return }
@@ -287,6 +291,10 @@ export class PluginHost {
         }
         runtime.engineeringPolicy = undefined
         runtime.engineeringDiagnostic = undefined
+        const aedt = await inspectAedtEnvironment(snapshot.environment.platform)
+        snapshot.environment.versions['aedt-installations'] = aedt.digest
+        aedtInstallations = aedt.installations.map(item => ({ source: item.source, root: item.resolvedRoot ?? item.root,
+          status: item.status, fileCount: item.files.length }))
         const path = join(this.home, 'engineering-validation.json')
         if (existsSync(path)) {
           try {
@@ -300,7 +308,15 @@ export class PluginHost {
           } catch (error) { runtime.engineeringDiagnostic = error instanceof Error ? error.message : String(error) }
         }
       }
+      // Filesystem hashing and fixture binding can yield while pinned work acquires a lease.
+      if (this.store.isBusy(runtime.id) || kind === 'icepak' && this.engineeringStore?.reconcileRecoveredOperation()) {
+        runtime.result = { status: 'busy', diagnostics: ['Environment refresh deferred until current work finishes'] }
+        if (!runtime.snapshot) throw new Error('Engineering operation is busy before plugin initialization')
+        return
+      }
+      if (this.closed) throw new Error('Plugin host is closed')
       runtime.snapshot = snapshot
+      runtime.aedtInstallations = aedtInstallations
       const registry = this.store.list(), active = registry.active[runtime.id]?.current
       const held = this.policy.held[runtime.id]
       const trusted = this.trustedDigests().filter(digest => !held || digest === held)

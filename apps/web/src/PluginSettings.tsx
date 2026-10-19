@@ -12,6 +12,7 @@ interface PluginStatus {
   updates: { phase: string; checkedAt: string | null; downloaded: number; cached: number; error?: string;
     sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }> }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
+    aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>;
     engineeringValidation?: { configured: boolean; diagnostic?: string; supportedCapabilities: string[] };
     environment?: { platform: string; architecture: string; versions: Record<string, string> };
     result?: { status: string; diagnostics: string[] } }>
@@ -91,6 +92,9 @@ export function PluginSettings() {
         {runtime.environment && <p>{runtime.environment.platform} / {runtime.environment.architecture} · Python {runtime.environment.versions.python}
           {runtime.environment.versions.pyaedt && ` · PyAEDT ${runtime.environment.versions.pyaedt === 'missing' ? '未安装' : runtime.environment.versions.pyaedt}`}</p>}
         {runtime.inspectedAt && <p>最近检查：{new Date(runtime.inspectedAt).toLocaleString()}</p>}
+        {runtime.aedtInstallations?.map(item => <p key={item.source} style={{ overflowWrap: 'anywhere' }}>
+          AEDT：{item.root} · {item.status === 'present' ? `已采集 ${item.fileCount} 个原生运行文件` : '未找到主程序'}
+        </p>)}
         {runtime.error && <p role="alert">{runtime.error}</p>}
         {runtime.engineeringValidation && <p>{runtime.engineeringValidation.configured
           ? '工程升级验证已配置：检查参数发现、保存后读回及样例求解；不覆盖 CAD 导入和风扇变更。'
