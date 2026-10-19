@@ -74,7 +74,7 @@ SHA-256 绑定下载的完整 envelope 字节，公钥签名另外绑定 payload
 
 签名 envelope 为 `{schemaVersion:1,publisherId,payload,signature}`，payload/signature 使用标准 Base64。签名算法 Ed25519，签名原文为 payload 解码后的原始字节。payload 为 `{schemaVersion:1,publishedAt,files}`，files 把相对路径映射为文件内容 Base64。不得重新序列化 payload 后再校验签名。
 
-单个 JSON 包上限 48 MiB，解码文件总量上限 32 MiB，文件最多 2000 个。离线 inbox 一次最多扫描 200 个签名原件。API 2 可携带离线 wheel，API 3 可引用签名锁绑定的外部 wheel；资产只在验签后下载，安装过程仍禁止网络和源码构建。网络传输测试使用临时证书的真实 TLS 服务，未验收客户代理、私有 CA 部署、完整 Windows PyAEDT 依赖闭包或真实生产更新站点。已完成资产缓存的自动回收仍待实现。
+单个 JSON 包上限 48 MiB，解码文件总量上限 32 MiB，文件最多 2000 个。离线 inbox 一次最多扫描 200 个签名原件。API 2 可携带离线 wheel，API 3 可引用签名锁绑定的外部 wheel；资产只在验签后下载，安装过程仍禁止网络和源码构建。网络传输测试使用临时证书的真实 TLS 服务，未验收客户代理、私有 CA 部署、完整 Windows PyAEDT 依赖闭包或真实生产更新站点。已完成资产缓存按版本和历史引用保留，空闲时回收过期无引用资产，规则见 `PLUGIN_PYTHON_ENVIRONMENTS.md`。
 
 发布者配置属于本机管理员配置，不提供给 DSH 修改的业务工具。DSH 当前仍具有同用户的通用文件能力，这不是对恶意同权限进程的 OS 隔离。自主生成代码的执行隔离和授信流程仍未交付，不可把自签名候选当成可信发布版本。
 

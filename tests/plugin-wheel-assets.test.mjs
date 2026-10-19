@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile, utimes, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PluginWheelAssets } from '../apps/core/dist/plugin-wheel-assets.js'
@@ -47,7 +47,9 @@ test('asset streaming enforces signed bytes, exact sizes, cache integrity and ca
     start(stream) { stream.enqueue(bytes.subarray(0, 1024)); announce() }, cancel() { cancelled = true },
   })), controller.signal)
   const rejected = assert.rejects(pending)
-  await entered; controller.abort(); await rejected
+  await entered
+  assert.equal((await cache.collect({ keep: new Set(), allowed: () => true, now: Date.now() + 8 * 86400000 })).deferred, true)
+  controller.abort(); await rejected
   assert.equal(cancelled, true)
   assert.equal((await readdir(join(home, 'cache'))).some(name => name.endsWith('.partial')), false)
 })
@@ -83,6 +85,14 @@ test('signed asset feeds verify before download, restore missing cache and respe
   assert.equal(assetRequests, 1); assert.equal(store.list().revisions.length, 1); assert.deepEqual(store.list().active, {})
   const reused = await feed.poll(true)
   assert.equal(reused.cached, 1); assert.equal(reused.assetCached, 1); assert.equal(assetRequests, 1)
+  await rm(join(home, 'wheel-assets', `${wheel.sha256}.whl`))
+  let needed = false
+  const selective = new PluginUpdateFeed(inbox, () => [source], fetcher, 15000, 300000, () => needed)
+  assert.equal((await selective.poll(true)).assetDownloaded, 0)
+  assert.equal(assetRequests, 1, 'obsolete cached release must not refill evicted assets')
+  needed = true
+  assert.equal((await selective.poll(true)).assetDownloaded, 1)
+  await selective.close()
   await rm(join(home, 'wheel-assets', `${wheel.sha256}.whl`))
   corrupt = true
   const invalid = await feed.poll(true)
@@ -125,4 +135,39 @@ test('signed asset feeds verify before download, restore missing cache and respe
   stall = false
   assert.equal((await feed.poll(true)).downloaded, 1, 'cancelled asset acquisition can resume without failure cooldown')
   await feed.close()
+})
+
+
+test('asset collection preserves referenced blobs and fresh offline copies, and ages partial files separately', async t => {
+  const { home, cache } = await fixture(t), directory = join(home, 'cache')
+  await mkdir(directory)
+  const kept = descriptor(Buffer.from('required')), unused = descriptor(Buffer.from('obsolete'))
+  for (const wheel of [kept, unused]) await writeFile(join(directory, `${wheel.sha256}.whl`), Buffer.alloc(wheel.asset.sizeBytes))
+  const old = new Date(Date.now() - 30 * 86400000)
+  await utimes(join(directory, `${unused.sha256}.whl`), old, old)
+  const partial = '00000000-0000-0000-0000-000000000001.partial'
+  await writeFile(join(directory, partial), 'part')
+  await writeFile(join(directory, 'administrator-note'), 'keep')
+  if (process.platform !== 'win32') await symlink(join(directory, `${kept.sha256}.whl`), join(directory, `${'f'.repeat(64)}.whl`))
+  const keep = new Set([kept.sha256])
+  assert.equal((await cache.collect({ keep, allowed: () => true })).removed, 0, 'old mtime alone cannot age a fresh copy')
+  const day2 = await cache.collect({ keep, allowed: () => true, now: Date.now() + 2 * 86400000 })
+  assert.equal(day2.removed, 1); assert.equal(day2.removedBytes, 4)
+  const day8 = await cache.collect({ keep, allowed: () => true, now: Date.now() + 8 * 86400000 })
+  assert.equal(day8.removed, 1); assert.equal(day8.removedBytes, unused.asset.sizeBytes)
+  assert.equal(day8.retained['required by retained version'], 1)
+  assert.equal(day8.retained['unknown entry'], process.platform === 'win32' ? 1 : 2)
+  assert.ok((await readdir(directory)).includes(`${kept.sha256}.whl`))
+})
+
+test('asset collection is bounded and stops when update policy is disabled', async t => {
+  const { home, cache } = await fixture(t), directory = join(home, 'cache')
+  await mkdir(directory)
+  for (let i = 0; i < 66; i++) await writeFile(join(directory, `${sha(String(i))}.whl`), 'x')
+  const input = { keep: new Set(), now: Date.now() + 8 * 86400000 }
+  assert.equal((await cache.collect({ ...input, allowed: () => false })).removed, 0)
+  const first = await cache.collect({ ...input, allowed: () => true })
+  assert.equal(first.removed, 64); assert.equal(first.retained['collection batch limit'], 2)
+  assert.equal((await cache.collect({ ...input, allowed: () => true })).removed, 2)
+  assert.deepEqual(await readdir(directory), [])
 })
