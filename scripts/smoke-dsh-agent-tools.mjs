@@ -71,6 +71,7 @@ try {
     'thermal_inspect_project',
     'thermal_plugin_status',
     'thermal_reconcile_plugins',
+    'thermal_install_plugin_release',
     'read',
     'write',
   ]) assert.ok(names.includes(expected), `missing DSH tool: ${expected}`)

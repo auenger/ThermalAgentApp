@@ -10,6 +10,7 @@ import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { type IcepakPluginPort } from './icepak-plugin-client.js'
 import { PluginHost } from './plugin-host.js'
+import { MAX_PLUGIN_RELEASE_BYTES } from './plugin-release.js'
 import { ParameterPlanManager } from './parameter-plans.js'
 import { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
 import { taskModelFiles } from './task-model-files.js'
@@ -224,9 +225,11 @@ async function route(
     }
     if (request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '请使用 POST 更新插件设置')
     assertLocalWriteOrigin(request)
-    const body = await readJsonBody(request, 2048)
+    const body = await readJsonBody(request, url.pathname === '/api/plugin-runtime/install' ? MAX_PLUGIN_RELEASE_BYTES : 2048)
     if (!isObject(body)) throw new RequestError(400, 'INVALID_SETTING', '插件设置必须是对象')
-    if (url.pathname === '/api/plugin-runtime/policy') {
+    if (url.pathname === '/api/plugin-runtime/install') {
+      plugins.installRelease(Buffer.from(JSON.stringify(body)))
+    } else if (url.pathname === '/api/plugin-runtime/policy') {
       if (typeof body.automaticUpdates !== 'boolean') throw new RequestError(400, 'INVALID_SETTING', 'automaticUpdates 必须是布尔值')
       plugins.setAutomaticUpdates(body.automaticUpdates)
     } else if (url.pathname === '/api/plugin-runtime/reconcile') {

@@ -9,6 +9,8 @@ import { managedPythonRuntime } from './plugin-python-runtime.js'
 import { inspectPythonRuntime, type PythonRuntimeSnapshot } from './python-environment.js'
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { ReportClient, type ReportPort } from './report-client.js'
+import { PluginReleaseInbox, parsePluginPublishers, type PluginPublisher } from './plugin-release.js'
+import { validateReportRelease } from './plugin-report-validation.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -37,17 +39,24 @@ export class PluginHost {
   private readonly policyPath: string
   private timer?: NodeJS.Timeout
   private closed = false
+  private readonly releases: PluginReleaseInbox
+  private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
 
   constructor(private readonly home: string, options: {
     icepak?: { python: string; pluginRoot: string }
     report?: { python: string; pluginRoot: string }
     inspect?: typeof inspectPythonRuntime
     refreshMs?: number
+    publishers?: () => PluginPublisher[]
   } = {}) {
     this.inspect = options.inspect ?? inspectPythonRuntime
     this.refreshMs = options.refreshMs ?? 5 * 60_000
     mkdirSync(home, { recursive: true })
     this.store = new PluginStore(join(home, 'registry'))
+    this.releases = new PluginReleaseInbox(home, this.store, options.publishers ?? (() => {
+      const path = join(home, 'publishers.json')
+      return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
+    }))
     this.controllers = { icepak: new PluginAdaptationController(this.store), report: new PluginAdaptationController(this.store) }
     this.policyPath = join(home, 'policy.json')
     this.policy = existsSync(this.policyPath) ? this.readPolicy() : { automaticUpdates: true, builtinDigests: [], held: {} }
@@ -98,7 +107,7 @@ export class PluginHost {
 
   status() {
     const registry = this.store.list()
-    return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held },
+    return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus,
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
@@ -121,11 +130,24 @@ export class PluginHost {
     return this.status()
   }
 
+  installRelease(bytes: Buffer) {
+    if (this.closed) throw new Error('Plugin host is closed')
+    const release = this.releases.accept(bytes)
+    this.releaseStatus = this.releases.scan()
+    // Registration never activates a candidate or executes its code.
+    for (const runtime of Object.values(this.runtimes)) runtime.inspectedAt = 0
+    return release
+  }
+
+  private trustedDigests(): string[] {
+    return [...this.policy.builtinDigests, ...this.releaseStatus.releases.filter(release => release.id === 'report-reportlab').map(release => release.digest)]
+  }
+
   async rollback(id: string): Promise<void> {
     const kind = this.kindFor(id), runtime = this.runtimes[kind]
     await this.ensure(kind)
     const previous = this.store.list().active[id]?.previous
-    if (!previous || !this.policy.builtinDigests.includes(previous)) throw new Error('No trusted previous plugin revision')
+    if (!previous || !this.trustedDigests().includes(previous)) throw new Error('No trusted previous plugin revision')
     const oldPolicy = this.policy
     this.savePolicy({ ...this.policy, held: { ...this.policy.held, [id]: previous } })
     try { this.store.rollback(id, runtime.snapshot!.environment, runtime.permissions) }
@@ -153,6 +175,8 @@ export class PluginHost {
   private acquire(kind: Kind, expected?: PluginExecutionIdentity) {
     const runtime = this.runtimes[kind]
     if (this.closed || !runtime.snapshot || runtime.error) throw new Error(runtime.error ?? 'Plugin runtime is unavailable')
+    const digest = expected?.packageDigest ?? this.store.list().active[runtime.id]?.current
+    if (!digest || !this.trustedDigests().includes(digest)) throw new Error('Plugin release is no longer trusted')
     return managedPythonRuntime(this.store, runtime.id, kind, runtime.snapshot.executable, () => runtime.snapshot!.environment)(expected)
   }
 
@@ -191,6 +215,7 @@ export class PluginHost {
     const runtime = this.runtimes[kind]
     try {
       if (!runtime.imported) this.importBuiltin(kind)
+      this.releaseStatus = this.releases.scan()
       const snapshot = await this.inspect(runtime.python, runtime.distributions)
       if (this.closed) throw new Error('Plugin host is closed')
       // A workflow may have started while the environment scan was in flight. Never change its facts.
@@ -198,10 +223,10 @@ export class PluginHost {
       runtime.snapshot = snapshot
       const registry = this.store.list(), active = registry.active[runtime.id]?.current
       const held = this.policy.held[runtime.id]
-      const trusted = this.policy.builtinDigests.filter(digest => !held || digest === held)
+      const trusted = this.trustedDigests().filter(digest => !held || digest === held)
       const selected = !this.policy.automaticUpdates && active ? trusted.filter(digest => digest === active) : trusted
       runtime.result = await this.controllers[kind].reconcile(runtime.id, snapshot.environment,
-        { enabled: true, trustedDigests: selected, permissions: runtime.permissions }, lease => this.validateBuiltin(kind, lease, snapshot))
+        { enabled: true, trustedDigests: selected, permissions: runtime.permissions }, lease => this.validateRelease(kind, lease, snapshot))
       if (runtime.result.status === 'unavailable') throw new Error(runtime.result.diagnostics.join('; ') || 'No compatible trusted plugin')
       runtime.error = undefined
       runtime.inspectedAt = Date.now()
@@ -211,13 +236,17 @@ export class PluginHost {
     }
   }
 
-  private async validateBuiltin(kind: Kind, lease: PluginLease, snapshot: PythonRuntimeSnapshot) {
-    // Only code delivered with the application enters this validator. New external engineering adapters need their own fixture validation.
-    if (!this.policy.builtinDigests.includes(lease.revision.digest)) throw new Error('Plugin is not a trusted bundled release')
+  private async validateRelease(kind: Kind, lease: PluginLease, snapshot: PythonRuntimeSnapshot) {
+    // Signed reports have a host fixture; external engineering adapters still require an engineering validator.
+    if (!this.trustedDigests().includes(lease.revision.digest)) throw new Error('Plugin is not a trusted executable release')
     const acquireRuntime = () => ({ python: snapshot.executable, pluginRoot: lease.root, module: lease.revision.manifest.entry.module, release() {} })
     const client = kind === 'icepak' ? new IcepakPluginClient({ acquireRuntime }) : new ReportClient({ acquireRuntime })
     const health = await client.health() as { pluginId?: string; pluginVersion?: string; protocolVersion?: string; status?: string }
     const passed = health.pluginId === lease.revision.manifest.id && health.pluginVersion === lease.revision.manifest.version && health.protocolVersion === '1.0.0' && health.status === 'ok'
-    return [{ name: 'bundled-release-protocol', passed, detail: 'Bundled code identity and protocol only; engineering compatibility and solve readiness require separate evidence' }]
+    const checks = [{ name: 'release-protocol', passed, detail: 'Code identity and protocol only; engineering compatibility and solve readiness require separate evidence' }]
+    if (passed && kind === 'report' && !this.policy.builtinDigests.includes(lease.revision.digest)) {
+      checks.push(...await validateReportRelease(client as ReportClient, snapshot.executable, this.home))
+    }
+    return checks
   }
 }

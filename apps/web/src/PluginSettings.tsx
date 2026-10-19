@@ -6,6 +6,7 @@ interface PluginStatus {
   held: Record<string, string>
   active: Record<string, { current: string; previous?: string }>
   revisions: Array<{ digest: string; manifest: { id: string; version: string } }>
+  releases: { releases: Array<{ digest: string; publisherId: string; id: string }>; errors: string[] }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
     environment?: { platform: string; architecture: string; versions: Record<string, string> };
     result?: { status: string; diagnostics: string[] } }>
@@ -56,6 +57,16 @@ export function PluginSettings() {
         onChange={(_, data) => void action('policy', { automaticUpdates: data.checked })} />
       <Button disabled={busy} onClick={() => void action('reconcile')}>{busy ? '正在处理…' : '立即检查环境与插件'}</Button>
     </div>
+    <label>导入签名插件包 <input type="file" accept=".json,application/json" disabled={busy} onChange={event => {
+      const file = event.target.files?.[0]
+      event.target.value = ''
+      if (!file) return
+      if (file.size > 48 * 1024 * 1024) { setError('插件包超过 48 MiB'); return }
+      void file.text().then(text => action('install', JSON.parse(text))).catch(() => setError('无法读取插件包 JSON'))
+    }} /></label>
+    <p>导入后点击检查进行验证。发布者须由本机管理员预先配置；仿真插件候选还需工程兼容性验证。</p>
+    {status?.releases.releases.map(release => <p key={release.digest}>受信发布者：{release.publisherId} · {release.id} · {status.active[release.id]?.current === release.digest ? '当前使用' : '已登记候选'}</p>)}
+    {status?.releases.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}
     {status?.runtimes.map(runtime => {
       const active = status.active[runtime.id]
       const revision = status.revisions.find(item => item.digest === active?.current)
@@ -73,7 +84,7 @@ export function PluginSettings() {
         </div>
       </div>
     })}
-    <p>环境与插件启动检查不代表工程通过或求解许可证可用。当前插件来源：App 内置插件。</p>
+    <p>环境与插件启动检查不代表工程通过或求解许可证可用。插件来源：App 内置插件及已配置发布者的签名包。</p>
     {error && <p role="alert">{error}</p>}
   </section>
 }

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { realpath, stat } from 'node:fs/promises'
+import { realpath, stat, open } from 'node:fs/promises'
 import { basename, extname, join, sep } from 'node:path'
 import { ArtifactStore } from '@thermal-agent/artifact-store'
 import { createTask } from '@thermal-agent/domain'
@@ -13,6 +13,7 @@ import { recommendOptimizationSkills } from './optimization-recommender.js'
 import { CAD_EXTENSIONS } from './model-capabilities.js'
 import { TaskWorkspace } from './task-workspace.js'
 import type { PluginHost } from './plugin-host.js'
+import { MAX_PLUGIN_RELEASE_BYTES } from './plugin-release.js'
 
 export class ThermalToolsBridge {
   private server?: Server
@@ -91,7 +92,24 @@ export class ThermalToolsBridge {
       const status = request.method === 'POST' ? await this.plugins.reconcile() : this.plugins.status()
       writeJson(response, 200, { automaticUpdates: status.automaticUpdates, held: status.held, runtimes: status.runtimes,
         active: status.active, revisions: status.revisions.map(revision => ({ digest: revision.digest, manifest: revision.manifest })),
-        validations: status.validations, scope: 'Trusted installed packages only; no engineering solve or new code execution authorization' })
+        validations: status.validations, releases: status.releases, scope: 'Trusted installed packages only; signed reports require PDF readback; external engineering packages remain candidates' })
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/plugins/install') {
+      if (!this.plugins) throw new Error('Managed plugin host is unavailable')
+      const input = await readJson(request, 4096)
+      if (!isObject(input) || typeof input.path !== 'string') throw new Error('Release path is required')
+      const root = await realpath(this.workspace.root), path = await realpath(input.path)
+      if (!path.startsWith(`${root}${sep}`)) throw new Error('Release must be inside the App workspace')
+      const file = await open(path, 'r')
+      try {
+        const info = await file.stat()
+        if (!info.isFile() || info.size > MAX_PLUGIN_RELEASE_BYTES) throw new Error('Invalid release file')
+        const bytes = Buffer.alloc(info.size + 1)
+        const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
+        if (bytesRead !== info.size) throw new Error('Release file changed while reading')
+        writeJson(response, 200, { release: this.plugins.installRelease(bytes.subarray(0, bytesRead)), activated: false })
+      } finally { await file.close() }
       return
     }
     if (request.method === 'POST' && url.pathname === '/v1/dsh-control/register') {
