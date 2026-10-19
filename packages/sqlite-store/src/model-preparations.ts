@@ -63,6 +63,24 @@ export class ModelPreparationStore {
   inspections(taskId: string) { return this.list<CadInspection>('cad_inspections', taskId) }
   preparations(taskId: string) { return this.list<ModelPreparation>('model_preparations', taskId) }
   jobs(taskId?: string) { return this.list<ModelPreparationJob>('model_preparation_jobs', taskId) }
+  pluginRuntimeArtifacts(): string[] {
+    const values = new Set<string>()
+    let count = 0, bytes = 0
+    for (const row of this.db.prepare('SELECT record_json FROM model_preparation_jobs').iterate()) {
+      const json = String(row.record_json)
+      bytes += Buffer.byteLength(json)
+      if (++count > 100_000 || bytes > 64 * 1024 * 1024) throw new Error('Model runtime reference inventory exceeds limit')
+      const record = JSON.parse(json)
+      if (!Array.isArray(record.artifacts)) throw new Error('Invalid saved model runtime artifact references')
+      for (const artifact of record.artifacts) if (artifact.role === 'PLUGIN_RUNTIME') values.add(artifact.sha256)
+    }
+    // Keep historical artifact links too, even if a repaired job record points at newer evidence.
+    for (const row of this.db.prepare("SELECT DISTINCT sha256 FROM model_preparation_artifacts WHERE role = 'PLUGIN_RUNTIME'").iterate()) {
+      if (++count > 200_000 || values.size >= 100_000) throw new Error('Model runtime reference inventory exceeds limit')
+      values.add(String(row.sha256))
+    }
+    return [...values]
+  }
   requestedJob(taskId: string, kind: string, requestId: string) {
     const row = this.db.prepare('SELECT record_json FROM model_preparation_jobs WHERE task_id = ? AND kind = ? AND request_id = ?').get(taskId, kind, requestId)
     return row ? JSON.parse(String(row.record_json)) as ModelPreparationJob : null

@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawnPython } from './plugin-runtime-storage.js'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
@@ -179,9 +179,8 @@ export class IcepakPluginClient {
     if (options.signal?.aborted) throw new Error(`Icepak plugin ${method} was cancelled before launch`)
     const id = randomUUID()
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
-    const child = spawn(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_icepak_plugin'), {
+    const child = (runtime?.spawn ?? spawnPython)(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_icepak_plugin'), {
       env: { ...pythonPluginEnv(), ...(options.operationId ? { THERMAL_ICEPAK_PARENT_PID: String(process.pid), THERMAL_ICEPAK_MANAGED_ONESHOT: '1' } : {}) },
-      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
     let lineBuffer = ''

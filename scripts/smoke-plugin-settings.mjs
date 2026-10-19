@@ -19,11 +19,13 @@ try {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve))
   browser = await chromium.launch({ headless: true })
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
-  // UI-only recovery history fixture; real rebuild behavior is covered by plugin-isolated-report.test.mjs.
+  // UI-only history fixture; real rebuild/collection behavior is covered by Node integration tests.
   await page.route('**/api/plugin-runtime', async route => {
     const response = await route.fetch(), value = await response.json()
     value.runtimeRepairs = [{ key: 'ui-fixture', packageDigest: 'a'.repeat(64), status: 'prepared',
       detectedAt: '2026-10-19T00:00:00Z', reason: 'UI fixture: dependency file changed; not an AEDT validation certificate' }]
+    value.runtimeStorage = { checkedAt: '2026-10-19T00:00:00Z', removed: ['ui-fixture-removed'],
+      retained: [{ directory: 'ui-fixture-retained', reason: 'saved workflow or readiness reference' }] }
     await route.fulfill({ response, json: value })
   })
   const errors = []
@@ -59,11 +61,13 @@ try {
   assert.equal(plugins.status().automaticUpdates, false)
   await settings.getByText('依赖环境重建记录', { exact: true }).click()
   await settings.getByText(/环境已重新准备/).waitFor()
+  await settings.getByText('依赖环境存储', { exact: true }).click()
+  await settings.getByText(/历史作业或就绪证据仍有引用/).waitFor()
   const directory = resolve('.thermal-agent/screenshots/plugin-settings')
   await mkdir(directory, { recursive: true })
   await page.screenshot({ path: join(directory, 'desktop.png'), fullPage: true })
   await page.setViewportSize({ width: 375, height: 812 })
   assert.equal(await settings.evaluate(element => element.scrollWidth > element.clientWidth + 1), false)
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ success: true, covered: ['source diagnostics', 'engineering policy status', 'validation evidence', 'policy switch', 'disabled network', '375px'] }))
+  console.log(JSON.stringify({ success: true, covered: ['source diagnostics', 'engineering policy status', 'validation evidence', 'policy switch', 'disabled network', 'runtime retention history', '375px'] }))
 } finally { await browser?.close(); await app.close(); await rm(home, { recursive: true, force: true }) }

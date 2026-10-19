@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile, rename, lstat, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -8,6 +7,7 @@ import { terminateProcessTree } from '@thermal-agent/process-control'
 import { inspectPythonRuntime, type PythonRuntimeSnapshot } from './python-environment.js'
 import { pluginEnvironmentDigest } from './plugin-store.js'
 import { pythonEnvironmentFiles } from './python-environment-files.js'
+import { PluginRuntimeStorage, spawnPython, type PythonSpawner } from './plugin-runtime-storage.js'
 
 export interface PythonEnvironmentRepair {
   packageDigest: string; key: string; previousDirectory: string; reason: string; detectedAt: string;
@@ -15,12 +15,13 @@ export interface PythonEnvironmentRepair {
 }
 
 /** No shell, index access, source builds, user pip settings, or mutation of an existing environment. */
-async function command(python: string, args: string[], signal?: AbortSignal): Promise<void> {
+async function command(python: string, args: string[], signal?: AbortSignal, launch: PythonSpawner = spawnPython): Promise<void> {
   if (signal?.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
   await new Promise<void>((resolve, reject) => {
     const env = { ...process.env, PYTHONPATH: '', PIP_CONFIG_FILE: process.platform === 'win32' ? 'nul' : '/dev/null' }
     for (const key of Object.keys(env)) if (/^PIP_/iu.test(key) && key !== 'PIP_CONFIG_FILE') delete env[key as keyof typeof env]
-    const child = spawn(python, ['-I', '-B', ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    const child = launch(python, ['-I', '-B', ...args], { env, windowsHide: true })
+    child.stdin.end()
     let output = '', size = 0, timedOut = false
     const stop = () => terminateProcessTree(child, { force: true })
     const timer = setTimeout(() => { timedOut = true; stop() }, 120_000)
@@ -40,7 +41,7 @@ async function command(python: string, args: string[], signal?: AbortSignal): Pr
 /** A venv is created at its final unique path: Python environments must not be moved after creation. */
 export class PluginPythonEnvironments {
   private readonly repairs = new Map<string, PythonEnvironmentRepair>()
-  constructor(private readonly home: string) {}
+  constructor(private readonly home: string, private readonly storage = new PluginRuntimeStorage(home)) {}
 
   status(): PythonEnvironmentRepair[] { return structuredClone([...this.repairs.values()]) }
 
@@ -68,7 +69,7 @@ export class PluginPythonEnvironments {
     const distributions = [...new Set([...input.distributions, 'pip', 'setuptools', ...lock.wheels.map(w => w.name)])]
     const inspect = async (directory: string) => {
       const python = join(directory, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
-      const snapshot = await inspectPythonRuntime(python, distributions)
+      const snapshot = await inspectPythonRuntime(python, distributions, 60_000, this.storage.forDirectory(directory))
       for (const wheel of lock.wheels) if (snapshot.environment.versions[wheel.name] !== wheel.version) throw new Error(`Installed dependency does not match lock: ${wheel.name}`)
       // Binding the independent host reference also invalidates receipts when the shipped verifier changes.
       snapshot.environment.versions['host-reference'] = pluginEnvironmentDigest(input.base.environment)
@@ -132,6 +133,8 @@ export class PluginPythonEnvironments {
       if (repair) await this.recordRepair({ ...repair, status: 'rebuilding', error: undefined })
       await mkdir(directory)
       created = true
+      this.storage.own(directory, key, input.digest)
+      const run = (python: string, args: string[]) => command(python, args, input.signal, this.storage.forDirectory(directory))
       const wheelPaths: string[] = [], requirements: string[] = []
       for (const wheel of lock.wheels) {
         const path = join(input.root, wheel.path), stat = await lstat(path)
@@ -141,17 +144,18 @@ export class PluginPythonEnvironments {
         wheelPaths.push(path)
         requirements.push(`${pathToFileURL(path).href} --hash=sha256:${wheel.sha256}`)
       }
-      await command(input.base.executable, ['-c',
-        'import sys,zipfile\nn=0;size=0\nfor p in sys.argv[1:]:\n with zipfile.ZipFile(p) as z:\n  n+=len(z.infolist());size+=sum(i.file_size for i in z.infolist())\n  if n>100000 or size>512*1024*1024: raise RuntimeError("Wheel expansion budget exceeded")', ...wheelPaths], input.signal)
-      await command(input.base.executable, ['-m', 'venv', process.platform === 'win32' ? '--copies' : '--symlinks', directory], input.signal)
+      await run(input.base.executable, ['-c',
+        'import sys,zipfile\nn=0;size=0\nfor p in sys.argv[1:]:\n with zipfile.ZipFile(p) as z:\n  n+=len(z.infolist());size+=sum(i.file_size for i in z.infolist())\n  if n>100000 or size>512*1024*1024: raise RuntimeError("Wheel expansion budget exceeded")', ...wheelPaths])
+      await run(input.base.executable, ['-m', 'venv', process.platform === 'win32' ? '--copies' : '--symlinks', directory])
       const python = join(directory, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
       const requirementsPath = join(directory, 'locked-requirements.txt')
       await writeFile(requirementsPath, `${requirements.join('\n')}\n`, { flag: 'wx', mode: 0o600 })
-      await command(python, ['-m', 'pip', '--isolated', 'install', '--prefix', directory, '--no-user', '--no-index', '--no-deps',
-        '--require-hashes', '--only-binary=:all:', '--no-compile', '--no-cache-dir', '--disable-pip-version-check', '-r', requirementsPath], input.signal)
-      await command(python, ['-m', 'pip', '--isolated', 'check', '--disable-pip-version-check'], input.signal)
+      await run(python, ['-m', 'pip', '--isolated', 'install', '--prefix', directory, '--no-user', '--no-index', '--no-deps',
+        '--require-hashes', '--only-binary=:all:', '--no-compile', '--no-cache-dir', '--disable-pip-version-check', '-r', requirementsPath])
+      await run(python, ['-m', 'pip', '--isolated', 'check', '--disable-pip-version-check'])
       const snapshot = await inspect(directory)
       const filesDigest = await pythonEnvironmentFiles(directory, input.signal)
+      this.storage.own(directory, key, input.digest, pluginEnvironmentDigest(snapshot.environment))
       if (input.signal?.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
       const temporary = join(this.home, `${key}-${randomUUID()}.tmp`)
       await writeFile(temporary, JSON.stringify({ schemaVersion: 2, key, directory: name, filesDigest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) }), { flag: 'wx', mode: 0o600 })
@@ -160,7 +164,7 @@ export class PluginPythonEnvironments {
       if (repair) await this.recordRepair({ ...repair, status: 'prepared', replacementDirectory: name }).catch(() => {})
       return snapshot
     } catch (error) {
-      if (created) await rm(directory, { recursive: true, force: true })
+      if (created) { await rm(directory, { recursive: true, force: true }); this.storage.forget(directory) }
       if (!['VALIDATION_DEFERRED', 'RUNTIME_RETRY_DEFERRED'].includes((error as { code?: string })?.code ?? '')) {
         await writeFile(failurePath, JSON.stringify({ at: Date.now(), error: error instanceof Error ? error.message : String(error) }), { mode: 0o600 })
       }

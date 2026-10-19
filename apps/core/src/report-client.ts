@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawnPython } from './plugin-runtime-storage.js'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -69,9 +69,8 @@ export class ReportClient implements ReportPort {
   private async callWithRuntime(method: string, params: object, runtime?: PythonPluginLease): Promise<unknown> {
     requirePluginCapability(runtime, method, ['render-task-report', 'render_task_report'])
     const id = randomUUID()
-    const child = spawn(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_report_plugin'), {
+    const child = (runtime?.spawn ?? spawnPython)(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_report_plugin'), {
       env: pythonPluginEnv(),
-      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
     let stdout = ''

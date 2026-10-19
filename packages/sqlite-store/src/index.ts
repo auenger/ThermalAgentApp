@@ -1634,6 +1634,29 @@ export class LocalDatabase {
     return this.getAttempt(id) as AttemptRecord
   }
 
+  /** All saved attempts, including completed work, can be sources for later retries/candidates. */
+  pluginRuntimeRetention(): { identities: PluginExecutionIdentity[]; resultArtifacts: string[] } {
+    const identities: PluginExecutionIdentity[] = [], resultArtifacts: string[] = []
+    let count = 0, bytes = 0
+    for (const row of this.db.prepare('SELECT parameters_json FROM attempts UNION ALL SELECT parameters_json FROM remote_jobs').iterate()) {
+      const json = String(row.parameters_json)
+      bytes += Buffer.byteLength(json)
+      if (++count > 100_000 || bytes > 64 * 1024 * 1024) throw new Error('Saved runtime reference inventory exceeds limit')
+      const identity = parsePluginExecutionIdentity(JSON.parse(json).pluginRuntime)
+      if (identity) identities.push(identity)
+    }
+    for (const row of this.db.prepare('SELECT plugin_runtime_json FROM icepak_readiness WHERE plugin_runtime_json IS NOT NULL').iterate()) {
+      if (++count > 100_000) throw new Error('Saved runtime reference inventory exceeds limit')
+      const identity = parsePluginExecutionIdentity(JSON.parse(String(row.plugin_runtime_json)))
+      if (identity) identities.push(identity)
+    }
+    for (const row of this.db.prepare('SELECT DISTINCT result_sha256 FROM remote_jobs WHERE result_sha256 IS NOT NULL').iterate()) {
+      if (++count > 100_000) throw new Error('Saved runtime reference inventory exceeds limit')
+      resultArtifacts.push(String(row.result_sha256))
+    }
+    return { identities, resultArtifacts }
+  }
+
   upsertArtifact(artifact: ArtifactRecord): ArtifactRecord {
     this.db.prepare(`
       INSERT INTO artifacts(sha256, size_bytes, media_type, original_name, relative_path, created_at)

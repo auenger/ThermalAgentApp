@@ -10,6 +10,7 @@ import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
 import { type IcepakPluginPort } from './icepak-plugin-client.js'
 import { PluginHost } from './plugin-host.js'
+import { pluginRuntimeReferences } from './plugin-runtime-references.js'
 import { MAX_PLUGIN_RELEASE_BYTES } from './plugin-release.js'
 import { ParameterPlanManager } from './parameter-plans.js'
 import { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
@@ -94,6 +95,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
   plugins.attachEngineeringStore(modelStore)
+  plugins.attachRuntimeReferences(() => pluginRuntimeReferences(database, modelStore, artifacts))
   const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>

@@ -1,5 +1,5 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { PluginExecutionIdentity } from '@thermal-agent/contracts'
 import { parseManagedPluginManifest } from '@thermal-agent/contracts'
@@ -19,6 +19,7 @@ import { realpath } from 'node:fs/promises'
 import { inspectAedtEnvironment } from './aedt-environment.js'
 import { PluginPythonEnvironments } from './plugin-python-environment.js'
 import { PluginHomeOwner } from './plugin-home-owner.js'
+import { PluginRuntimeStorage } from './plugin-runtime-storage.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -61,6 +62,10 @@ export class PluginHost {
   private readonly preparationAborts = new Set<AbortController>()
   private readonly preparationTasks = new Map<string, Promise<PythonRuntimeSnapshot>>()
   private readonly pythonEnvironments: PluginPythonEnvironments
+  private readonly runtimeStorage: PluginRuntimeStorage
+  private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
+  private maintenance?: Promise<void>
+  private runtimeRequests = 0
   private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
 
   constructor(private readonly home: string, options: {
@@ -78,7 +83,8 @@ export class PluginHost {
     this.owner = new PluginHomeOwner(home)
     try {
       this.store = new PluginStore(join(home, 'registry'))
-      this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'))
+      this.runtimeStorage = new PluginRuntimeStorage(join(home, 'python-environments'))
+      this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'), this.runtimeStorage)
       this.releases = new PluginReleaseInbox(home, this.store, options.publishers ?? (() => {
         const path = join(home, 'publishers.json')
         return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
@@ -104,15 +110,22 @@ export class PluginHost {
         const value = Reflect.get(target, key)
         if (typeof value !== 'function') return value
         return async (...args: unknown[]) => {
-          await this.ensure('icepak')
-          if (key === 'pinRuntime' && (args[0] as PluginExecutionIdentity | undefined)?.packageDigest) {
-            await this.prepareSnapshot('icepak', (args[0] as PluginExecutionIdentity).packageDigest!)
-          }
-          return value.apply(target, args)
+          this.runtimeRequests++
+          try {
+            await this.ensure('icepak')
+            if (key === 'pinRuntime' && (args[0] as PluginExecutionIdentity | undefined)?.packageDigest) {
+              await this.prepareSnapshot('icepak', (args[0] as PluginExecutionIdentity).packageDigest!)
+            }
+            return await value.apply(target, args)
+          } finally { this.runtimeRequests-- }
         }
       } })
       const reporter = new ReportClient({ acquireRuntime: () => this.acquire('report') })
-      this.report = { renderTaskReport: async input => { await this.ensure('report'); return reporter.renderTaskReport(input) } }
+      this.report = { renderTaskReport: async input => {
+        this.runtimeRequests++
+        try { await this.ensure('report'); return await reporter.renderTaskReport(input) }
+        finally { this.runtimeRequests-- }
+      } }
     } catch (error) { this.owner.release(); throw error }
   }
 
@@ -122,6 +135,37 @@ export class PluginHost {
   attachEngineeringStore(store: ModelPreparationStore): void {
     if (this.engineeringStore && this.engineeringStore !== store) throw new Error('Engineering validation store is already attached')
     this.engineeringStore = store
+  }
+
+  attachRuntimeReferences(provider: () => Promise<PluginExecutionIdentity[]>): void {
+    if (this.runtimeReferences) throw new Error('Runtime reference provider is already attached')
+    this.runtimeReferences = provider
+  }
+
+  private async collectRuntimes(): Promise<void> {
+    if (this.maintenance) return this.maintenance
+    if (this.closed || !this.policy.automaticUpdates || !this.runtimeReferences || this.preparationTasks.size || this.runtimeRequests ||
+      Object.values(this.runtimes).some(runtime => runtime.pending || this.store.isBusy(runtime.id)) || this.engineeringStore?.reconcileRecoveredOperation()) return
+    const work = async () => {
+      const registry = this.store.list()
+      const packages = new Set([...Object.values(registry.active).flatMap(value => [value.current, ...(value.previous ? [value.previous] : [])]), ...Object.values(this.policy.held)])
+      const references = await this.runtimeReferences!()
+      const environments = new Set(references.flatMap(identity => identity.environmentDigest ? [identity.environmentDigest] : []))
+      const directories = new Set(Object.values(this.runtimes).flatMap(runtime => runtime.snapshot ? [resolve(dirname(dirname(runtime.snapshot.executable)))] : []))
+      await this.runtimeStorage.collect({ packages, environments, directories,
+        allowed: () => !this.closed && this.policy.automaticUpdates,
+        onRemove: directory => {
+          for (const runtime of Object.values(this.runtimes)) {
+            for (const [digest, snapshot] of runtime.snapshots) {
+              if (relative(resolve(dirname(dirname(snapshot.executable))), resolve(directory)) === '') runtime.snapshots.delete(digest)
+            }
+          }
+        } })
+    }
+    // Set the gate before asynchronous reference reads; all new execution/preparation waits for it.
+    const pending = work().catch(error => this.runtimeStorage.collectionError(error))
+    this.maintenance = pending
+    try { await pending } finally { if (this.maintenance === pending) this.maintenance = undefined }
   }
 
   /** Invalidate cached capability advertisements as soon as a managed runtime changes. */
@@ -163,6 +207,7 @@ export class PluginHost {
     const registry = this.store.list()
     return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
       runtimeRepairs: this.pythonEnvironments.status(),
+      runtimeStorage: this.runtimeStorage.status(),
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
@@ -183,6 +228,7 @@ export class PluginHost {
   }
 
   async reconcile(): Promise<ReturnType<PluginHost['status']>> {
+    await this.collectRuntimes()
     for (const kind of ['icepak', 'report'] as const) {
       try { await this.ensure(kind, true) }
       catch { /* Runtime-specific diagnostics are exposed in status; one unavailable solver must not hide the other. */ }
@@ -251,21 +297,25 @@ export class PluginHost {
     await this.updates.close()
     await Promise.allSettled(Object.values(this.runtimes).flatMap(runtime => runtime.pending ? [runtime.pending] : []))
     await Promise.allSettled([...this.preparationTasks.values()])
+    await this.maintenance
     await this.store.drain()
     this.owner.release()
   }
 
   private acquire(kind: Kind, expected?: PluginExecutionIdentity) {
+    if (this.maintenance) throw new Error('Plugin runtime maintenance is in progress')
     const runtime = this.runtimes[kind]
     if (this.closed || !runtime.snapshot || runtime.error) throw new Error(runtime.error ?? 'Plugin runtime is unavailable')
     const digest = expected?.packageDigest ?? this.store.list().active[runtime.id]?.current
     if (!digest || !this.trustedDigests().includes(digest)) throw new Error('Plugin release is no longer trusted')
     const snapshot = runtime.snapshots.get(digest)
     if (!snapshot) throw new Error('Plugin dependency runtime has not been prepared')
-    return managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected)
+    return { ...managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected),
+      spawn: this.runtimeStorage.forExecutable(snapshot.executable) }
   }
 
   private prepareSnapshot(kind: Kind, digest: string): Promise<PythonRuntimeSnapshot> {
+    if (this.maintenance) return this.maintenance.then(() => this.prepareSnapshot(kind, digest))
     const base = this.runtimes[kind].baseSnapshot
     const key = `${kind}:${digest}:${base ? pluginEnvironmentDigest(base.environment) : 'uninitialized'}`
     const existing = this.preparationTasks.get(key)
@@ -303,6 +353,7 @@ export class PluginHost {
   }
 
   private async ensure(kind: Kind, force = false): Promise<void> {
+    if (this.maintenance) await this.maintenance
     if (this.closed) throw new Error('Plugin host is closed')
     const runtime = this.runtimes[kind]
     if (runtime.pending) return runtime.pending
@@ -411,7 +462,8 @@ export class PluginHost {
     if (!this.policy.builtinDigests.includes(lease.revision.digest)) checkPolicy()
     // Signed reports have a host fixture; external engineering adapters still require an engineering validator.
     if (!this.trustedDigests().includes(lease.revision.digest)) throw new Error('Plugin is not a trusted executable release')
-    const acquireRuntime = () => ({ python: snapshot.executable, pluginRoot: lease.root, module: lease.revision.manifest.entry.module, release() {} })
+    const acquireRuntime = () => ({ python: snapshot.executable, pluginRoot: lease.root, module: lease.revision.manifest.entry.module,
+      spawn: this.runtimeStorage.forExecutable(snapshot.executable), release() {} })
     const client = kind === 'icepak' ? new IcepakPluginClient({ acquireRuntime }) : new ReportClient({ acquireRuntime })
     const health = await client.health() as { pluginId?: string; pluginVersion?: string; protocolVersion?: string; status?: string }
     const passed = health.pluginId === lease.revision.manifest.id && health.pluginVersion === lease.revision.manifest.version && health.protocolVersion === '1.0.0' && health.status === 'ok'

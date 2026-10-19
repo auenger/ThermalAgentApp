@@ -12,6 +12,7 @@ export function pythonPluginEnv(): NodeJS.ProcessEnv {
 }
 
 export interface PythonPluginLease {
+  spawn?: import('./plugin-runtime-storage.js').PythonSpawner
   identity?: import('@thermal-agent/contracts').PluginExecutionIdentity
   capabilities?: readonly string[]
   python: string

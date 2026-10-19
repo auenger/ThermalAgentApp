@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button, Switch } from '@fluentui/react-components'
 
 interface PluginStatus {
+  runtimeStorage?: { checkedAt?: string; removed: string[]; retained: Array<{ directory: string; reason: string }>; error?: string }
   runtimeRepairs?: Array<{ key: string; packageDigest: string; detectedAt: string; status: string; reason: string; error?: string }>
   automaticUpdates: boolean
   held: Record<string, string>
@@ -21,6 +22,16 @@ interface PluginStatus {
 }
 const names: Record<string, string> = { 'icepak-pyaedt': 'Icepak 仿真插件', 'report-reportlab': 'PDF 报告插件' }
 const phases: Record<string, string> = { pending: '等待环境检查', checking: '正在检查', unavailable: '暂不可用', ready: '运行时已就绪' }
+const retentionReasons: Record<string, string> = {
+  'active, rollback or held version': '当前版本或回退版本仍需使用',
+  'saved workflow or readiness reference': '历史作业或就绪证据仍有引用',
+  'live or unresolved Python process': '进程仍在运行或启动状态待核实',
+  'seven-day retention period': '尚在七天保留期内',
+  'legacy or untracked environment': '旧环境缺少完整进程跟踪记录',
+  'unmanaged directory': '不属于可自动清理的目录',
+  'not a managed directory': '目录类型不符合清理条件',
+  'collection batch limit': '等待下一次空闲检查清理',
+}
 
 export function PluginSettings() {
   const [status, setStatus] = useState<PluginStatus | null>(null)
@@ -84,6 +95,15 @@ export function PluginSettings() {
     <p>发布者须由本机管理员预先配置。导入后检查可触发已授权的工程样例求解验证；通过对应验证后才会启用候选。</p>
     {status?.releases.releases.map(release => <p key={release.digest}>受信发布者：{release.publisherId} · {release.id} · {status.active[release.id]?.current === release.digest ? '当前使用' : '已登记候选'}</p>)}
     {status?.releases.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}
+    {status?.runtimeStorage?.checkedAt && <details>
+      <summary>依赖环境存储</summary>
+      <p>最近检查：{new Date(status.runtimeStorage.checkedAt).toLocaleString()} · 已清理 {status.runtimeStorage.removed.length} 个 · 保留 {status.runtimeStorage.retained.length} 个</p>
+      <p>自动更新开启时，空闲检查会清理超过七天且无作业引用、无进程占用的受管环境。当前版本与回退版本继续保留。</p>
+      {status.runtimeStorage.error && <p role="alert">环境清理未完成：{status.runtimeStorage.error}</p>}
+      <ul>{status.runtimeStorage.retained.map(item => <li key={item.directory} style={{ overflowWrap: 'anywhere' }}>
+        {retentionReasons[item.reason] ?? item.reason} · {item.directory}
+      </li>)}</ul>
+    </details>}
     {!!status?.runtimeRepairs?.length && <details>
       <summary>依赖环境重建记录</summary>
       <p>重建完成后仍须通过插件验证；已开始的作业保留原运行环境。</p>

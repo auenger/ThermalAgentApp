@@ -4,9 +4,11 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, readdir, writeFile, rm, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { inspectPythonRuntime } from '../apps/core/dist/python-environment.js'
 import { PluginPythonEnvironments } from '../apps/core/dist/plugin-python-environment.js'
+import { PluginRuntimeStorage } from '../apps/core/dist/plugin-runtime-storage.js'
+import { pluginEnvironmentDigest } from '../apps/core/dist/plugin-store.js'
 import { parseManagedPluginManifest } from '../packages/contracts/dist/index.js'
 
 const python = process.platform === 'win32' ? 'python' : 'python3'
@@ -92,8 +94,22 @@ test('locked offline wheels create independent verified runtimes without modifyi
   assert.notEqual(recovered.executable, repaired.executable)
   assert.equal(query(recovered.executable), '1.0')
   assert.equal(query(two.executable), '2.0', 'another plugin runtime remains intact')
+  assert.deepEqual(await readdir(join(environments, 'runtime-uses')), [], 'completed installation and inspection subprocesses release durable tickets')
+  assert.equal((await readdir(join(environments, 'managed-environments'))).length, 4, 'successful and quarantined environments retain ownership metadata; failed preparations do not')
   for (const mutation of [wheel => { wheel.path = 'https://example.com/a.whl' }, wheel => { wheel.version = '1.0\n--index-url https://example.com' }]) {
     const manifest = structuredClone(second.manifest); mutation(manifest.pythonRuntime.wheels[0])
     assert.throws(() => parseManagedPluginManifest(manifest), /locked Python wheel/)
   }
+  const storage = new PluginRuntimeStorage(environments)
+  const retention = { packages: new Set([first.digest, second.digest]), environments: new Set([pluginEnvironmentDigest(one.environment)]),
+    directories: new Set(), allowed: () => true, onRemove() {}, now: Date.now() + 8 * 24 * 60 * 60_000 }
+  const cleanup = await storage.collect(retention)
+  assert.equal(cleanup.error, undefined)
+  assert.deepEqual(cleanup.removed, [dirname(dirname(repaired.executable)).split(/[\\/]/u).at(-1)])
+  await access(one.executable)
+  await assert.rejects(access(repaired.executable), { code: 'ENOENT' })
+  assert.equal(query(recovered.executable), '1.0'); assert.equal(query(two.executable), '2.0')
+  retention.environments.clear()
+  assert.equal((await storage.collect(retention)).removed.length, 1, 'released historical reference permits retired real venv collection')
+  await assert.rejects(access(one.executable), { code: 'ENOENT' })
 })

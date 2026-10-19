@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { PluginRuntimeStorage } from '../apps/core/dist/plugin-runtime-storage.js'
 import { PluginHost } from '../apps/core/dist/plugin-host.js'
 import { createCoreApp } from '../apps/core/dist/server.js'
 import { LocalDatabase, ModelPreparationStore } from '@thermal-agent/sqlite-store'
@@ -90,6 +92,36 @@ test('releasing a workflow pin cannot surrender ownership while its Python call 
     assert.equal((await call).pluginVersion, '1.0.0')
   } finally { await call; await closing }
   await new PluginHost(f.home, f.options).close()
+})
+
+test('host maintenance waits for leases and fences new work while loading saved runtime references', async t => {
+  const f = await fixture(t), host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  const runtimeHome = join(f.home, 'python-environments'), name = `env-${randomUUID()}`, directory = join(runtimeHome, name)
+  await mkdir(directory, { recursive: true }); await writeFile(join(directory, 'module.py'), 'value = 1')
+  new PluginRuntimeStorage(runtimeHome).own(directory, 'f'.repeat(64), 'e'.repeat(64), 'd'.repeat(64))
+  const metaPath = join(runtimeHome, 'managed-environments', `${name}.json`), record = JSON.parse(await readFile(metaPath, 'utf8'))
+  record.createdAt = '2020-01-01T00:00:00Z'; await writeFile(metaPath, JSON.stringify(record))
+  let refs = [{ pluginId: 'icepak-pyaedt', pluginVersion: '0.1.0', packageDigest: 'e'.repeat(64), environmentDigest: 'd'.repeat(64) }]
+  let entered, resume, waiting
+  host.attachRuntimeReferences(async () => { entered?.(); if (waiting) await waiting; return refs })
+  await host.reconcile()
+  assert.equal(host.status().runtimeStorage.retained[0].reason, 'saved workflow or readiness reference')
+  const pinned = await host.icepak.pinRuntime()
+  refs = []
+  try { await host.reconcile(); assert.equal(await readFile(join(directory, 'module.py'), 'utf8'), 'value = 1') }
+  finally { pinned.release() }
+  const inspecting = new Promise(resolve => { entered = resolve })
+  waiting = new Promise(resolve => { resume = resolve })
+  const collecting = host.reconcile()
+  await inspecting
+  let executed = false
+  const call = host.icepak.probeEnvironment().then(value => { executed = true; return value })
+  try { await new Promise(resolve => setImmediate(resolve)); assert.equal(executed, false) }
+  finally { resume() }
+  await collecting; await call
+  assert.deepEqual(host.status().runtimeStorage.removed, [name])
+  await assert.rejects(readFile(join(directory, 'module.py')), { code: 'ENOENT' })
 })
 
 test('a cold managed engineering call initializes before acquiring its operation gate', async t => {
