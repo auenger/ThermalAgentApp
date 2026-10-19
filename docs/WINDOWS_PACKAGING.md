@@ -1,5 +1,11 @@
 # Windows 安装包构建与验收
 
+## 2026-10-19 自适应插件手动验收包
+
+本轮源码 `b6d3cee`（`feat/plugin-adaptive-repair`）的独立输出目录为 `release-cross/adaptive-repair-b6d3cee/`，保留之前的试包。安装包、SHA256 与构建证据放在同一目录；操作步骤和能力边界见 [自适应插件验收清单](WINDOWS_ADAPTIVE_REPAIR_ACCEPTANCE.md)。本轮将旧精简 Python 替换为官方 NuGet CPython 3.12.10 x64，保留原有第三方依赖并补齐 venv、ensurepip 和离线 pip wheel；Windows 原生导入与环境创建仍须实机确认。
+
+该包包含已知 AEDT 路径问题的直接适配和受限模型修复任务。模型生成源码的隔离验证与自动激活尚未接通，不能将“修复候选生成”算作完整自修复验收通过。
+
 当前已生成跨平台试包，但尚未完成真实 Windows 安装包验收。正式构建与运行验证仍应在 Windows x64 主机进行；macOS 的原生依赖不能直接充当 Windows 依赖。代码仓库 `https://github.com/auenger/ThermalAgentApp.git` 为公开仓库。用户已确认 `assets/icepak/Project1.aedt` 是可公开分发的测试工程，随源码提交并由安装包带入；这不代表客户模型也可公开。
 
 Windows 测试可直接打开 [离线 HTML 操作说明](./Thermal-Agent-功能进度与操作说明.html)，按 CAD 到 Baseline 步骤操作并保存或导出测试记录。离线说明已同步当前实验分支的 CAD Preview 试包，新增 3D 预览与人工对应步骤；主线与实验包身份以下列各自 SHA 为准。
