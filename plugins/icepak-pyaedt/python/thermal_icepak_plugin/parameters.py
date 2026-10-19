@@ -6,6 +6,7 @@ import json
 import math
 import re
 from typing import Any
+from .parameter_registry import AdapterRegistry, ParameterAdapter
 
 _NUMBER = re.compile(r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*([^\s]*)\s*$")
 _LENGTH_UNITS = {"mm", "cm", "m", "um", "in", "mil"}
@@ -17,14 +18,20 @@ def _fingerprint(value: Any) -> str:
 
 
 def _descriptor(adapter: str, target: str, current: str, unit: str, role: str, **extra: Any) -> dict:
+    schema = {"version": 1, "type": "enum" if "choices" in extra else "number"}
+    for source, key in (("choices", "values"), ("min", "minimum"), ("max", "maximum")):
+        if source in extra:
+            schema[key] = extra[source]
+    if adapter == "fan":
+        schema.update(exclusiveMinimum=1, defaultValue="1.1", hint="1.1 表示转速 +10%，允许 >1 至 1.5")
     return {"id": f"{adapter}:{target}", "label": target, "adapter": adapter, "target": target,
-            "currentValue": current, "fingerprint": _fingerprint(current), "unit": unit, "role": role, **extra}
+            "currentValue": current, "fingerprint": _fingerprint(current), "unit": unit, "role": role, "valueSchema": schema, **extra}
 
 
-def discover_parameters(ipk: Any) -> list[dict]:
+def _discover_builtin(ipk: Any, kind: str) -> list[dict]:
     parameters = []
     manager = getattr(ipk, "variable_manager", None)
-    for name, var in getattr(manager, "variables", {}).items():
+    for name, var in (getattr(manager, "variables", {}).items() if kind == "variable" else []):
         expression = str(getattr(var, "expression", ""))
         match = _NUMBER.fullmatch(expression)
         if not match or not math.isfinite(float(match[1])) or bool(getattr(var, "read_only", getattr(var, "readonly", False))):
@@ -43,7 +50,7 @@ def discover_parameters(ipk: Any) -> list[dict]:
     materials = getattr(ipk, "materials", None)
     fluids = {str(name).lower() for name in [*getattr(materials, "gases", []), *getattr(materials, "liquids", []), "air", "vacuum"]}
     choices = sorted(str(key) for key in getattr(materials, "material_keys", {}) if str(key).lower() not in fluids)
-    for name in getattr(modeler, "object_names", []):
+    for name in (getattr(modeler, "object_names", []) if kind == "material" else []):
         try:
             obj = modeler[name]
             current = str(obj.material_name)
@@ -51,7 +58,7 @@ def discover_parameters(ipk: Any) -> list[dict]:
                 parameters.append(_descriptor("material", name, current, "", "design", choices=choices))
         except Exception:
             continue
-    for boundary in getattr(ipk, "boundaries", []):
+    for boundary in (getattr(ipk, "boundaries", []) if kind == "boundary-power" else []):
         props = getattr(boundary, "props", {})
         # A total-power source is different from flux, temperature or network BCs.
         if str(getattr(boundary, "type", "")).lower() not in {"block", "sourceicepak"}:
@@ -62,7 +69,7 @@ def discover_parameters(ipk: Any) -> list[dict]:
         match = _NUMBER.fullmatch(current)
         if match and match[2] in {"W", "mW", "kW"}:
             parameters.append(_descriptor("boundary-power", boundary.name, current, match[2], "operating-condition", min=0))
-    for name, fan in getattr(ipk, "native_components", {}).items():
+    for name, fan in (getattr(ipk, "native_components", {}).items() if kind == "fan" else []):
         provider = getattr(fan, "native_properties", None)
         if provider is None:
             provider = getattr(fan, "props", {}).get("NativeComponentDefinitionProvider", {})
@@ -72,10 +79,14 @@ def discover_parameters(ipk: Any) -> list[dict]:
     return parameters
 
 
-def validate_changes(ipk: Any, changes: Any) -> list[dict]:
+def discover_parameters(ipk: Any, registry: AdapterRegistry | None = None) -> list[dict]:
+    return (registry or DEFAULT_REGISTRY).discover(ipk)
+
+
+def validate_changes(ipk: Any, changes: Any, registry: AdapterRegistry | None = None) -> list[dict]:
     if not isinstance(changes, list) or not 1 <= len(changes) <= 50:
         raise ValueError("changes must contain 1–50 edits")
-    catalog = {item["id"]: item for item in discover_parameters(ipk)}
+    catalog = {item["id"]: item for item in discover_parameters(ipk, registry)}
     seen = set()
     validated = []
     for change in changes:
@@ -86,7 +97,7 @@ def validate_changes(ipk: Any, changes: Any) -> list[dict]:
         if not parameter or parameter["id"] in seen:
             raise ValueError("parameter unavailable or duplicated")
         seen.add(parameter["id"])
-        if any(requested.get(key) != parameter[key] for key in ("adapter", "target", "fingerprint", "currentValue", "unit")):
+        if any(requested.get(key) != parameter[key] for key in ("adapter", "adapterVersion", "valueSchema", "target", "fingerprint", "currentValue", "unit", "role")):
             raise ValueError(f"parameter changed since inspection: {parameter['label']}")
         role = change.get("role")
         if role not in {"design", "operating-condition"} or (parameter["role"] == "operating-condition" and role != parameter["role"]):
@@ -94,19 +105,18 @@ def validate_changes(ipk: Any, changes: Any) -> list[dict]:
         value = change.get("value")
         if not isinstance(value, str) or len(value) > 200:
             raise ValueError("invalid target value")
-        if parameter["adapter"] == "material":
-            if value not in parameter["choices"]:
-                raise ValueError("target material must already exist in project")
+        schema = parameter["valueSchema"]
+        if schema["type"] == "enum":
+            if value not in schema["values"]:
+                raise ValueError("target value must exist in parameter choices")
         else:
             match = _NUMBER.fullmatch(value)
             if not match or match[2] != parameter["unit"] or not math.isfinite(float(match[1])):
                 raise ValueError(f"numeric value with unit {parameter['unit']} required")
             number = float(match[1])
-            if number < parameter.get("min", -math.inf) or number > parameter.get("max", math.inf):
+            if number < schema.get("minimum", -math.inf) or number > schema.get("maximum", math.inf) or number <= schema.get("exclusiveMinimum", -math.inf):
                 raise ValueError("target value outside permitted range")
-            if parameter["adapter"] == "fan" and number <= 1:
-                raise ValueError("fan ratio must exceed 1")
-        if values_equal(value, parameter["currentValue"]):
+        if (value == parameter["currentValue"] if schema["type"] == "enum" else values_equal(value, parameter["currentValue"])):
             raise ValueError("target value is unchanged")
         validated.append({"parameter": parameter, "value": value, "role": role})
     return validated
@@ -119,58 +129,87 @@ def values_equal(actual: str, expected: str) -> bool:
     return actual == expected
 
 
-def apply_changes(ipk: Any, changes: list[dict]) -> list[dict]:
-    validated = validate_changes(ipk, changes)  # Validate the entire batch before the first write.
+def apply_changes(ipk: Any, changes: list[dict], registry: AdapterRegistry | None = None) -> list[dict]:
+    registry = registry or DEFAULT_REGISTRY
+    validated = validate_changes(ipk, changes, registry)  # Validate the entire batch before the first write.
     results = []
     for change in validated:
         p, value = change["parameter"], change["value"]
-        adapter, target = p["adapter"], p["target"]
-        result = {"parameterId": p["id"], "target": target, "before": p["currentValue"], "after": value,
+        result = {"parameterId": p["id"], "target": p["target"], "before": p["currentValue"], "after": value,
                   "verifiedAfter": "", "verified": False}
-        if adapter == "variable":
-            if ipk.variable_manager.set_variable(target, expression=value) is False:
-                raise RuntimeError(f"variable update failed: {target}")
-        elif adapter == "material":
-            if ipk.assign_material(target, value) is False:
-                raise RuntimeError(f"material update failed: {target}")
-        elif adapter == "boundary-power":
-            boundary = next(b for b in ipk.boundaries if b.name == target)
-            previous = getattr(boundary, "auto_update", True)
-            boundary.auto_update = False
-            try:
-                boundary.props["Total Power"] = value
-                if boundary.update() is False:
-                    raise RuntimeError(f"boundary update failed: {target}")
-            finally:
-                boundary.auto_update = previous
-        elif adapter == "fan":
-            from .project import apply_fan_speed_ratio
-            action = apply_fan_speed_ratio(ipk, float(value), targets=[target])
-            result["fanAfter"] = action["fans"][0]["after"]
+        result["adapterEvidence"] = registry.get(p["adapter"]).apply(ipk, p, value)
         results.append(result)
     return results
 
 
-def verify_changes(ipk: Any, changes: list[dict], results: list[dict]) -> None:
+def verify_changes(ipk: Any, changes: list[dict], results: list[dict], registry: AdapterRegistry | None = None) -> None:
+    registry = registry or DEFAULT_REGISTRY
     if len(changes) != len(results):
         raise RuntimeError("parameter verification count mismatch")
     for change, result in zip(changes, results):
         p = change["parameter"]
-        target, adapter = p["target"], p["adapter"]
-        if adapter == "variable":
-            actual = str(ipk.variable_manager.variables[target].expression)
-        elif adapter == "material":
-            actual = str(ipk.modeler[target].material_name)
-        elif adapter == "boundary-power":
-            actual = str(next(b for b in ipk.boundaries if b.name == target).props["Total Power"])
-        else:
-            from .project import _fan_provider
-            provider = _fan_provider(ipk.native_components[target])
-            expected = result["fanAfter"]
-            if any(len(provider.get(axis, [])) != len(expected[axis]) or
-                   any(not values_equal(str(a), str(b)) for a, b in zip(provider[axis], expected[axis])) for axis in ("X", "Y")):
-                raise RuntimeError(f"persisted fan verification failed: {target}")
-            actual = result["after"]
-        if not values_equal(actual, result["after"]):
+        target, adapter = p["target"], registry.get(p["adapter"])
+        if (p.get("adapterVersion") != adapter.version or result.get("parameterId") != p["id"] or
+                result.get("target") != p["target"] or result.get("before") != p["currentValue"] or result.get("after") != change["value"]):
+            raise RuntimeError("parameter verification identity mismatch")
+        actual = adapter.readback(ipk, p, result)
+        if not (actual == result["after"] if p["valueSchema"]["type"] == "enum" else values_equal(actual, result["after"])):
             raise RuntimeError(f"persisted parameter verification failed: {target}: {actual}")
         result.update(verifiedAfter=actual, verified=True)
+
+
+def _write_variable(ipk: Any, parameter: dict, value: str) -> dict:
+    if ipk.variable_manager.set_variable(parameter["target"], expression=value) is False:
+        raise RuntimeError(f"variable update failed: {parameter['target']}")
+    return {}
+
+
+def _write_material(ipk: Any, parameter: dict, value: str) -> dict:
+    if ipk.assign_material(parameter["target"], value) is False:
+        raise RuntimeError(f"material update failed: {parameter['target']}")
+    return {}
+
+
+def _write_power(ipk: Any, parameter: dict, value: str) -> dict:
+    boundary = next(b for b in ipk.boundaries if b.name == parameter["target"])
+    previous = getattr(boundary, "auto_update", True)
+    boundary.auto_update = False
+    try:
+        boundary.props["Total Power"] = value
+        if boundary.update() is False:
+            raise RuntimeError(f"boundary update failed: {parameter['target']}")
+    finally:
+        boundary.auto_update = previous
+    return {}
+
+
+def _write_fan(ipk: Any, parameter: dict, value: str) -> dict:
+    from .project import apply_fan_speed_ratio
+    action = apply_fan_speed_ratio(ipk, float(value), targets=[parameter["target"]])
+    return {"fanAfter": action["fans"][0]["after"]}
+
+
+def _read_fan(ipk: Any, parameter: dict, result: dict) -> str:
+    from .project import _fan_provider
+    provider = _fan_provider(ipk.native_components[parameter["target"]])
+    expected = result["adapterEvidence"]["fanAfter"]
+    if any(len(provider.get(axis, [])) != len(expected[axis]) or
+           any(not values_equal(str(a), str(b)) for a, b in zip(provider[axis], expected[axis])) for axis in ("X", "Y")):
+        raise RuntimeError(f"persisted fan verification failed: {parameter['target']}")
+    return result["after"]
+
+
+def create_default_registry() -> AdapterRegistry:
+    registry = AdapterRegistry()
+    for identifier, label, write, read in [
+        ("variable", "模型变量", _write_variable, lambda ipk, p, _r: str(ipk.variable_manager.variables[p["target"]].expression)),
+        ("material", "对象材料", _write_material, lambda ipk, p, _r: str(ipk.modeler[p["target"]].material_name)),
+        ("boundary-power", "热源功率", _write_power, lambda ipk, p, _r: str(next(b for b in ipk.boundaries if b.name == p["target"]).props["Total Power"])),
+        ("fan", "风扇转速比", _write_fan, _read_fan),
+    ]:
+        registry.register(ParameterAdapter(identifier, "1.0.0", label,
+                                           lambda ipk, kind=identifier: _discover_builtin(ipk, kind), write, read))
+    return registry
+
+
+DEFAULT_REGISTRY = create_default_registry()

@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { parseParameterPlanRequest, resolveParameterChanges } from '../packages/contracts/dist/index.js'
+import { parseParameterPlanRequest, resolveParameterChanges, parseEditableParameters, parameterValueSchema } from '../packages/contracts/dist/index.js'
 import { LocalDatabase } from '@thermal-agent/sqlite-store'
 import { parameterApp, waitFor, parameters } from './fixtures/parameter-app.mjs'
 
 const requestFor = (context, changes = [{ parameterId: 'variable:FinGap', value: '1.5mm', role: 'design' }]) => ({ sourceAttemptId: context.sourceAttemptId, author: '热设计工程师', reason: '调整鳍片间距，验证热点改善；维持原功耗。', changes })
+const extension = { id: 'surface-emissivity:Sink', adapter: 'surface-emissivity', adapterVersion: '1.0.0', adapterLabel: '表面辐射',
+  label: '表面发射率', target: 'Sink', currentValue: '0.5', fingerprint: 'fixture-surface', unit: '', role: 'design',
+  valueSchema: { version: 1, type: 'number', minimum: 0, maximum: 1, defaultValue: '0.9' } }
 async function submit(f, changes) {
   const { response, body } = await f.request(`/api/tasks/${f.task.id}/parameter-plans`, requestFor(f.context, changes))
   assert.equal(response.status, 202, JSON.stringify(body))
@@ -24,6 +27,47 @@ test('parameter contract rejects duplicates, wrong units, unknown IDs and condit
     [{ parameterId: 'material:HeatSink', value: 'unknown', role: 'design' }],
   ]) assert.throws(() => resolveParameterChanges(parameters, parseParameterPlanRequest(requestFor({ sourceAttemptId: 'a' }, changes))))
   assert.throws(() => parseParameterPlanRequest({ ...parsed, changes: [...parsed.changes, ...parsed.changes] }), /重复/)
+})
+
+test('plugin-declared parameter schemas extend host validation without adapter-specific branches', () => {
+  const catalog = parseEditableParameters([extension])
+  assert.equal(parameterValueSchema(catalog[0]).defaultValue, '0.9')
+  const request = value => parseParameterPlanRequest(requestFor({ sourceAttemptId: 'a' }, [{ parameterId: extension.id, value, role: 'design' }]))
+  assert.equal(resolveParameterChanges(catalog, request('0.9'))[0].parameter.adapterVersion, '1.0.0')
+  for (const value of ['1.1', 'NaN', '0.9W', '0.5']) assert.throws(() => resolveParameterChanges(catalog, request(value)))
+  assert.throws(() => parseEditableParameters([{ ...extension, valueSchema: undefined }]), /valueSchema/)
+  assert.throws(() => parseEditableParameters([{ ...extension, valueSchema: { version: 2, type: 'number' } }]), /Schema/)
+  assert.throws(() => parseEditableParameters([{ ...extension, valueSchema: { version: 1, type: 'number', maximum: Infinity } }]), /有限/)
+  const choice = { ...extension, valueSchema: { version: 1, type: 'enum', values: ['rough', 'smooth'] }, currentValue: 'rough' }
+  assert.equal(resolveParameterChanges([choice], request('smooth'))[0].value, 'smooth')
+  assert.throws(() => resolveParameterChanges([choice], request('unknown')), /可选/)
+  assert.equal(resolveParameterChanges([{ ...choice, currentValue: '1', valueSchema: { version: 1, type: 'enum', values: ['1', '1.0'] } }], request('1.0'))[0].value, '1.0')
+  assert.throws(() => parseEditableParameters([extension, extension]), /标识/)
+})
+
+test('a new plugin parameter travels through Core catalog, immutable plan and saved validation evidence', async t => {
+  const f = await parameterApp({ parameters: [extension] }); t.after(() => f.close())
+  assert.deepEqual(f.context.parameters, [extension])
+  const plan = await submit(f, [{ parameterId: extension.id, value: '0.9', role: 'design' }])
+  assert.equal(plan.status, 'VERIFIED')
+  assert.deepEqual(plan.changes[0].parameter, extension)
+  assert.deepEqual(f.calls.find(call => call.kind === 'check').input.changes[0].parameter.valueSchema, extension.valueSchema)
+  const evidence = JSON.parse(await readFile(f.app.artifacts.resolveArtifact(plan.evidenceSha256), 'utf8'))
+  assert.equal(evidence.actionResults[0].parameterId, extension.id)
+  assert.equal(evidence.actionResults[0].verifiedAfter, '0.9')
+})
+
+test('Core rejects a plugin receipt whose claimed persisted value contradicts the requested edit', async t => {
+  const f = await parameterApp({ parameters: [extension] }); t.after(() => f.close())
+  const check = f.plugin.checkChanges.bind(f.plugin)
+  f.plugin.checkChanges = async input => {
+    const result = await check(input)
+    return { ...result, actionResults: result.actionResults.map(action => ({ ...action, verifiedAfter: '0.5' })) }
+  }
+  const plan = await submit(f, [{ parameterId: extension.id, value: '0.9', role: 'design' }])
+  assert.equal(plan.status, 'FAILED')
+  assert.match(plan.error, /验证证据不完整/)
+  assert.equal(plan.verifiedProjectSha256, null)
 })
 
 test('verified immutable revision executes precisely its saved artifact and preserves baseline lineage', async t => {

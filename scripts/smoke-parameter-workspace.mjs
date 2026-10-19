@@ -3,9 +3,12 @@
 import assert from 'node:assert/strict'
 import { mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { parameterApp, waitFor } from '../tests/fixtures/parameter-app.mjs'
+import { parameterApp, waitFor, parameters } from '../tests/fixtures/parameter-app.mjs'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
-const fixture = await parameterApp()
+const extension = { id: 'surface-emissivity:Sink', adapter: 'surface-emissivity', adapterVersion: '1.0.0', adapterLabel: '表面辐射',
+  label: '表面发射率', target: 'Sink', currentValue: '0.5', fingerprint: 'fixture-surface', unit: '', role: 'design',
+  valueSchema: { version: 1, type: 'number', minimum: 0, maximum: 1, defaultValue: '0.9', hint: '表面发射率范围 0–1' } }
+const fixture = await parameterApp({ parameters: [...parameters, extension] })
 const browser = await chromium.launch({ headless: true })
 const output = resolve('.thermal-agent/screenshots/parameters')
 await mkdir(output, { recursive: true })
@@ -16,6 +19,14 @@ try {
   await page.goto(fixture.base)
   await page.getByRole('button', { name: fixture.task.title, exact: true }).first().click()
   const workspace = page.getByRole('region', { name: '参数修改与追溯' })
+  await workspace.getByLabel('选择参数').selectOption(extension.id)
+  await workspace.getByRole('button', { name: '添加', exact: true }).click()
+  assert.equal(await workspace.getByLabel('表面发射率 目标值').inputValue(), '0.9')
+  await workspace.getByText('表面发射率范围 0–1').waitFor()
+  await workspace.getByLabel('表面发射率 目标值').fill('1.2')
+  await workspace.getByLabel('表面发射率 目标值').press('Tab')
+  await workspace.getByText('表面发射率 超出允许范围').waitFor()
+  await workspace.getByLabel('表面发射率 目标值').fill('0.9')
   await workspace.getByLabel('选择参数').selectOption('variable:FinGap')
   await workspace.getByRole('button', { name: '添加', exact: true }).click()
   await workspace.getByLabel('FinGap 目标值').fill('1.5W')
@@ -42,6 +53,7 @@ try {
   await workspace.getByRole('button', { name: '保存新版本并验证' }).click()
   await workspace.getByRole('button', { name: '执行 v2 候选求解' }).waitFor()
   const plans = fixture.app.database.listParameterPlans(fixture.task.id)
+  assert.deepEqual(plans.find(p => p.revision === 1).changes.find(change => change.parameter.id === extension.id).parameter.valueSchema, extension.valueSchema)
   await workspace.getByLabel('与其他版本比较').selectOption(plans.find(p => p.revision === 1).id)
   await workspace.getByRole('table', { name: '版本比较' }).waitFor()
   await workspace.scrollIntoViewIfNeeded()

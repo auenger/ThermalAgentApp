@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { createTask } from '@thermal-agent/domain'
-import { parsePluginExecutionIdentity, parseParameterPlanRequest, resolveParameterChanges } from '@thermal-agent/contracts'
+import { parsePluginExecutionIdentity, parseParameterPlanRequest, resolveParameterChanges, parseEditableParameters, parameterValuesEqual } from '@thermal-agent/contracts'
 import type { IcepakProjectOperationResult, ParameterPlan } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
@@ -65,7 +65,7 @@ export class ParameterPlanManager {
     }
     return { sourceAttemptId: attempt.id, sourceSha256: source.sha256, design: parsed.project.activeDesign,
       setup: String(parsed.solve?.setup ?? parsed.project.setups[0] ?? ''), aedtVersion: parsed.project.aedtVersion,
-      parameters: catalog?.editableParameters ?? [],
+      parameters: parseEditableParameters(catalog?.editableParameters ?? []),
       baselineTmaxC: typeof parsed.metrics?.tmaxC === 'number' ? parsed.metrics.tmaxC : null,
       canOptimize: task.executionStatus === 'WAITING_FOR_APPROVAL' && task.thermalVerdict === 'FAIL' &&
         !this.database.listTaskRuns(taskId).some(run => run.kind === 'CANDIDATE'),
@@ -87,6 +87,7 @@ export class ParameterPlanManager {
         const inspected = await pinned.port.inspectProject({ projectPath, outputDir: join(root, 'inspect'),
           version: base.parsed.project.aedtVersion, design: base.parsed.project.activeDesign }, { signal: controller.signal })
         if (!inspected.parameterCatalog || inspected.validation?.verified !== true) throw new Error('参数清单读取失败')
+        parseEditableParameters(inspected.parameterCatalog.editableParameters ?? [])
         const artifact = await this.artifacts.putBytes(Buffer.from(JSON.stringify(inspected.parameterCatalog)), 'parameter-catalog.json', 'application/json')
         this.database.upsertArtifact(artifact)
         this.database.linkAttemptArtifact({ attemptId: base.attempt.id, sha256: artifact.sha256, role: 'LOG', createdAt: new Date().toISOString() })
@@ -133,7 +134,8 @@ export class ParameterPlanManager {
       if (result.inputSha256 !== plan.sourceSha256 || result.validation?.verified !== true || !result.validation.checks.includes('persistedParameters') || !result.verifiedProjectPath ||
         !result.actionResults || result.actionResults.length !== plan.changes.length ||
         plan.changes.some(change => !result.actionResults!.some(action => action.parameterId === change.parameter.id &&
-          action.verified === true && action.target === change.parameter.target && action.before === change.parameter.currentValue && action.after === change.value))) throw new Error('保存后重新读取的验证证据不完整')
+          action.verified === true && action.target === change.parameter.target && action.before === change.parameter.currentValue && action.after === change.value &&
+          parameterValuesEqual(change.parameter, action.verifiedAfter, change.value)))) throw new Error('保存后重新读取的验证证据不完整')
       const project = await this.artifacts.importFile(result.verifiedProjectPath, basename(source.originalName))
       const evidence = await this.artifacts.putBytes(Buffer.from(JSON.stringify(result, null, 2)), `parameters-v${plan.revision}.json`, 'application/json')
       this.database.upsertArtifact(project); this.database.upsertArtifact(evidence)

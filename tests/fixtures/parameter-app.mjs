@@ -18,7 +18,8 @@ export async function waitFor(fn) {
   while (Date.now() < end) { const value = await fn(); if (value) return value; await new Promise(r => setTimeout(r, 15)) }
   throw new Error('timed out waiting for parameter operation')
 }
-export async function parameterApp() {
+export async function parameterApp(options = {}) {
+  const activeCatalog = { ...catalog, editableParameters: options.parameters ?? parameters }
   const home = await mkdtemp(join(tmpdir(), 'thermal-parameters-'))
   const source = join(home, 'ThermalModel.aedt')
   await writeFile(source, 'baseline-input')
@@ -26,7 +27,7 @@ export async function parameterApp() {
   const plugin = {
     failCheck: false, failSolve: false, checkDelay: 0,
     async probeEnvironment() { return { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', status: 'UNAVAILABLE', platform: 'darwin', aedtVersions: [], checks: [], diagnostics: [] } },
-    async inspectProject() { return { status: 'ok', project, parameterCatalog: catalog, validation: { verified: true, checks: [] } } },
+    async inspectProject() { return { status: 'ok', project, parameterCatalog: activeCatalog, validation: { verified: true, checks: [] } } },
     async checkChanges(input) {
       calls.push({ kind: 'check', input })
       if (plugin.checkDelay) await new Promise(r => setTimeout(r, plugin.checkDelay))
@@ -46,7 +47,7 @@ export async function parameterApp() {
       const text = await readFile(input.projectPath, 'utf8')
       await writeFile(projectPath, text === 'baseline-input' ? 'baseline-solved' : text)
       const tmaxC = input.baselineMetrics ? 78 : 95
-      return { status: 'ok', mode: 'solve', project, workingProject: projectPath, parameterCatalog: catalog,
+      return { status: 'ok', mode: 'solve', project, workingProject: projectPath, parameterCatalog: activeCatalog,
         validation: { verified: true, checks: [] }, solve: { setup: 'Setup1', succeeded: true, attempted: true },
         artifacts: { projectPath }, metrics: { tmaxC, converged: true, solverNormalCompletion: true },
         ...(input.baselineMetrics ? { comparison: { deltaTmaxC: -17, rollbackRequired: false } } : {}) }

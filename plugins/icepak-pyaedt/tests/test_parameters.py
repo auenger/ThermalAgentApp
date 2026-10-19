@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from test_plugin import _FakeIcepak, _Fan, _Named
-from thermal_icepak_plugin.parameters import discover_parameters, validate_changes
+from thermal_icepak_plugin.parameters import discover_parameters, validate_changes, apply_changes, verify_changes, create_default_registry
+from thermal_icepak_plugin.parameter_registry import ParameterAdapter
 from thermal_icepak_plugin.project import run_project_operation
 
 
@@ -98,6 +99,64 @@ def change(ipk, key, value, role='design'):
 
 
 class ParameterTests(unittest.TestCase):
+    def custom_registry(self, schema=None):
+        registry = create_default_registry()
+        def discover(ipk):
+            return [{"id": "surface-emissivity:Sink", "target": "Sink", "label": "表面发射率", "currentValue": ipk.emissivity,
+                     "fingerprint": ipk.emissivity, "unit": "", "role": "design",
+                     "valueSchema": schema or {"version": 1, "type": "number", "minimum": 0, "maximum": 1, "defaultValue": "0.9"}}]
+        def apply(ipk, parameter, value):
+            ipk.emissivity = value
+            return {"target": parameter["target"]}
+        registry.register(ParameterAdapter("surface-emissivity", "1.0.0", "表面辐射", discover, apply,
+                                           lambda ipk, _p, _r: ipk.emissivity))
+        return registry
+
+    def test_numeric_looking_enum_labels_are_distinct_values(self):
+        registry = self.custom_registry({"version": 1, "type": "enum", "values": ["1", "1.0"]})
+        ipk = PersistedIcepak()
+        ipk.emissivity = "1"
+        descriptor = next(p for p in discover_parameters(ipk, registry) if p["adapter"] == "surface-emissivity")
+        edit = {"parameter": descriptor, "value": "1.0", "role": "design"}
+        results = apply_changes(ipk, [edit], registry)
+        verify_changes(SimpleNamespace(emissivity="1.0"), [edit], results, registry)
+        with self.assertRaisesRegex(RuntimeError, "persisted parameter verification failed"):
+            verify_changes(SimpleNamespace(emissivity="1"), [edit], results, registry)
+
+    def test_registered_extension_survives_independent_reload_and_detects_lost_write(self):
+        registry = self.custom_registry()
+        ipk = PersistedIcepak()
+        ipk.emissivity = "0.5"
+        descriptor = next(p for p in discover_parameters(ipk, registry) if p["adapter"] == "surface-emissivity")
+        edit = {"parameter": descriptor, "value": "0.9", "role": "design"}
+        result = apply_changes(ipk, [edit], registry)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "saved.json"
+            path.write_text(json.dumps({"emissivity": ipk.emissivity}))
+            reopened = SimpleNamespace(**json.loads(path.read_text()))
+            verify_changes(reopened, [edit], result, registry)
+            self.assertEqual(result[0]["verifiedAfter"], "0.9")
+            reopened.emissivity = "0.5"
+            with self.assertRaisesRegex(RuntimeError, "persisted parameter verification failed"):
+                verify_changes(reopened, [edit], result, registry)
+
+    def test_extension_schema_and_adapter_identity_cannot_change_between_discovery_and_apply(self):
+        registry = self.custom_registry()
+        ipk = PersistedIcepak()
+        ipk.emissivity = "0.5"
+        descriptor = next(p for p in discover_parameters(ipk, registry) if p["adapter"] == "surface-emissivity")
+        for key, value in [("adapterVersion", "2.0.0"), ("valueSchema", {"version": 1, "type": "number", "maximum": 100})]:
+            changed = {**descriptor, key: value}
+            with self.assertRaisesRegex(ValueError, "changed since inspection"):
+                apply_changes(ipk, [change(ipk, 'variable:FinGap', '1mm'), {"parameter": changed, "value": "0.9", "role": "design"}], registry)
+            self.assertEqual(ipk.variable_manager.writes, [])
+        with self.assertRaisesRegex(ValueError, "permitted range"):
+            apply_changes(ipk, [{"parameter": descriptor, "value": "1.1", "role": "design"}], registry)
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            registry.register(registry.get("surface-emissivity"))
+        with self.assertRaisesRegex(ValueError, "unknown parameter adapter"):
+            registry.get("arbitrary-code")
+
     def run_check(self, ipk, edits):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / 'source.aedt'

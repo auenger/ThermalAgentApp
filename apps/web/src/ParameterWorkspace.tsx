@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Field, Input, Select, Spinner, Textarea } from '@fluentui/react-components'
 import { Add20Regular, ArrowDownload20Regular, ArrowClockwise20Regular, Delete20Regular, Play20Regular, Save20Regular } from '@fluentui/react-icons'
-import { resolveParameterChanges } from '@thermal-agent/contracts'
+import { resolveParameterChanges, parameterValueSchema } from '@thermal-agent/contracts'
 import type { IcepakEditableParameter, ParameterPlan, ParameterPlanRequest, TaskRecord } from '@thermal-agent/contracts'
 
 type DraftRow = { parameterId: string; value: string; role: 'design' | 'operating-condition' | '' }
@@ -10,7 +10,8 @@ type ExecutionSummary = { status: string; tmaxC: number | null; converged: boole
 type Context = { sourceAttemptId: string; sourceSha256: string; design: string; setup: string; aedtVersion: string;
   baselineTmaxC: number | null; parameters: IcepakEditableParameter[]; canOptimize: boolean; plans: ParameterPlan[];
   executions?: Record<string, ExecutionSummary> }
-const adapterNames = { variable: '模型变量', material: '对象材料', 'boundary-power': '热源功率', fan: '风扇转速比' }
+const adapterNames: Record<string, string> = { variable: '模型变量', material: '对象材料', 'boundary-power': '热源功率', fan: '风扇转速比' }
+const adapterName = (p: IcepakEditableParameter) => p.adapterLabel ?? adapterNames[p.adapter] ?? p.adapter
 const statusNames = { CHECKING: '验证中', VERIFIED: '已验证 · 待执行', FAILED: '失败', STARTING: '启动中', EXECUTED: '已提交求解' }
 const emptyDraft: Draft = { author: '', reason: '', rows: [], sourceAttemptId: '' }
 function download(value: unknown, name: string) {
@@ -73,12 +74,12 @@ export function ParameterWorkspace({ task, onChanged, onOpenTask }: { task: Task
   const checking = context?.plans.some(plan => plan.status === 'CHECKING' || plan.status === 'STARTING')
   const hasCondition = draft.rows.some(row => row.role === 'operating-condition')
   const filtered = available.filter(p => !draft.rows.some(row => row.parameterId === p.id) &&
-    `${p.label} ${adapterNames[p.adapter]}`.toLowerCase().includes(query.toLowerCase()))
+    `${p.label} ${adapterName(p)}`.toLowerCase().includes(query.toLowerCase()))
 
   function add() {
     const p = available.find(p => p.id === selected)
     if (!p || draft.rows.some(row => row.parameterId === p.id)) return
-    edit({ rows: [...draft.rows, { parameterId: p.id, value: p.adapter === 'fan' ? '1.1' : p.currentValue,
+    edit({ rows: [...draft.rows, { parameterId: p.id, value: parameterValueSchema(p).defaultValue ?? p.currentValue,
       role: p.role === 'unclassified' ? '' : p.role }], sourceAttemptId: context!.sourceAttemptId })
     setSelected('')
   }
@@ -137,17 +138,18 @@ export function ParameterWorkspace({ task, onChanged, onOpenTask }: { task: Task
         <div className="parameter-heading"><h3>编辑修改方案</h3><Button appearance="subtle" disabled={!!busy || !!checking || task.executionStatus === 'RUNNING'} onClick={() => void refreshCatalog()}>{busy === 'refresh' ? '正在打开工程读取参数…' : '重新读取参数'}</Button>{dirty && <Badge appearance="outline">{draftPersisted ? '未提交 · 本机暂存' : '未提交 · 暂存不可用'}</Badge>}</div>
         {!available.length ? <p className="parameter-message">此基准尚无可编辑参数。旧版本工程结果需重新读取参数；变量需已被模型引用且为数值，材料需已加载到工程。</p> : <>
           <div className="parameter-picker"><Field label="搜索参数"><Input value={query} placeholder="对象名、变量名或类型" onChange={(_, d) => { setQuery(d.value); setSelected('') }} /></Field>
-            <Field label="选择参数"><Select value={selected} onChange={(_, d) => setSelected(d.value)}><option value="">{filtered.length ? `可添加 ${filtered.length} 项` : '没有匹配的参数'}</option>{filtered.map(p => <option key={p.id} value={p.id}>{p.label} · {adapterNames[p.adapter]}</option>)}</Select></Field>
+            <Field label="选择参数"><Select value={selected} onChange={(_, d) => setSelected(d.value)}><option value="">{filtered.length ? `可添加 ${filtered.length} 项` : '没有匹配的参数'}</option>{filtered.map(p => <option key={p.id} value={p.id}>{p.label} · {adapterName(p)}</option>)}</Select></Field>
             <Button icon={<Add20Regular />} disabled={!selected || stale} onClick={add}>添加</Button></div>
           {dirty ? <div className="parameter-edit-rows">{draft.rows.map((row, index) => {
             const p = available.find(p => p.id === row.parameterId)
+            const schema = p ? parameterValueSchema(p) : undefined
             const validation = rowError(row)
             const update = (patch: Partial<DraftRow>) => edit({ rows: draft.rows.map((r, i) => i === index ? { ...r, ...patch } : r) })
             return <div className="parameter-edit-row" key={row.parameterId}>
-              <div className="parameter-row-name"><strong>{p?.label ?? row.parameterId}</strong><span>{p ? adapterNames[p.adapter] : '参数已不可用'}</span><small>原值：{p?.currentValue ?? '未知'}</small></div>
+              <div className="parameter-row-name"><strong>{p?.label ?? row.parameterId}</strong><span>{p ? adapterName(p) : '参数已不可用'}</span><small>原值：{p?.currentValue ?? '未知'}</small></div>
               <Field label="目标值" validationState={touched[row.parameterId] && validation ? 'error' : 'none'} validationMessage={touched[row.parameterId] ? validation : undefined}
-                hint={p?.adapter === 'fan' ? '1.1 表示转速 +10%，允许 >1 至 1.5' : p?.unit ? `保留单位 ${p.unit}，例如 ${p.currentValue}` : undefined}>
-                {p?.choices ? <Select value={row.value} onChange={(_, d) => { update({ value: d.value }); setTouched(t => ({ ...t, [row.parameterId]: true })) }}>{p.choices.map(value => <option key={value}>{value}</option>)}</Select>
+                hint={schema?.hint ?? (p?.unit ? `保留单位 ${p.unit}，例如 ${p.currentValue}` : undefined)}>
+                {schema?.type === 'enum' ? <Select value={row.value} onChange={(_, d) => { update({ value: d.value }); setTouched(t => ({ ...t, [row.parameterId]: true })) }}>{schema.values!.map(value => <option key={value}>{value}</option>)}</Select>
                   : <Input aria-label={`${p?.label ?? row.parameterId} 目标值`} value={row.value} onChange={(_, d) => update({ value: d.value })} onBlur={() => setTouched(t => ({ ...t, [row.parameterId]: true }))} />}</Field>
               <Field label="参数用途">{p?.role === 'unclassified' ? <Select aria-label={`${p.label} 参数用途`} value={row.role} onChange={(_, d) => update({ role: d.value as DraftRow['role'] })}><option value="">请确认模型含义</option><option value="design">结构设计</option><option value="operating-condition">工况条件</option></Select> : <span className="parameter-role">{row.role === 'operating-condition' ? '工况条件' : '结构设计'}</span>}</Field>
               <Button appearance="subtle" icon={<Delete20Regular />} aria-label={`移除 ${p?.label ?? row.parameterId}`} onClick={() => edit({ rows: draft.rows.filter((_, i) => i !== index) })} />
@@ -172,7 +174,7 @@ export function ParameterWorkspace({ task, onChanged, onOpenTask }: { task: Task
             {plan.error && <p className="parameter-error" role="alert">{plan.error}</p>}
             {expanded === plan.id && <>
               <div className="parameter-diff" role="table" aria-label={`版本 ${plan.revision} 参数变更`}><div role="row" className="parameter-diff-head"><span role="columnheader">参数 / 对象</span><span role="columnheader">原值 → 目标值</span><span role="columnheader">保存后验证</span></div>
-                {plan.changes.map(change => { const action = plan.actionResults.find(a => a.parameterId === change.parameter.id); return <div role="row" key={change.parameter.id}><span role="cell"><strong>{change.parameter.label}</strong><small>{adapterNames[change.parameter.adapter]} · {change.role === 'design' ? '结构' : '工况'}</small></span><span role="cell">{change.parameter.currentValue} → <strong>{change.value}</strong></span><span role="cell">{action?.verified ? `已确认 ${action.verifiedAfter}` : plan.status === 'FAILED' ? '未验证通过' : '待验证'}</span></div> })}
+                {plan.changes.map(change => { const action = plan.actionResults.find(a => a.parameterId === change.parameter.id); return <div role="row" key={change.parameter.id}><span role="cell"><strong>{change.parameter.label}</strong><small>{adapterName(change.parameter)} · {change.role === 'design' ? '结构' : '工况'}</small></span><span role="cell">{change.parameter.currentValue} → <strong>{change.value}</strong></span><span role="cell">{action?.verified ? `已确认 ${action.verifiedAfter}` : plan.status === 'FAILED' ? '未验证通过' : '待验证'}</span></div> })}
               </div>
               <details className="parameter-identities"><summary>基准、工程与证据标识</summary><dl><dt>基准记录</dt><dd>{plan.sourceAttemptId}</dd><dt>输入工程 SHA256</dt><dd>{plan.sourceSha256}</dd><dt>验证工程 SHA256</dt><dd>{plan.verifiedProjectSha256 ?? '待生成'}</dd><dt>验证证据 SHA256</dt><dd>{plan.evidenceSha256 ?? '待生成'}</dd><dt>运行 ID</dt><dd>{plan.runId ?? '尚未执行'}</dd><dt>设计 / Setup / AEDT</dt><dd>{plan.design} / {plan.setup} / {plan.aedtVersion}</dd></dl></details>
               {context.plans.length > 1 && <Field label="与其他版本比较"><Select value={compare} onChange={(_, d) => setCompare(d.value)}><option value="">选择对比版本</option>{context.plans.filter(p => p.id !== plan.id).map(p => <option key={p.id} value={p.id}>v{p.revision} · {p.reason.slice(0, 35)}</option>)}</Select></Field>}
