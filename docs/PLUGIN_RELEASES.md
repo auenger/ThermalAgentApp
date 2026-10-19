@@ -27,6 +27,39 @@
 
 5. 在本机设置页导入 JSON 包，或把包放到 App workspace，通过 DSH 的 `thermal_install_plugin_release` 登记。随后 `thermal_reconcile_plugins` 触发环境检查与选择；CLI 也会每五分钟自动协调。包导入本身不执行代码、不改变更新策略、不激活版本。
 
+## HTTPS 自动更新源
+
+管理员可在 `<THERMAL_AGENT_HOME>/plugins/update-sources.json` 配置最多五个 HTTPS 目录：
+
+```json
+[{ "id": "company", "url": "https://updates.example.com/thermal/index.json" }]
+```
+
+示例域名需替换为实际部署地址。客户端不预设公共更新服务器，也不把更新源当成新的发布者公钥。DSH 只能触发已有策略下的检查，不能通过业务工具新增源或授信。
+
+发布目录与签名包置于同一 HTTPS origin，可用脚本生成目录文件，再由现有发布系统部署：
+
+```sh
+node scripts/create-plugin-update-catalog.mjs /releases/new-index.json /releases/report-release.json
+```
+
+脚本只写新文件，不覆盖已有目录；发布时将其部署为 `index.json`。目录格式为：
+
+```json
+{
+  "schemaVersion": 1,
+  "releases": [
+    { "url": "report-release.json", "sha256": "完整签名包 JSON 文件的 SHA-256" }
+  ]
+}
+```
+
+SHA-256 绑定下载的完整 envelope 字节，公钥签名另外绑定 payload。目录本身不授予代码信任，不允许跨 origin 包地址、URL 内用户名密码、HTTP 降级或重定向。下载不发送浏览器 Cookie。
+
+启动协调先准备本地插件，之后获取目录；慢网络不阻止已经就绪的本地运行时。自动更新关闭时不联网，仍检查本地环境和当前版本。下载成功后才重新走宿主验证和空闲激活；断网、错误签名及坏版本均不删除已安装版本。重启后缓存会重验签名与内容完整性，不只按文件名判断已下载。
+
+每个目录最多 64 KiB / 50 个包，每轮最多尝试 10 次包下载，包体读取预算 96 MiB（目录另计；超限流立即取消，不缓存）。单请求 15 秒、整轮 60 秒超时。失败包在当前进程内等待 15 分钟再试，其他候选仍可继续；重启不保留该等待计时。关闭 App 或关闭自动更新会取消正在进行的请求。设置页与 DSH 状态接口展示检查结果及源 ID，不展示可能含令牌的源 URL。
+
 ## 验证与激活
 
 - 包签名绑定完整 payload 字节，包括清单、文件路径与文件内容；宿主校验发布者插件范围，拒绝路径穿越、大小写歧义及超量文件。登记后的版本由已有内容寻址存储保护。
@@ -39,7 +72,7 @@
 
 签名 envelope 为 `{schemaVersion:1,publisherId,payload,signature}`，payload/signature 使用标准 Base64。签名算法 Ed25519，签名原文为 payload 解码后的原始字节。payload 为 `{schemaVersion:1,publishedAt,files}`，files 把相对路径映射为文件内容 Base64。不得重新序列化 payload 后再校验签名。
 
-单个 JSON 包上限 48 MiB，解码文件总量上限 32 MiB，文件最多 2000 个。离线 inbox 一次最多扫描 200 个签名原件。包不包含也不安装 Python 依赖；依赖隔离与网络更新源尚待实现。
+单个 JSON 包上限 48 MiB，解码文件总量上限 32 MiB，文件最多 2000 个。离线 inbox 一次最多扫描 200 个签名原件。包不包含也不安装 Python 依赖；独立依赖部署尚待实现。网络传输测试使用临时证书的真实 TLS 服务，未验收客户代理、私有 CA 部署或真实生产更新站点。
 
 发布者配置属于本机管理员配置，不提供给 DSH 修改的业务工具。DSH 当前仍具有同用户的通用文件能力，这不是对恶意同权限进程的 OS 隔离。自主生成代码的执行隔离和授信流程仍未交付，不可把自签名候选当成可信发布版本。
 

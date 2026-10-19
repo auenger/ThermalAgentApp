@@ -94,6 +94,17 @@ export class PluginReleaseInbox {
     } finally { rmSync(temporary, { force: true }) }
     return release
   }
+  restoreEnvelope(sha256: string): boolean {
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) return false
+    try {
+      const path = join(this.inbox, `${sha256}.json`), stat = lstatSync(path)
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_PLUGIN_RELEASE_BYTES) return false
+      const bytes = readFileSync(path)
+      if (createHash('sha256').update(bytes).digest('hex') !== sha256) return false
+      this.install(bytes) // Recheck publisher policy and immutable package integrity, including after restart.
+      return true
+    } catch { return false }
+  }
   scan() {
     const releases: Array<{ digest: string; publisherId: string; id: string }> = [], errors: string[] = []
     for (const name of readdirSync(this.inbox).filter(name => /^[a-f0-9]{64}\.json$/u.test(name)).sort().slice(0, 200)) {

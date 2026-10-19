@@ -71,6 +71,29 @@ test('disabled automatic upgrades retain an installed version while still checki
   assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '2.0.0')
 })
 
+test('startup prepares local runtimes before network discovery and disabling updates cancels pending downloads', async t => {
+  const f = await fixture(t)
+  let announce, aborted = false
+  const entered = new Promise(resolve => { announce = resolve })
+  const host = new PluginHost(f.home, { ...f.options,
+    updateSources: () => [{ id: 'company', url: 'https://updates.test/index.json' }],
+    fetchUpdates: async (_url, options) => new Promise((_resolve, reject) => {
+      announce()
+      options.signal.addEventListener('abort', () => { aborted = true; reject(options.signal.reason) }, { once: true })
+    }) })
+  t.after(() => host.close())
+  host.start()
+  await entered
+  assert.equal(host.status().updates.phase, 'checking')
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0', 'slow discovery must not block the local runtime')
+  assert.equal(host.status().runtimes.every(runtime => runtime.phase === 'ready'), true)
+  host.setAutomaticUpdates(false)
+  await host.close()
+  assert.equal(aborted, true)
+  assert.equal(host.status().automaticUpdates, false)
+  assert.equal(host.status().updates.phase, 'cancelled')
+})
+
 test('Core plugin management API uses the managed default client and rejects foreign-origin mutations', async t => {
   const f = await fixture(t)
   const host = new PluginHost(f.home, f.options)

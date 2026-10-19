@@ -11,6 +11,7 @@ import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-clien
 import { ReportClient, type ReportPort } from './report-client.js'
 import { PluginReleaseInbox, parsePluginPublishers, type PluginPublisher } from './plugin-release.js'
 import { validateReportRelease } from './plugin-report-validation.js'
+import { PluginUpdateFeed } from './plugin-update-feed.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -40,6 +41,7 @@ export class PluginHost {
   private timer?: NodeJS.Timeout
   private closed = false
   private readonly releases: PluginReleaseInbox
+  private readonly updates: PluginUpdateFeed
   private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
 
   constructor(private readonly home: string, options: {
@@ -48,6 +50,8 @@ export class PluginHost {
     inspect?: typeof inspectPythonRuntime
     refreshMs?: number
     publishers?: () => PluginPublisher[]
+    updateSources?: () => unknown
+    fetchUpdates?: typeof fetch
   } = {}) {
     this.inspect = options.inspect ?? inspectPythonRuntime
     this.refreshMs = options.refreshMs ?? 5 * 60_000
@@ -57,6 +61,10 @@ export class PluginHost {
       const path = join(home, 'publishers.json')
       return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
     }))
+    this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
+      const path = join(home, 'update-sources.json')
+      return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
+    }), options.fetchUpdates)
     this.controllers = { icepak: new PluginAdaptationController(this.store), report: new PluginAdaptationController(this.store) }
     this.policyPath = join(home, 'policy.json')
     this.policy = existsSync(this.policyPath) ? this.readPolicy() : { automaticUpdates: true, builtinDigests: [], held: {} }
@@ -103,11 +111,12 @@ export class PluginHost {
 
   setAutomaticUpdates(enabled: boolean): void {
     this.savePolicy({ ...this.policy, automaticUpdates: enabled })
+    if (!enabled) this.updates.cancel()
   }
 
   status() {
     const registry = this.store.list()
-    return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus,
+    return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
@@ -126,6 +135,15 @@ export class PluginHost {
     for (const kind of ['icepak', 'report'] as const) {
       try { await this.ensure(kind, true) }
       catch { /* Runtime-specific diagnostics are exposed in status; one unavailable solver must not hide the other. */ }
+    }
+    // Make local versions available first; an unreachable update server must not hold startup hostage.
+    if (this.closed) return this.status()
+    const updates = await this.updates.poll(this.policy.automaticUpdates)
+    if (updates.downloaded && !this.closed) {
+      for (const kind of ['icepak', 'report'] as const) {
+        try { await this.ensure(kind, true) }
+        catch { /* A rejected update keeps diagnostics and the last usable trusted version. */ }
+      }
     }
     return this.status()
   }
@@ -169,6 +187,7 @@ export class PluginHost {
   async close(): Promise<void> {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
+    await this.updates.close()
     await Promise.allSettled(Object.values(this.runtimes).flatMap(runtime => runtime.pending ? [runtime.pending] : []))
   }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { generateKeyPairSync, sign } from 'node:crypto'
+import { generateKeyPairSync, sign, createHash } from 'node:crypto'
 import { mkdtemp, cp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -49,7 +49,7 @@ test('signed releases bind every byte to a scoped Ed25519 publisher before regis
   assert.match(inbox.scan().errors[0], /revoked/)
 })
 
-test('signed report update uses real PDF readback, survives restart, and falls back on bad output or revoked publisher', async t => {
+test('automatic report discovery uses real PDF readback, survives offline restart, and falls back on bad output or revoked publisher', async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-release-host-'))
   const { privateKey, publisher } = keys()
   const keyPath = join(root, 'test-signing.pem')
@@ -68,15 +68,29 @@ test('signed report update uses real PDF readback, survives restart, and falls b
     return readFile(path)
   }
   let publishers = [publisher]
-  const home = join(root, 'host'), options = { report: config, publishers: () => publishers }
+  let remoteBytes, offline = false, downloads = 0
+  const home = join(root, 'host'), options = { report: config, publishers: () => publishers,
+    updateSources: () => [{ id: 'company', url: 'https://updates.test/index.json' }],
+    fetchUpdates: async url => {
+      if (offline) throw new TypeError('fetch failed')
+      if (url.endsWith('index.json')) return Response.json({ schemaVersion: 1, releases: remoteBytes ? [{ url: 'release.json', sha256: createHash('sha256').update(remoteBytes).digest('hex') }] : [] })
+      downloads++; return new Response(remoteBytes)
+    } }
   let host = new PluginHost(home, options)
   t.after(async () => { await host.close(); await rm(root, { recursive: true, force: true }) })
   await host.reconcile()
   const initial = host.status().active['report-reportlab'].current
-  const good = host.installRelease(await release('0.1.1'))
+  remoteBytes = await release('0.1.1')
+  host.setAutomaticUpdates(false)
+  await host.reconcile()
+  assert.equal(downloads, 0)
   assert.equal(host.status().active['report-reportlab'].current, initial)
+  host.setAutomaticUpdates(true)
   await host.reconcile()
   let status = host.status()
+  const good = status.revisions.find(revision => revision.manifest.id === 'report-reportlab' && revision.manifest.version === '0.1.1')
+  assert.ok(good, JSON.stringify(status.updates))
+  assert.equal(downloads, 1); assert.equal(status.updates.downloaded, 1)
   assert.equal(status.active['report-reportlab'].current, good.digest, JSON.stringify(status.validations))
   assert.equal(status.validations.find(item => item.packageDigest === good.digest).checks.some(check => check.name === 'report-fixture-readback' && check.passed), true)
   const report = await host.report.renderTaskReport({ outputPath: join(root, 'upgraded.pdf'), generatedAt: '2026-01-01T00:00:00.000Z',
@@ -84,9 +98,11 @@ test('signed report update uses real PDF readback, survives restart, and falls b
   assert.equal(report.pluginRuntime.packageDigest, good.digest)
   assert.equal(report.pluginRuntime.pluginVersion, '0.1.1')
   assert.equal((await readFile(report.outputPath)).subarray(0, 4).toString(), '%PDF')
-  await host.close(); host = new PluginHost(home, options)
+  await host.close(); offline = true; host = new PluginHost(home, options)
   await host.reconcile()
   assert.equal(host.status().active['report-reportlab'].current, good.digest)
+  assert.equal(host.status().updates.phase, 'error')
+  assert.equal(downloads, 1)
   const bad = host.installRelease(await release('0.1.2', true))
   await host.reconcile()
   status = host.status()

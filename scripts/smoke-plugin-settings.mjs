@@ -1,0 +1,46 @@
+// Run after pnpm build. Uses an isolated client home and an intentionally offline update source.
+import assert from 'node:assert/strict'
+import { mkdtemp, rm, mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { createCoreApp } from '../apps/core/dist/server.js'
+import { PluginHost } from '../apps/core/dist/plugin-host.js'
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
+const home = await mkdtemp(join(tmpdir(), 'thermal-plugin-ui-'))
+let networkCalls = 0
+const plugins = new PluginHost(join(home, 'plugins'), {
+  updateSources: () => [{ id: 'company', url: 'https://updates.test/index.json' }],
+  fetchUpdates: async () => { networkCalls++; throw new TypeError('offline fixture') },
+})
+const app = createCoreApp({ home, pluginHost: plugins, startAgentRuntime: false, startRemoteSolve: false })
+let browser
+try {
+  await plugins.reconcile()
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve))
+  browser = await chromium.launch({ headless: true })
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto(`http://127.0.0.1:${app.server.address().port}`)
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  const settings = page.locator('#plugin-runtime-settings')
+  await settings.getByText(/获取失败，保留本地可用版本/).waitFor()
+  await settings.getByText(/company · 新包 0/).waitFor()
+  const automatic = settings.getByRole('switch', { name: '自动获取并选择兼容版本' })
+  assert.equal(await automatic.isChecked(), true)
+  await automatic.click()
+  await settings.getByRole('button', { name: '立即检查环境与插件' }).waitFor()
+  assert.equal(await automatic.isChecked(), false)
+  const before = networkCalls
+  await settings.getByRole('button', { name: '立即检查环境与插件' }).click()
+  await settings.getByText(/自动获取已关闭/).waitFor()
+  assert.equal(networkCalls, before)
+  assert.equal(plugins.status().automaticUpdates, false)
+  const directory = resolve('.thermal-agent/screenshots/plugin-settings')
+  await mkdir(directory, { recursive: true })
+  await page.screenshot({ path: join(directory, 'desktop.png'), fullPage: true })
+  await page.setViewportSize({ width: 375, height: 812 })
+  assert.equal(await settings.evaluate(element => element.scrollWidth > element.clientWidth + 1), false)
+  assert.deepEqual(errors, [])
+  console.log(JSON.stringify({ success: true, covered: ['source diagnostics', 'policy switch', 'disabled network', '375px'] }))
+} finally { await browser?.close(); await app.close(); await rm(home, { recursive: true, force: true }) }

@@ -7,6 +7,8 @@ interface PluginStatus {
   active: Record<string, { current: string; previous?: string }>
   revisions: Array<{ digest: string; manifest: { id: string; version: string } }>
   releases: { releases: Array<{ digest: string; publisherId: string; id: string }>; errors: string[] }
+  updates: { phase: string; checkedAt: string | null; downloaded: number; cached: number; error?: string;
+    sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }> }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
     environment?: { platform: string; architecture: string; versions: Record<string, string> };
     result?: { status: string; diagnostics: string[] } }>
@@ -53,10 +55,17 @@ export function PluginSettings() {
     <h2>插件与自适应升级</h2>
     <p>按本机环境检查已信任的插件版本，在任务空闲时切换。已开始的工程作业会继续使用原版本。</p>
     <div className="model-file-actions">
-      <Switch label="自动检查与适配更新" checked={status?.automaticUpdates ?? false} disabled={busy || !status}
+      <Switch label="自动获取并选择兼容版本" checked={status?.automaticUpdates ?? false} disabled={busy || !status}
         onChange={(_, data) => void action('policy', { automaticUpdates: data.checked })} />
       <Button disabled={busy} onClick={() => void action('reconcile')}>{busy ? '正在处理…' : '立即检查环境与插件'}</Button>
     </div>
+    {status?.updates && <div>
+      <p>更新源：{({ idle: '尚未配置', checking: '正在检查', disabled: '自动获取已关闭', ready: '检查完成', error: '获取失败，保留本地可用版本', cancelled: '检查已停止' } as Record<string, string>)[status.updates.phase] ?? status.updates.phase}
+        {status.updates.checkedAt ? ` · ${new Date(status.updates.checkedAt).toLocaleString()}` : ''}</p>
+      {status.updates.error && <p role="alert">{status.updates.error}</p>}
+      {status.updates.sources.map(source => <div key={source.id}><p>{source.id} · 新包 {source.downloaded} · 本地已有 {source.cached}</p>
+        {source.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}</div>)}
+    </div>}
     <label>导入签名插件包 <input type="file" accept=".json,application/json" disabled={busy} onChange={event => {
       const file = event.target.files?.[0]
       event.target.value = ''

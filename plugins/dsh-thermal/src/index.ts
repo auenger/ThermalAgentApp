@@ -101,7 +101,7 @@ export function apply(ctx: Context): void {
   }))
   ctx.tools.register(defineTool({
     name: 'thermal_reconcile_plugins',
-    description: 'Inspect the local Python environment and reconcile already trusted installed plugins under the user’s saved update policy. Defers switching while engineering work is active. Does not install untrusted code, change policy or run an engineering solve.',
+    description: 'Inspect the local Python environment, fetch signed releases from administrator-configured HTTPS update sources when automatic updates are enabled, and reconcile trusted plugins under the saved policy. Defers switching while engineering work is active. Does not add trust keys, change policy or run an engineering solve.',
     parameters: {}, output: textOutput(), isConcurrencySafe: () => false,
     async execute(_args, exec) { return JSON.stringify(await bridgeRequest('/v1/plugins/reconcile', exec.signal, {})) },
   }))

@@ -92,7 +92,7 @@ export class ThermalToolsBridge {
       const status = request.method === 'POST' ? await this.plugins.reconcile() : this.plugins.status()
       writeJson(response, 200, { automaticUpdates: status.automaticUpdates, held: status.held, runtimes: status.runtimes,
         active: status.active, revisions: status.revisions.map(revision => ({ digest: revision.digest, manifest: revision.manifest })),
-        validations: status.validations, releases: status.releases, scope: 'Trusted installed packages only; signed reports require PDF readback; external engineering packages remain candidates' })
+        validations: status.validations, releases: status.releases, updates: status.updates, scope: 'Configured update sources and trusted packages only; signed reports require PDF readback; external engineering packages remain candidates' })
       return
     }
     if (request.method === 'POST' && url.pathname === '/v1/plugins/install') {
