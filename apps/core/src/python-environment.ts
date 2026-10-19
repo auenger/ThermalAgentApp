@@ -76,7 +76,7 @@ print(json.dumps({'executable': str(executable), 'environment': {'platform': sys
 export interface PythonRuntimeSnapshot { executable: string; environment: PluginEnvironment }
 
 export async function inspectPythonRuntime(python: string, distributions: readonly string[], timeoutMs = 60_000, launch: PythonSpawner = spawnPython): Promise<PythonRuntimeSnapshot> {
-  if (distributions.length > 20 || distributions.some(name => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/u.test(name))) throw new Error('Invalid Python distribution names')
+  if (distributions.length > 128 || distributions.some(name => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/u.test(name))) throw new Error('Invalid Python distribution names')
   return new Promise((resolve, reject) => {
     const child = launch(python, ['-I', '-B', '-c', PROBE, JSON.stringify(distributions)], {
       env: pythonPluginEnv(), windowsHide: true,

@@ -84,11 +84,11 @@ export class PluginHost {
     try {
       this.store = new PluginStore(join(home, 'registry'))
       this.runtimeStorage = new PluginRuntimeStorage(join(home, 'python-environments'))
-      this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'), this.runtimeStorage)
       this.releases = new PluginReleaseInbox(home, this.store, options.publishers ?? (() => {
         const path = join(home, 'publishers.json')
         return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
       }))
+      this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'), this.runtimeStorage, this.releases.assets)
       this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
         const path = join(home, 'update-sources.json')
         return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []

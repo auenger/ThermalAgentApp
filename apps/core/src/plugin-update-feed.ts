@@ -7,6 +7,9 @@ export interface PluginUpdateStatus {
   checkedAt: string | null
   downloaded: number
   cached: number
+  assetDownloaded: number
+  assetCached: number
+  assetBytes: number
   sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }>
   error?: string
 }
@@ -45,13 +48,13 @@ function parseCatalog(bytes: Buffer, source: PluginUpdateSource) {
 
 /** Catalogs locate packages; only the existing publisher/signature verifier can confer trust. */
 export class PluginUpdateFeed {
-  private state: PluginUpdateStatus = { phase: 'idle', checkedAt: null, downloaded: 0, cached: 0, sources: [] }
+  private state: PluginUpdateStatus = { phase: 'idle', checkedAt: null, downloaded: 0, cached: 0, assetDownloaded: 0, assetCached: 0, assetBytes: 0, sources: [] }
   private pending?: Promise<PluginUpdateStatus>
   private controller?: AbortController
   private closed = false
   private readonly retryAfter = new Map<string, number>()
   constructor(private readonly inbox: PluginReleaseInbox, private readonly sources: () => unknown,
-    private readonly fetcher: typeof fetch = fetch, private readonly requestTimeoutMs = 15_000) {}
+    private readonly fetcher: typeof fetch = fetch, private readonly requestTimeoutMs = 15_000, private readonly assetTimeoutMs = 300_000) {}
 
   status(): PluginUpdateStatus { return structuredClone(this.state) }
   cancel(): void { this.controller?.abort(new Error('Plugin update cancelled')) }
@@ -99,8 +102,8 @@ export class PluginUpdateFeed {
   }
 
   private async run(cancellation: AbortSignal): Promise<PluginUpdateStatus> {
-    this.state = { phase: 'checking', checkedAt: new Date().toISOString(), downloaded: 0, cached: 0, sources: [] }
-    const signal = AbortSignal.any([cancellation, AbortSignal.timeout(60_000)])
+    this.state = { phase: 'checking', checkedAt: new Date().toISOString(), downloaded: 0, cached: 0, assetDownloaded: 0, assetCached: 0, assetBytes: 0, sources: [] }
+    const signal = AbortSignal.any([cancellation, AbortSignal.timeout(10 * 60_000)])
     let attempts = 0, downloadedBytes = 0
     try {
       const sources = parsePluginUpdateSources(this.sources())
@@ -112,18 +115,37 @@ export class PluginUpdateFeed {
           const catalog = parseCatalog(await this.bytes(source.url, 64 * 1024, signal), source)
           for (const release of catalog) {
             signal.throwIfAborted()
-            if (this.inbox.restoreEnvelope(release.sha256)) { status.cached++; this.state.cached++; continue }
             if ((this.retryAfter.get(release.sha256) ?? 0) > Date.now()) {
               status.errors.push(`Release ${release.sha256.slice(0, 12)} is waiting for its retry window`); continue
             }
-            if (++attempts > 10 || downloadedBytes >= 96 * 1024 * 1024) { status.errors.push('Update cycle download budget reached'); break }
             try {
-              const bytes = await this.bytes(release.url, Math.min(MAX_PLUGIN_RELEASE_BYTES, 96 * 1024 * 1024 - downloadedBytes), signal, size => { downloadedBytes += size })
+              const cached = this.inbox.cachedEnvelope(release.sha256)
+              let changed = !cached
+              if (!cached && (++attempts > 10 || downloadedBytes >= 96 * 1024 * 1024)) { status.errors.push('Update cycle download budget reached'); break }
+              const bytes = cached ?? await this.bytes(release.url, Math.min(MAX_PLUGIN_RELEASE_BYTES, 96 * 1024 * 1024 - downloadedBytes), signal, size => { downloadedBytes += size })
               if (createHash('sha256').update(bytes).digest('hex') !== release.sha256) throw new Error('Downloaded release digest mismatch')
+              // Authenticate the code, publisher scope and wheel descriptors before requesting any asset.
+              const { manifest } = this.inbox.describe(bytes)
+              if (manifest.compatibility.platforms.includes(process.platform) && manifest.compatibility.architectures.includes(process.arch)) {
+                for (const wheel of manifest.pythonRuntime?.wheels ?? []) {
+                  if (!wheel.asset) continue
+                  if (await this.inbox.assets.has(wheel, signal)) { this.state.assetCached++; continue }
+                  if (!changed) { if (++attempts > 10) throw new Error('Update cycle download budget reached'); changed = true }
+                  if (this.state.assetBytes + wheel.asset.sizeBytes > 2 * 1024 ** 3) throw new Error('Update cycle wheel asset budget reached')
+                  const url = new URL(`assets/${wheel.sha256}.whl`, release.url)
+                  if (url.origin !== new URL(source.url).origin) throw new Error('Wheel asset must stay on the configured source origin')
+                  await this.inbox.assets.download(wheel, url.href, this.fetcher, AbortSignal.any([signal, AbortSignal.timeout(this.assetTimeoutMs)]),
+                    size => { this.state.assetBytes += size })
+                  this.state.assetDownloaded++
+                }
+              }
               signal.throwIfAborted()
-              this.inbox.accept(bytes)
+              if (cached) {
+                if (!this.inbox.restoreEnvelope(release.sha256)) throw new Error('Cached signed release failed restoration')
+              } else this.inbox.accept(bytes)
               this.retryAfter.delete(release.sha256)
-              status.downloaded++; this.state.downloaded++
+              if (changed) { status.downloaded++; this.state.downloaded++ }
+              else { status.cached++; this.state.cached++ }
             } catch (error) {
               if (!signal.aborted) {
                 if (this.retryAfter.size >= 500) this.retryAfter.delete(this.retryAfter.keys().next().value!)

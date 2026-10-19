@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { join, dirname } from 'node:path'
 import { parseManagedPluginManifest } from '@thermal-agent/contracts'
 import { PluginStore } from './plugin-store.js'
+import { PluginWheelAssets } from './plugin-wheel-assets.js'
 
 export interface PluginPublisher { id: string; publicKey: string; pluginIds: string[] }
 export const MAX_PLUGIN_RELEASE_BYTES = 48 * 1024 * 1024
@@ -60,15 +61,30 @@ export function verifyPluginRelease(bytes: Buffer, publishers: readonly PluginPu
   if (!manifestBytes || manifestBytes.length > 64 * 1024) throw new Error('Missing or oversized release manifest')
   const manifest = parseManagedPluginManifest(JSON.parse(manifestBytes.toString('utf8')))
   if (!publisher.pluginIds.includes(manifest.id)) throw new Error('Publisher is not authorized for this plugin')
+  for (const wheel of manifest.pythonRuntime?.wheels ?? []) {
+    if (wheel.asset && files.some(file => file.path === `${manifest.entry.root}/${wheel.path}`)) throw new Error('External wheel assets must not also be embedded in the release')
+  }
   return { publisherId: publisher.id, manifest, files }
 }
 
 /** Persistent offline inbox; signature policy is rechecked every scan, including after restart/revocation. */
 export class PluginReleaseInbox {
   private readonly inbox: string
+  readonly assets: PluginWheelAssets
   constructor(private readonly home: string, private readonly store: PluginStore, private readonly publishers: () => PluginPublisher[]) {
     this.inbox = join(home, 'releases')
+    this.assets = new PluginWheelAssets(join(home, 'wheel-assets'))
     mkdirSync(this.inbox, { recursive: true })
+  }
+  describe(bytes: Buffer) { return verifyPluginRelease(bytes, this.publishers()) }
+  cachedEnvelope(sha256: string): Buffer | undefined {
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) return undefined
+    try {
+      const path = join(this.inbox, `${sha256}.json`), stat = lstatSync(path)
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_PLUGIN_RELEASE_BYTES) return undefined
+      const bytes = readFileSync(path)
+      return createHash('sha256').update(bytes).digest('hex') === sha256 ? bytes : undefined
+    } catch { return undefined }
   }
   private install(bytes: Buffer) {
     const release = verifyPluginRelease(bytes, this.publishers())

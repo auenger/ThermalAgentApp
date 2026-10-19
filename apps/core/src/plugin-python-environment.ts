@@ -8,6 +8,7 @@ import { inspectPythonRuntime, type PythonRuntimeSnapshot } from './python-envir
 import { pluginEnvironmentDigest } from './plugin-store.js'
 import { pythonEnvironmentFiles } from './python-environment-files.js'
 import { PluginRuntimeStorage, spawnPython, type PythonSpawner } from './plugin-runtime-storage.js'
+import type { PluginWheelAssets } from './plugin-wheel-assets.js'
 
 export interface PythonEnvironmentRepair {
   packageDigest: string; key: string; previousDirectory: string; reason: string; detectedAt: string;
@@ -41,7 +42,7 @@ async function command(python: string, args: string[], signal?: AbortSignal, lau
 /** A venv is created at its final unique path: Python environments must not be moved after creation. */
 export class PluginPythonEnvironments {
   private readonly repairs = new Map<string, PythonEnvironmentRepair>()
-  constructor(private readonly home: string, private readonly storage = new PluginRuntimeStorage(home)) {}
+  constructor(private readonly home: string, private readonly storage = new PluginRuntimeStorage(home), private readonly assets?: PluginWheelAssets) {}
 
   status(): PythonEnvironmentRepair[] { return structuredClone([...this.repairs.values()]) }
 
@@ -69,7 +70,7 @@ export class PluginPythonEnvironments {
     const distributions = [...new Set([...input.distributions, 'pip', 'setuptools', ...lock.wheels.map(w => w.name)])]
     const inspect = async (directory: string) => {
       const python = join(directory, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
-      const snapshot = await inspectPythonRuntime(python, distributions, 60_000, this.storage.forDirectory(directory))
+      const snapshot = await inspectPythonRuntime(python, distributions, 120_000, this.storage.forDirectory(directory))
       for (const wheel of lock.wheels) if (snapshot.environment.versions[wheel.name] !== wheel.version) throw new Error(`Installed dependency does not match lock: ${wheel.name}`)
       // Binding the independent host reference also invalidates receipts when the shipped verifier changes.
       snapshot.environment.versions['host-reference'] = pluginEnvironmentDigest(input.base.environment)
@@ -137,6 +138,13 @@ export class PluginPythonEnvironments {
       const run = (python: string, args: string[]) => command(python, args, input.signal, this.storage.forDirectory(directory))
       const wheelPaths: string[] = [], requirements: string[] = []
       for (const wheel of lock.wheels) {
+        if (wheel.asset) {
+          if (!this.assets) throw Object.assign(new Error('External wheel asset cache is not configured'), { code: 'RUNTIME_ASSET_UNAVAILABLE' })
+          const path = await this.assets.materialize(wheel, join(directory, '.wheel-inputs'), input.signal)
+          wheelPaths.push(path)
+          requirements.push(`${pathToFileURL(path).href} --hash=sha256:${wheel.sha256}`)
+          continue
+        }
         const path = join(input.root, wheel.path), stat = await lstat(path)
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32 * 1024 * 1024) throw new Error('Invalid locked wheel file')
         const bytes = await readFile(path)
@@ -145,7 +153,7 @@ export class PluginPythonEnvironments {
         requirements.push(`${pathToFileURL(path).href} --hash=sha256:${wheel.sha256}`)
       }
       await run(input.base.executable, ['-c',
-        'import sys,zipfile\nn=0;size=0\nfor p in sys.argv[1:]:\n with zipfile.ZipFile(p) as z:\n  n+=len(z.infolist());size+=sum(i.file_size for i in z.infolist())\n  if n>100000 or size>512*1024*1024: raise RuntimeError("Wheel expansion budget exceeded")', ...wheelPaths])
+        'import sys,zipfile\nn=0;size=0\nfor p in sys.argv[1:]:\n with zipfile.ZipFile(p) as z:\n  n+=len(z.infolist());size+=sum(i.file_size for i in z.infolist())\n  if n>200000 or size>2*1024*1024*1024: raise RuntimeError("Wheel expansion budget exceeded")', ...wheelPaths])
       await run(input.base.executable, ['-m', 'venv', process.platform === 'win32' ? '--copies' : '--symlinks', directory])
       const python = join(directory, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python')
       const requirementsPath = join(directory, 'locked-requirements.txt')
@@ -153,6 +161,7 @@ export class PluginPythonEnvironments {
       await run(python, ['-m', 'pip', '--isolated', 'install', '--prefix', directory, '--no-user', '--no-index', '--no-deps',
         '--require-hashes', '--only-binary=:all:', '--no-compile', '--no-cache-dir', '--disable-pip-version-check', '-r', requirementsPath])
       await run(python, ['-m', 'pip', '--isolated', 'check', '--disable-pip-version-check'])
+      await rm(join(directory, '.wheel-inputs'), { recursive: true, force: true })
       const snapshot = await inspect(directory)
       const filesDigest = await pythonEnvironmentFiles(directory, input.signal)
       this.storage.own(directory, key, input.digest, pluginEnvironmentDigest(snapshot.environment))
@@ -164,8 +173,9 @@ export class PluginPythonEnvironments {
       if (repair) await this.recordRepair({ ...repair, status: 'prepared', replacementDirectory: name }).catch(() => {})
       return snapshot
     } catch (error) {
+      if (input.signal?.aborted) error = Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
       if (created) { await rm(directory, { recursive: true, force: true }); this.storage.forget(directory) }
-      if (!['VALIDATION_DEFERRED', 'RUNTIME_RETRY_DEFERRED'].includes((error as { code?: string })?.code ?? '')) {
+      if (!['VALIDATION_DEFERRED', 'RUNTIME_RETRY_DEFERRED', 'RUNTIME_ASSET_UNAVAILABLE'].includes((error as { code?: string })?.code ?? '')) {
         await writeFile(failurePath, JSON.stringify({ at: Date.now(), error: error instanceof Error ? error.message : String(error) }), { mode: 0o600 })
       }
       if (repair) await this.recordRepair({ ...repair, status: 'failed', error: error instanceof Error ? error.message : String(error) }).catch(() => {})

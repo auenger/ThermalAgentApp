@@ -5,7 +5,7 @@ import { isAbsolute, join, relative } from 'node:path'
 
 /** Inspect cached runtime bytes without starting its interpreter or executing site/.pth hooks. */
 export async function pythonEnvironmentFiles(root: string, signal?: AbortSignal): Promise<string> {
-  const deadline = Date.now() + 60_000
+  const deadline = Date.now() + 120_000
   const check = () => {
     if (signal?.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
     if (Date.now() > deadline) throw new Error('Python runtime file inventory timed out')
@@ -18,7 +18,7 @@ export async function pythonEnvironmentFiles(root: string, signal?: AbortSignal)
   const hashFile = async (path: string) => {
     const before = await lstat(path)
     if (!before.isFile() || before.isSymbolicLink()) throw new Error('Invalid runtime file')
-    if (bytes + before.size > 1024 ** 3) throw new Error('Python runtime file inventory exceeds 1 GiB')
+    if (bytes + before.size > 4 * 1024 ** 3) throw new Error('Python runtime file inventory exceeds 4 GiB')
     const hash = createHash('sha256'), stream = createReadStream(path)
     const stop = () => stream.destroy(Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' }))
     const timer = setTimeout(() => stream.destroy(new Error('Python runtime file inventory timed out')), Math.max(1, deadline - Date.now()))
@@ -27,7 +27,7 @@ export async function pythonEnvironmentFiles(root: string, signal?: AbortSignal)
     try {
       for await (const chunk of stream) {
         check(); size += chunk.length; bytes += chunk.length
-        if (bytes > 1024 ** 3) throw new Error('Python runtime file inventory exceeds 1 GiB')
+        if (bytes > 4 * 1024 ** 3) throw new Error('Python runtime file inventory exceeds 4 GiB')
         hash.update(chunk)
       }
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', stop); stream.destroy() }
@@ -40,7 +40,7 @@ export async function pythonEnvironmentFiles(root: string, signal?: AbortSignal)
     for (const name of (await readdir(directory)).sort()) {
       check()
       if (name === '.DS_Store') continue
-      if (++entries > 100_000) throw new Error('Python runtime inventory exceeds 100000 entries')
+      if (++entries > 200_000) throw new Error('Python runtime inventory exceeds 200000 entries')
       const path = join(directory, name), key = prefix ? `${prefix}/${name}` : name, stat = await lstat(path)
       if (stat.isSymbolicLink()) {
         const link = await readlink(path), target = await realpath(path), targetStat = await lstat(target)

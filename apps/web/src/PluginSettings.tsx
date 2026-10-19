@@ -12,6 +12,7 @@ interface PluginStatus {
     checks: Array<{ name: string; passed: boolean; detail: string }> }>
   releases: { releases: Array<{ digest: string; publisherId: string; id: string }>; errors: string[] }
   updates: { phase: string; checkedAt: string | null; downloaded: number; cached: number; error?: string;
+    assetDownloaded?: number; assetCached?: number; assetBytes?: number;
     sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }> }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
     dependencyMode?: 'isolated' | 'base'; pythonExecutable?: string;
@@ -82,6 +83,9 @@ export function PluginSettings() {
       <p>更新源：{({ idle: '尚未配置', checking: '正在检查', disabled: '自动获取已关闭', ready: '检查完成', error: '获取失败，保留本地可用版本', cancelled: '检查已停止' } as Record<string, string>)[status.updates.phase] ?? status.updates.phase}
         {status.updates.checkedAt ? ` · ${new Date(status.updates.checkedAt).toLocaleString()}` : ''}</p>
       {status.updates.error && <p role="alert">{status.updates.error}</p>}
+      {!!(status.updates.assetDownloaded || status.updates.assetCached || status.updates.assetBytes) && <p>
+        依赖资产：已下载 {status.updates.assetDownloaded ?? 0} 个 · 复用 {status.updates.assetCached ?? 0} 个 · 本轮传输 {((status.updates.assetBytes ?? 0) / 1024 / 1024).toFixed(1)} MiB
+      </p>}
       {status.updates.sources.map(source => <div key={source.id}><p>{source.id} · 新包 {source.downloaded} · 本地已有 {source.cached}</p>
         {source.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}</div>)}
     </div>}
