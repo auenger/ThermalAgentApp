@@ -5,19 +5,31 @@ import { DshHost, type DshStatus } from './dsh-host.js'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { ThermalToolsBridge } from './thermal-tools-bridge.js'
 import type { PluginHost } from './plugin-host.js'
+import type { RepairJobTransport } from './plugin-repair-jobs.js'
 
 export class DshRuntime {
   private readonly bridge: ThermalToolsBridge
   private host?: DshHost
   private status: DshStatus = { phase: 'unconfigured', detail: 'DSH runtime has not started' }
   private startTask?: Promise<void>
+  private repairTimer?: NodeJS.Timeout
+  private closing = false
+  private repairSuspended = false
+  private readonly repairTransport: RepairJobTransport = {
+    dispatch: async job => {
+      if (this.closing || this.status.phase !== 'ready') throw new Error('DSH repair runtime is not ready')
+      const result = await this.bridge.dshSessionRequest<{ accepted: boolean }>('run-repair', { ...job })
+      if (result.accepted !== true) throw new Error('DSH repair prompt was not accepted')
+    },
+    stop: async job => { await this.bridge.dshSessionRequest('stop-repair', { sessionId: job.sessionId }) },
+  }
 
   constructor(
     private readonly home: string,
     database: LocalDatabase,
     icepak: IcepakPluginPort,
     nodeId: string,
-    plugins?: PluginHost,
+    private readonly plugins?: PluginHost,
   ) {
     this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId, plugins)
   }
@@ -64,17 +76,26 @@ export class DshRuntime {
   }
 
   async restart(): Promise<void> {
-    this.bridge.clearDshControl()
-    if (!this.host) {
-      await this.start()
-      return
-    }
-    await this.host.restart()
+    this.repairSuspended = true
+    try {
+      await this.plugins?.repairJobs.stopActive(this.repairTransport)
+      this.bridge.clearDshControl()
+      if (!this.host) {
+        await this.start()
+        return
+      }
+      await this.host.restart()
+    } finally { this.repairSuspended = false }
   }
 
   async close(): Promise<void> {
+    this.closing = true
+    if (this.repairTimer) clearInterval(this.repairTimer)
     await this.startTask?.catch(() => undefined)
+    await this.plugins?.repairJobs.close(this.repairTransport)
     await this.host?.shutdown()
+    // A stopped child cannot continue a queued model request; settle any transport failure after shutdown.
+    await this.plugins?.repairJobs.close({ dispatch: async () => { throw new Error('DSH closed') }, stop: async () => {} })
     await this.bridge.stop()
   }
 
@@ -89,6 +110,12 @@ export class DshRuntime {
       )
       this.host = new DshHost(dshHome, workspace, bridgeAddress, pluginPath, status => { this.status = status })
       await this.host.start()
+      if (this.plugins && !this.closing && !this.repairTimer) {
+        this.repairTimer = setInterval(() => {
+          if (this.status.phase === 'ready' && !this.closing && !this.repairSuspended) void this.plugins!.repairJobs.reconcile(() => this.plugins!.repairJobInputs(), this.repairTransport)
+        }, 5_000)
+        this.repairTimer.unref()
+      }
     } catch (error) {
       this.status = { phase: 'failed', detail: error instanceof Error ? error.message : String(error) }
       await this.bridge.stop().catch(() => undefined)

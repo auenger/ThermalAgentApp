@@ -7,6 +7,8 @@ interface PluginStatus {
   runtimeStorage?: { checkedAt?: string; removed: string[]; retained: Array<{ directory: string; reason: string }>; error?: string }
   runtimeRepairs?: Array<{ key: string; packageDigest: string; detectedAt: string; status: string; reason: string; error?: string }>
   automaticUpdates: boolean
+  automaticRepair?: boolean
+  repairJobs?: { jobs: Array<{ id: string; state: string; startedAt: number; error?: string }>; error?: string }
   held: Record<string, string>
   active: Record<string, { current: string; previous?: string }>
   revisions: Array<{ digest: string; manifest: { id: string; version: string } }>
@@ -80,8 +82,16 @@ export function PluginSettings() {
     <div className="model-file-actions">
       <Switch label="自动获取并选择兼容版本" checked={status?.automaticUpdates ?? false} disabled={policyBusy || !status}
         onChange={(_, data) => void action('policy', { automaticUpdates: data.checked })} />
+      <Switch label="故障后自动请求模型生成修复候选" checked={status?.automaticRepair ?? false} disabled={policyBusy || !status}
+        onChange={(_, data) => void action('policy', { automaticRepair: data.checked })} />
       <Button disabled={busy} onClick={() => void action('reconcile')}>{busy ? '正在处理…' : '立即检查环境与插件'}</Button>
     </div>
+    <p>模型修复需同时开启自动升级，会消耗已配置模型的额度。每个版本与环境组合自动投递一次，五分钟后发起取消；候选仍需隔离验证后才能启用。</p>
+    {!!status?.repairJobs?.jobs.length && <details>
+      <summary>自动修复任务（{status.repairJobs.jobs.length}）</summary>
+      {status.repairJobs.jobs.map(job => <p key={job.id}>{new Date(job.startedAt).toLocaleString()} · {({ dispatching: '正在投递', running: '正在生成', stopping: '正在停止', 'candidate-ready': '已有候选，等待隔离验证', failed: '投递失败', 'timed-out': '已超时', cancelled: '已取消', interrupted: '重启后已终止' } as Record<string, string>)[job.state] ?? job.state}{job.error ? ` · ${job.error}` : ''}</p>)}
+    </details>}
+    {status?.repairJobs?.error && <p role="alert">自动修复任务：{status.repairJobs.error}</p>}
     {status?.updates && <div>
       <p>更新源：{({ idle: '尚未配置', checking: '正在检查', disabled: '自动获取已关闭', ready: '检查完成', error: '获取失败，保留本地可用版本', cancelled: '检查已停止' } as Record<string, string>)[status.updates.phase] ?? status.updates.phase}
         {status.updates.checkedAt ? ` · ${new Date(status.updates.checkedAt).toLocaleString()}` : ''}</p>

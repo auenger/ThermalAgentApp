@@ -83,9 +83,12 @@ test('pinned DSH web Host reaches ready with its live profile', async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-live-host-'))
   const plugin = resolve('plugins/dsh-thermal/dist/index.js')
   const statuses = []
+  const database = new LocalDatabase(join(root, 'thermal.db'))
+  const bridge = new ThermalToolsBridge(root, database, { probeEnvironment: unused }, 'node-test')
+  const bridgeAddress = await bridge.start()
   const host = new DshHost(join(root, 'dsh'), join(root, 'workspace'),
-    { url: 'http://127.0.0.1:1', token: 'test-bridge' }, plugin, value => statuses.push(value))
-  t.after(async () => { await host.shutdown(); await rm(root, { recursive: true, force: true }) })
+    bridgeAddress, plugin, value => statuses.push(value))
+  t.after(async () => { await host.shutdown(); await bridge.stop(); database.close(); await rm(root, { recursive: true, force: true }) })
   await host.start()
   // This integration test loads the real dependency graph; allow cold/loaded machines to start.
   const deadline = Date.now() + 30_000
@@ -101,6 +104,12 @@ test('pinned DSH web Host reaches ready with its live profile', async t => {
   assert.ok(cookie, 'DSH did not issue its browser session cookie')
   const response = await fetch(new URL('/', latest.url), { headers: { Cookie: cookie } })
   assert.equal(response.status, 200)
+  const repair = await bridge.dshSessionRequest('create-repair')
+  assert.deepEqual(await bridge.dshSessionRequest('stop-repair', { sessionId: repair.sessionId }), { stopped: true })
+  assert.ok((await bridge.dshSessionRequest('list')).archivedSessionIds.includes(repair.sessionId))
+  const ordinary = await bridge.dshSessionRequest('create')
+  await assert.rejects(bridge.dshSessionRequest('stop-repair', { sessionId: ordinary.sessionId }), /Not an owned repair session/)
+  await assert.rejects(bridge.dshSessionRequest('run-repair', { sessionId: repair.sessionId, deadline: 0 }), /Invalid repair admission/)
 })
 
 test('local Core DSH sessions can be created, listed and archived without losing workspace scope', async t => {

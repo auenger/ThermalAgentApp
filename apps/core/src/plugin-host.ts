@@ -21,9 +21,10 @@ import { PluginPythonEnvironments } from './plugin-python-environment.js'
 import { PluginHomeOwner } from './plugin-home-owner.js'
 import { PluginRuntimeStorage } from './plugin-runtime-storage.js'
 import { PluginRepairCandidates, parseRepairProposal } from './plugin-repair-candidates.js'
+import { PluginRepairJobs, type RepairJobInputs } from './plugin-repair-jobs.js'
 
 type Kind = 'icepak' | 'report'
-interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
+interface Policy { automaticUpdates: boolean; automaticRepair?: boolean; builtinDigests: string[]; held: Record<string, string> }
 interface Runtime {
   id: string
   python: string
@@ -66,6 +67,7 @@ export class PluginHost {
   private readonly pythonEnvironments: PluginPythonEnvironments
   private readonly runtimeStorage: PluginRuntimeStorage
   private readonly repairCandidates: PluginRepairCandidates
+  readonly repairJobs: PluginRepairJobs
   private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
   private maintenance?: Promise<void>
   private runtimeRequests = 0
@@ -96,6 +98,7 @@ export class PluginHost {
       }))
       this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'), this.runtimeStorage, this.releases.assets)
       this.repairCandidates = new PluginRepairCandidates(join(home, 'repair-candidates'))
+      this.repairJobs = new PluginRepairJobs(join(home, 'repair-jobs.json'))
       this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
         const path = join(home, 'update-sources.json')
         return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
@@ -226,7 +229,7 @@ export class PluginHost {
 
   private readPolicy(): Policy {
     const value = JSON.parse(readFileSync(this.policyPath, 'utf8')) as Policy
-    if (typeof value.automaticUpdates !== 'boolean' || !Array.isArray(value.builtinDigests) ||
+    if (typeof value.automaticUpdates !== 'boolean' || value.automaticRepair !== undefined && typeof value.automaticRepair !== 'boolean' || !Array.isArray(value.builtinDigests) ||
       value.builtinDigests.some(digest => typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) ||
       !value.held || typeof value.held !== 'object' || Array.isArray(value.held) ||
       Object.entries(value.held).some(([id, digest]) => !['icepak-pyaedt', 'report-reportlab'].includes(id) || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest))) throw new Error('Invalid plugin update policy')
@@ -251,9 +254,27 @@ export class PluginHost {
     if (!enabled) for (const controller of this.preparationAborts) controller.abort()
   }
 
+  setAutomaticRepair(enabled: boolean): void { this.savePolicy({ ...this.policy, automaticRepair: enabled }) }
+
+  repairJobInputs(): RepairJobInputs {
+    const registry = this.store.list(), trusted = this.trustedDigests()
+    const targets = Object.values(this.runtimes).flatMap(runtime => {
+      const basePackageDigest = registry.active[runtime.id]?.current
+      if (!runtime.error || !runtime.snapshot || this.policy.held[runtime.id] || !basePackageDigest || !trusted.includes(basePackageDigest)) return []
+      const environmentDigest = pluginEnvironmentDigest(runtime.snapshot.environment)
+      return registry.validations.some(item => item.packageDigest === basePackageDigest && item.environmentDigest === environmentDigest && !item.passed)
+        ? [{ basePackageDigest, environmentDigest }] : []
+    })
+    const candidates = this.repairCandidates.list()
+    return { enabled: !this.closed && this.policy.automaticUpdates && this.policy.automaticRepair === true && !candidates.errors.length,
+      canDispatch: !Object.values(this.runtimes).some(runtime => runtime.pending || this.store.isBusy(runtime.id)),
+      targets, candidates: candidates.candidates }
+  }
+
   status() {
     const registry = this.store.list()
-    return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
+    return { automaticUpdates: this.policy.automaticUpdates, automaticRepair: this.policy.automaticRepair === true,
+      repairJobs: this.repairJobs.status(), held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
       runtimeRepairs: this.pythonEnvironments.status(),
       runtimeStorage: this.runtimeStorage.status(),
       wheelAssets: this.releases.assets.collectionStatus(),
@@ -385,6 +406,7 @@ export class PluginHost {
   async close(): Promise<void> {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
+    await this.repairJobs.seal()
     this.validationAbort?.abort()
     for (const controller of this.preparationAborts) controller.abort()
     await this.updates.close()

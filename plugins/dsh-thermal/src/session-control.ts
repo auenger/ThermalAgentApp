@@ -4,9 +4,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { SessionCreateRequest } from '@deepseek-ai/dsh-api-session-controller'
+import { createRepairControl } from './repair-control.js'
 
 export const name = 'thermal-session-control'
-export const inject = ['sessionController', 'workspaceRegistry']
+export const inject = ['sessionController', 'workspaceRegistry', 'agents']
 
 export function apply(ctx: Context): void {
   const bridgeUrl = process.env.THERMAL_AGENT_BRIDGE_URL
@@ -17,17 +18,20 @@ export function apply(ctx: Context): void {
     throw new Error('Thermal session control environment is incomplete')
   }
   ctx.effect(async () => {
+    const repairs = createRepairControl(ctx, workspaceId, workspaceDir)
     const server = createServer((request, response) => {
       const actual = Buffer.from(request.headers.authorization?.replace(/^Bearer /u, '') ?? '')
       const expected = Buffer.from(token)
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) { response.writeHead(401).end(); return }
-      if (request.method !== 'POST' || !['/v1/list', '/v1/create', '/v1/create-repair', '/v1/archive'].includes(request.url ?? '')) { response.writeHead(404).end(); return }
+      if (request.method !== 'POST' || !['/v1/list', '/v1/create', '/v1/create-repair', '/v1/run-repair', '/v1/stop-repair', '/v1/archive'].includes(request.url ?? '')) { response.writeHead(404).end(); return }
       let body = ''
       request.setEncoding('utf8')
       request.on('data', (chunk: string) => { body += chunk; if (body.length > 4096) request.destroy() })
       request.on('end', () => {
         void Promise.resolve().then(async () => {
           const input = body ? JSON.parse(body) as Record<string, unknown> : {}
+          if (request.url === '/v1/run-repair') return repairs.run(input)
+          if (request.url === '/v1/stop-repair') return repairs.stop(input.sessionId)
           if (request.url === '/v1/list') {
             const listed = await ctx.sessionController.list({}, new AbortController().signal)
             return { ...listed, archivedSessionIds: ctx.workspaceRegistry.archivedSessionIds }
@@ -65,7 +69,7 @@ export function apply(ctx: Context): void {
       await new Promise<void>(resolve => server.close(() => resolve()))
       throw error
     }
-    return () => new Promise<void>(resolve => server.close(() => resolve()))
+    return () => { repairs.dispose(); return new Promise<void>(resolve => server.close(() => resolve())) }
   }, 'thermal:session-control')
 }
 

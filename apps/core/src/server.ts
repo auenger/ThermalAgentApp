@@ -237,8 +237,11 @@ async function route(
     if (url.pathname === '/api/plugin-runtime/install') {
       plugins.installRelease(Buffer.from(JSON.stringify(body)))
     } else if (url.pathname === '/api/plugin-runtime/policy') {
-      if (typeof body.automaticUpdates !== 'boolean') throw new RequestError(400, 'INVALID_SETTING', 'automaticUpdates 必须是布尔值')
-      plugins.setAutomaticUpdates(body.automaticUpdates)
+      if (body.automaticUpdates === undefined && body.automaticRepair === undefined ||
+        body.automaticUpdates !== undefined && typeof body.automaticUpdates !== 'boolean' ||
+        body.automaticRepair !== undefined && typeof body.automaticRepair !== 'boolean') throw new RequestError(400, 'INVALID_SETTING', '插件策略必须包含布尔值开关')
+      if (typeof body.automaticUpdates === 'boolean') plugins.setAutomaticUpdates(body.automaticUpdates)
+      if (typeof body.automaticRepair === 'boolean') plugins.setAutomaticRepair(body.automaticRepair)
     } else if (url.pathname === '/api/plugin-runtime/reconcile') {
       await plugins.reconcile()
     } else if (url.pathname === '/api/plugin-runtime/rollback' || url.pathname === '/api/plugin-runtime/resume') {

@@ -25,7 +25,7 @@ export class ThermalToolsBridge {
 
   clearDshControl(): void { this.dshControlPort = undefined }
 
-  async dshSessionRequest<T>(path: 'list' | 'create' | 'create-repair' | 'archive', value: Record<string, unknown> = {}): Promise<T> {
+  async dshSessionRequest<T>(path: 'list' | 'create' | 'create-repair' | 'run-repair' | 'stop-repair' | 'archive', value: Record<string, unknown> = {}): Promise<T> {
     const deadline = Date.now() + 5_000
     while (!this.dshControlPort && Date.now() < deadline) await new Promise(resolveWait => setTimeout(resolveWait, 100))
     if (!this.dshControlPort) throw new Error('DSH session control is not ready')

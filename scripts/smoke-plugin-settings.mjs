@@ -23,6 +23,7 @@ try {
   await page.route('**/api/plugin-runtime', async route => {
     const response = await route.fetch(), value = await response.json()
     value.repairCandidates = { candidates: [{ id: 'ui-fixture', pluginId: 'report-reportlab', version: '0.1.1', reason: 'UI candidate fixture', createdAt: '2026-10-19T00:00:00Z', basePackageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64), changes: [{ path: 'python/adapter.py', sha256: 'c'.repeat(64) }] }], errors: [] }
+    value.repairJobs = { jobs: [{ id: 'ui-job', state: 'stopping', startedAt: 1_000 }], error: 'UI repair cancellation fixture' }
     value.runtimeRepairs = [{ key: 'ui-fixture', packageDigest: 'a'.repeat(64), status: 'prepared',
       detectedAt: '2026-10-19T00:00:00Z', reason: 'UI fixture: dependency file changed; not an AEDT validation certificate' }]
     value.runtimeStorage = { checkedAt: '2026-10-19T00:00:00Z', removed: ['ui-fixture-removed'],
@@ -47,6 +48,15 @@ try {
   await settings.getByText(/插件摘要：/).first().waitFor()
   const automatic = settings.getByRole('switch', { name: '自动获取并选择兼容版本' })
   assert.equal(await automatic.isChecked(), true)
+  const repairSwitch = settings.getByRole('switch', { name: '故障后自动请求模型生成修复候选' })
+  assert.equal(await repairSwitch.isChecked(), false)
+  await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/plugin-runtime/policy')), repairSwitch.click()])
+  assert.equal(plugins.status().automaticRepair, true)
+  await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/plugin-runtime/policy')), repairSwitch.click()])
+  assert.equal(plugins.status().automaticRepair, false)
+  await settings.getByText('自动修复任务（1）', { exact: true }).click()
+  await settings.getByText(/正在停止/).waitFor()
+  await settings.getByText(/UI repair cancellation fixture/).waitFor()
   let releaseCheck
   const checking = new Promise(resolve => { releaseCheck = resolve })
   await page.route('**/api/plugin-runtime/reconcile', async route => { await checking; await route.continue() })
@@ -78,5 +88,5 @@ try {
   await page.setViewportSize({ width: 375, height: 812 })
   assert.equal(await settings.evaluate(element => element.scrollWidth > element.clientWidth + 1), false)
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ success: true, covered: ['source diagnostics', 'engineering policy status', 'validation evidence', 'policy switch', 'disabled network', 'runtime retention history', 'asset transfer progress', '375px'] }))
+  console.log(JSON.stringify({ success: true, covered: ['source diagnostics', 'engineering policy status', 'validation evidence', 'policy switch', 'separate repair policy', 'repair cancellation status', 'disabled network', 'runtime retention history', 'asset transfer progress', '375px'] }))
 } finally { await browser?.close(); await app.close(); await rm(home, { recursive: true, force: true }) }
