@@ -252,6 +252,7 @@ for (const automatic of [true, false]) test(`runtime protocol quarantine respect
     assert.equal(receipt.passed, false)
     assert.equal(receipt.checks.at(-1).name, 'runtime-protocol')
     await host.reconcile()
+    await assert.rejects(host.rollback('icepak-pyaedt'), /busy/)
     assert.equal(host.status().active['icepak-pyaedt'].current, broken, 'other pinned work retains the active revision')
   } finally { pinned.release(); other.release() }
   if (!automatic) {
@@ -261,6 +262,14 @@ for (const automatic of [true, false]) test(`runtime protocol quarantine respect
     host = new PluginHost(f.home, f.options)
     await assert.rejects(host.icepak.probeEnvironment(), /Previous validation failed/)
     assert.equal(host.status().active['icepak-pyaedt'].current, broken)
+    await host.rollback('icepak-pyaedt')
+    assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+    assert.equal(host.status().held['icepak-pyaedt'], previous)
+    assert.equal(host.status().automaticUpdates, false)
+    assert.equal(host.status().runtimes.find(item => item.id === 'icepak-pyaedt').retry, undefined)
+    await host.close()
+    host = new PluginHost(f.home, f.options)
+    assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
     return
   }
   // The final pin release schedules recovery; no failed business call is retried.
@@ -335,4 +344,55 @@ for (const delivery of ['import', 'feed']) test(`new signed release via ${delive
   host.installRelease(release)
   await assert.rejects(host.report.renderTaskReport({}), /report unavailable/)
   assert.equal(inspections, 2)
+})
+
+
+for (const failure of ['changed-environment', 'corrupt-previous', 'corrupt-active']) test(`explicit rollback checks its own target: ${failure}`, async t => {
+  const f = await fixture(t)
+  let changed = false
+  const options = { ...f.options, inspect: async (...args) => {
+    const snapshot = await f.options.inspect(...args)
+    if (changed) snapshot.environment.versions.python = 'different-runtime'
+    return snapshot
+  } }
+  let host = new PluginHost(f.home, options)
+  t.after(() => host.close())
+  await host.icepak.probeEnvironment()
+  const previous = host.status().active['icepak-pyaedt'].current
+  await host.close()
+  await f.source('icepak', '2.0.0')
+  host = new PluginHost(f.home, options)
+  await host.icepak.probeEnvironment()
+  const current = host.status().active['icepak-pyaedt'].current
+  host.setAutomaticUpdates(false)
+  if (failure === 'changed-environment') changed = true
+  else await writeFile(join(f.home, 'registry', 'packages', failure === 'corrupt-previous' ? previous : current, 'python', 'adapter', '__main__.py'), 'raise RuntimeError("changed bytes")')
+  if (failure === 'corrupt-active') {
+    await host.rollback('icepak-pyaedt')
+    assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+    assert.equal(host.status().held['icepak-pyaedt'], previous)
+  } else {
+    await assert.rejects(host.rollback('icepak-pyaedt'), failure === 'changed-environment' ? /no passing validation/ : /integrity|changed|digest/i)
+    assert.equal(host.status().active['icepak-pyaedt'].current, current)
+    assert.equal(host.status().held['icepak-pyaedt'], undefined)
+  }
+})
+
+test('overlapping rollback requests cannot toggle versions or invalidate the successful recovery', async t => {
+  const f = await fixture(t)
+  let host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  await host.icepak.probeEnvironment()
+  const previous = host.status().active['icepak-pyaedt'].current
+  await host.close()
+  await f.source('icepak', '2.0.0')
+  host = new PluginHost(f.home, f.options)
+  await host.icepak.probeEnvironment()
+  const results = await Promise.allSettled([host.rollback('icepak-pyaedt'), host.rollback('icepak-pyaedt')])
+  assert.equal(results[0].status, 'fulfilled')
+  assert.equal(results[1].status, 'rejected')
+  assert.match(results[1].reason.message, /target changed/)
+  assert.equal(host.status().active['icepak-pyaedt'].current, previous)
+  assert.equal(host.status().runtimes.find(item => item.id === 'icepak-pyaedt').error, undefined)
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
 })

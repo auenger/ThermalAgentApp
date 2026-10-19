@@ -318,15 +318,21 @@ export class PluginHost {
 
   async rollback(id: string): Promise<void> {
     const kind = this.kindFor(id), runtime = this.runtimes[kind]
-    runtime.retry = undefined
-    await this.ensure(kind)
-    const previous = this.store.list().active[id]?.previous
-    if (!previous || !this.trustedDigests().includes(previous)) throw new Error('No trusted previous plugin revision')
-    const snapshot = await this.prepareSnapshot(kind, previous)
-    const oldPolicy = this.policy
-    this.savePolicy({ ...this.policy, held: { ...this.policy.held, [id]: previous } })
-    try { this.store.rollback(id, snapshot.environment, runtime.permissions); runtime.snapshot = snapshot }
-    catch (error) { this.savePolicy(oldPolicy); throw error }
+    const expected = this.store.list().active[id]
+    if (!expected?.previous) throw new Error('No previous plugin revision')
+    while (this.maintenance) await this.maintenance
+    while (runtime.pending) await runtime.pending.catch(() => {})
+    if (this.closed) throw new Error('Plugin host is closed')
+    const current = this.store.list().active[id]
+    if (current?.current !== expected.current || current.previous !== expected.previous) throw new Error('Rollback target changed while waiting')
+    if (this.store.isBusy(id)) throw new Error('Plugin is busy')
+    // Sampling the current environment must not select or require health from the broken active version.
+    const pending = this.refresh(kind, { current: expected.current, previous: expected.previous })
+    runtime.pending = pending
+    try {
+      await pending
+      if (this.store.list().active[id]?.current !== expected.previous) throw new Error('Rollback deferred until current work finishes')
+    } finally { if (runtime.pending === pending) runtime.pending = undefined }
   }
 
   resume(id: string): void {
@@ -462,7 +468,7 @@ export class PluginHost {
     } finally { rmSync(staging, { recursive: true, force: true }) }
   }
 
-  private async refresh(kind: Kind): Promise<void> {
+  private async refresh(kind: Kind, rollback?: { current: string; previous: string }): Promise<void> {
     const runtime = this.runtimes[kind]
     try {
       if (!runtime.imported) this.importBuiltin(kind)
@@ -509,6 +515,26 @@ export class PluginHost {
       this.recoveryRequested.delete(kind)
       runtime.baseSnapshot = snapshot
       runtime.aedtInstallations = aedtInstallations
+      if (rollback) {
+        const checkTarget = () => {
+          const active = this.store.list().active[runtime.id]
+          if (active?.current !== rollback.current || active.previous !== rollback.previous) throw new Error('Rollback target changed during environment inspection')
+          if (!this.trustedDigests().includes(rollback.previous)) throw new Error('No trusted previous plugin revision')
+        }
+        checkTarget()
+        const previous = await this.prepareSnapshot(kind, rollback.previous)
+        checkTarget()
+        const oldPolicy = this.policy
+        this.savePolicy({ ...this.policy, held: { ...this.policy.held, [runtime.id]: rollback.previous } })
+        try { this.store.activate(rollback.previous, previous.environment, runtime.permissions) }
+        catch (error) { this.savePolicy(oldPolicy); throw error }
+        runtime.snapshot = previous
+        runtime.result = { status: 'activated', digest: rollback.previous, diagnostics: ['Restored the previously validated revision under the current environment'] }
+        runtime.error = undefined
+        runtime.retry = undefined
+        runtime.inspectedAt = Date.now()
+        return
+      }
       const registry = this.store.list(), active = registry.active[runtime.id]?.current
       const held = this.policy.held[runtime.id]
       const trusted = this.trustedDigests().filter(digest => !held || digest === held)
