@@ -1755,13 +1755,21 @@ export class LocalDatabase {
 
   completeLeasedRemoteBaseline(ownerNodeId: string, executorNodeId: string, taskId: string,
     attemptId: string, leaseId: string, epoch: number, solvedSha256: string,
-    resultSha256: string, verdict: ThermalVerdict): { task: TaskRecord; attempt: AttemptRecord } {
+    resultSha256: string, verdict: ThermalVerdict, pluginRuntime?: PluginExecutionIdentity): { task: TaskRecord; attempt: AttemptRecord } {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const { task, attempt, run } = this.assertLeasedRemoteAttempt(ownerNodeId, executorNodeId, taskId, attemptId, leaseId, epoch)
       if (task.executionStatus !== 'RUNNING' || attempt.status !== 'RUNNING' || run.kind !== 'BASELINE') {
         throw new PeerConflictError('remote baseline is not running')
       }
+      const identity = parsePluginExecutionIdentity(pluginRuntime)
+      if (identity && (identity.pluginId !== attempt.pluginId || identity.pluginVersion.length > 80)) {
+        throw new PeerConflictError('remote baseline plugin identity mismatch')
+      }
+      const parameters = { ...attempt.parameters }
+      // Dispatch-time identities describe the request, not proof of the executor's runtime.
+      delete parameters.pluginRuntime
+      if (identity) parameters.pluginRuntime = identity
       const links = this.listAttemptArtifacts(attemptId)
       if (!links.some(item => item.role === 'INPUT_PROJECT' && item.sha256 === attempt.inputArtifactSha256) ||
         !links.some(item => item.role === 'SOLVED_PROJECT' && item.sha256 === solvedSha256) ||
@@ -1771,8 +1779,8 @@ export class LocalDatabase {
       }
       const now = new Date().toISOString()
       this.db.prepare(`UPDATE attempts SET status = 'SUCCEEDED', progress_stage = 'result_collected',
-        output_artifact_sha256 = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
-        .run(solvedSha256, now, now, attemptId)
+        output_artifact_sha256 = ?, plugin_version = ?, parameters_json = ?, finished_at = ?, updated_at = ? WHERE id = ?`)
+        .run(solvedSha256, identity?.pluginVersion ?? attempt.pluginVersion, JSON.stringify(parameters), now, now, attemptId)
       this.db.prepare(`UPDATE runs SET status = 'COMPLETED', selected_attempt_id = ?, updated_at = ? WHERE id = ?`)
         .run(attemptId, now, run.id)
       this.db.prepare(`UPDATE tasks SET execution_status = 'WAITING_FOR_APPROVAL', thermal_verdict = ?,
@@ -1782,7 +1790,7 @@ export class LocalDatabase {
         .run(now, leaseId)
       this.insertEvent({ id: randomUUID(), taskId, eventType: 'run.remote_baseline_completed',
         fromStatus: 'RUNNING', toStatus: 'WAITING_FOR_APPROVAL', reason: '远程求解结果已校验，等待人工复核',
-        payload: { runId: run.id, attemptId, leaseId, epoch, solvedSha256, resultSha256, verdict }, createdAt: now })
+        payload: { runId: run.id, attemptId, leaseId, epoch, solvedSha256, resultSha256, verdict, ...(identity ? { pluginRuntime: identity } : {}) }, createdAt: now })
       this.db.exec('COMMIT')
       return { task: this.getTask(taskId) as TaskRecord, attempt: this.getAttempt(attemptId) as AttemptRecord }
     } catch (error) { this.db.exec('ROLLBACK'); throw error }

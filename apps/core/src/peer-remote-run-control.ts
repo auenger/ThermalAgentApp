@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { IcepakProjectOperationResult } from '@thermal-agent/contracts'
+import { parsePluginExecutionIdentity, type IcepakProjectOperationResult, type PluginExecutionIdentity } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import { determineThermalVerdict } from './execution-manager.js'
 
@@ -88,10 +88,19 @@ export class PeerRemoteRunControl {
       (result.metrics !== undefined && !isObject(result.metrics))) {
       throw new PeerRemoteRunError('INVALID_RESULT', 'solver result does not match the input or Baseline contract')
     }
+    let pluginRuntime: PluginExecutionIdentity | undefined
+    try {
+      pluginRuntime = parsePluginExecutionIdentity(result.pluginRuntime)
+      if (pluginRuntime && (pluginRuntime.pluginId !== attempt.pluginId || pluginRuntime.pluginVersion.length > 80)) {
+        throw new Error('remote plugin identity mismatch')
+      }
+    } catch {
+      throw new PeerRemoteRunError('INVALID_RESULT', 'solver result plugin identity is invalid or mismatched')
+    }
     const verdict = determineThermalVerdict(result, task.requirementSnapshot)
     try {
       this.database.completeLeasedRemoteBaseline(this.localNodeId, peerNodeId, task.id, attempt.id,
-        reference.leaseId, reference.epoch, solvedArtifact.sha256, resultArtifact.sha256, verdict)
+        reference.leaseId, reference.epoch, solvedArtifact.sha256, resultArtifact.sha256, verdict, pluginRuntime)
     } catch {
       throw new PeerRemoteRunError('RUN_NOT_AUTHORIZED', 'remote baseline changed before completion')
     }

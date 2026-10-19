@@ -9,7 +9,12 @@ import { createCoreApp, IcepakExecutionManager, NodeIdentity, PeerArtifactTransf
 import { createTask } from '@thermal-agent/domain'
 import { LocalDatabase } from '@thermal-agent/sqlite-store'
 
-test('Owner finalizes only current leased Baseline after verified remote evidence and requests human approval', async t => {
+for (const mode of ['managed', 'legacy', 'null', 'bad-hash', 'incomplete', 'wrong-plugin']) test(`Owner verifies remote runtime provenance: ${mode}`, async t => {
+  const managed = mode === 'managed', invalid = !['managed', 'legacy'].includes(mode)
+  const dispatched = { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', packageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64) }
+  const executed = { pluginId: 'icepak-pyaedt', pluginVersion: '3.1.0', packageDigest: 'c'.repeat(64), environmentDigest: 'd'.repeat(64) }
+  const identities = { managed: executed, null: null, 'bad-hash': { ...executed, packageDigest: 'broken' },
+    incomplete: { ...executed, environmentDigest: undefined }, 'wrong-plugin': { ...executed, pluginId: 'report-reportlab' } }
   const home = await mkdtemp(join(tmpdir(), 'thermal-remote-complete-'))
   const owner = createCoreApp({ home: join(home, 'owner'), startAgentRuntime: false,
     pluginClient: { async probeEnvironment() { return { status: 'DETECTED', aedtVersions: [] } } },
@@ -41,7 +46,7 @@ test('Owner finalizes only current leased Baseline after verified remote evidenc
   owner.database.transitionTask(task.id, 'READY', task.version)
   const queued = owner.database.transitionTask(task.id, 'QUEUED', task.version + 1)
   const { run, attempt } = owner.database.createRunWithAttempt({ taskId: task.id, kind: 'BASELINE',
-    executorNodeId: identity.nodeId, pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', parameters: {},
+    executorNodeId: identity.nodeId, pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', parameters: { fixture: 'preserve', pluginRuntime: dispatched },
     inputArtifactSha256: input.sha256 })
   owner.database.linkAttemptArtifact({ attemptId: attempt.id, sha256: input.sha256, role: 'INPUT_PROJECT', createdAt: new Date().toISOString() })
   owner.database.recordPeerHeartbeat(identity.nodeId,
@@ -61,6 +66,7 @@ test('Owner finalizes only current leased Baseline after verified remote evidenc
 
   const solved = await artifacts.putBytes(Buffer.from('solved-project'), 'solved.aedt')
   const result = await artifacts.putBytes(Buffer.from(JSON.stringify({ status: 'ok', mode: 'solve', inputSha256: input.sha256,
+    ...(mode !== 'legacy' ? { pluginRuntime: identities[mode] } : {}),
     validation: { verified: true, checks: [] }, metrics: { tmaxC: 80, converged: true, solverNormalCompletion: true } })),
   'result.json', 'application/json')
   db.upsertArtifact(solved)
@@ -76,16 +82,34 @@ test('Owner finalizes only current leased Baseline after verified remote evidenc
     solvedSha256: solved.sha256, resultSha256: result.sha256 }), error => error.code === 'PEER_REJECTED')
   assert.equal(owner.database.getAttempt(attempt.id).status, 'RUNNING')
   await writeFile(owner.artifacts.resolveArtifact(solved.sha256), Buffer.from('solved-project'))
+  if (invalid) {
+    await assert.rejects(channel.request(ownerPeer, sessionId, { operation: 'task.baseline.complete', ...reference,
+      solvedSha256: solved.sha256, resultSha256: result.sha256 }), error => error.code === 'PEER_REJECTED')
+    assert.equal(owner.database.getAttempt(attempt.id).status, 'RUNNING')
+    assert.deepEqual(owner.database.getAttempt(attempt.id).parameters.pluginRuntime, dispatched)
+    assert.equal(owner.database.getLease(lease.id).status, 'ACTIVE')
+    return
+  }
   const completed = await channel.request(ownerPeer, sessionId, { operation: 'task.baseline.complete', ...reference,
-    solvedSha256: solved.sha256, resultSha256: result.sha256 })
+    solvedSha256: solved.sha256, resultSha256: result.sha256, pluginRuntime: dispatched })
   assert.equal(completed.verdict, 'PASS')
   assert.equal(owner.database.getTask(task.id).executionStatus, 'WAITING_FOR_APPROVAL')
   assert.equal(owner.database.getTask(task.id).approvalStatus, 'PENDING')
-  assert.equal(owner.database.getAttempt(attempt.id).status, 'SUCCEEDED')
+  const saved = owner.database.getAttempt(attempt.id)
+  assert.equal(saved.status, 'SUCCEEDED')
+  assert.equal(saved.pluginVersion, managed ? executed.pluginVersion : dispatched.pluginVersion)
+  assert.equal(saved.parameters.fixture, 'preserve')
+  assert.deepEqual(saved.parameters.pluginRuntime, managed ? executed : undefined)
+  assert.equal(owner.database.listIcepakReadiness().length, 0, 'remote evidence must not attest the Owner local environment')
+  assert.equal(owner.database.pluginRuntimeRetention().identities.some(item => item.packageDigest === executed.packageDigest), managed)
+
   assert.equal(owner.database.getRun(run.id).selectedAttemptId, attempt.id)
   assert.equal(owner.database.getLease(lease.id).status, 'RELEASED')
   assert.equal((await channel.request(ownerPeer, sessionId, { operation: 'task.baseline.complete', ...reference,
     solvedSha256: solved.sha256, resultSha256: result.sha256 })).verdict, 'PASS')
+  assert.deepEqual(owner.database.getAttempt(attempt.id), saved, 'duplicate completion does not rewrite provenance')
+  const reopened = new LocalDatabase(owner.database.path)
+  try { assert.deepEqual(reopened.getAttempt(attempt.id), saved) } finally { reopened.close() }
   await assert.rejects(transfer.uploadLeasedResult(ownerPeer, { ...reference, sha256: solved.sha256, sizeBytes: solved.sizeBytes },
     'LOG', channel), error => error.code === 'PEER_REJECTED')
 

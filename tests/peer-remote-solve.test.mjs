@@ -103,6 +103,8 @@ test('two Apps execute and verify one remote Icepak Baseline end to end', async 
   assert.equal(finalTask.thermalVerdict, 'PASS')
   assert.equal(finalTask.approvalStatus, 'PENDING')
   assert.equal(owner.database.getAttempt(offer.attempt.id).status, 'SUCCEEDED')
+  assert.equal(owner.database.getAttempt(offer.attempt.id).pluginVersion, runtimeIdentity.pluginVersion)
+  assert.deepEqual(owner.database.getAttempt(offer.attempt.id).parameters.pluginRuntime, runtimeIdentity, 'Owner saves the identity pinned by the executor Host')
   assert.equal(owner.database.getLease(offer.lease.id).status, 'RELEASED')
   const roles = new Set(owner.database.listAttemptArtifacts(offer.attempt.id).map(item => item.role))
   assert.deepEqual(roles, new Set(['INPUT_PROJECT', 'SOLVED_PROJECT', 'SOLVER_RESULT', 'CONVERGENCE_EVIDENCE']))
