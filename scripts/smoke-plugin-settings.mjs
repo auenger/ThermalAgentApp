@@ -24,6 +24,8 @@ try {
     const response = await route.fetch(), value = await response.json()
     value.repairCandidates = { candidates: [{ id: 'ui-fixture', pluginId: 'report-reportlab', version: '0.1.1', reason: 'UI candidate fixture', createdAt: '2026-10-19T00:00:00Z', basePackageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64), changes: [{ path: 'python/adapter.py', sha256: 'c'.repeat(64) }] }], errors: [] }
     value.repairJobs = { jobs: [{ id: 'ui-job', state: 'stopping', startedAt: 1_000 }], error: 'UI repair cancellation fixture' }
+    value.executionFailures = [{ packageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64), method: 'inspect_project', code: 'ATTRIBUTEERROR', detail: 'UI compatibility evidence fixture', observedAt: '2026-10-19T00:00:00Z' }]
+    value.executionEvidenceError = 'UI evidence persistence fixture'
     value.runtimeRepairs = [{ key: 'ui-fixture', packageDigest: 'a'.repeat(64), status: 'prepared',
       detectedAt: '2026-10-19T00:00:00Z', reason: 'UI fixture: dependency file changed; not an AEDT validation certificate' }]
     value.runtimeStorage = { checkedAt: '2026-10-19T00:00:00Z', removed: ['ui-fixture-removed'],
@@ -46,7 +48,7 @@ try {
   assert.ok(await receipts.count() >= 1)
   await receipts.first().locator(':scope > summary').click()
   await receipts.first().locator('details > summary').first().click()
-  await settings.getByText(/插件摘要：/).first().waitFor()
+  await receipts.first().getByText(/插件摘要：/).first().waitFor()
   const automatic = settings.getByRole('switch', { name: '自动获取并选择兼容版本' })
   assert.equal(await automatic.isChecked(), true)
   const repairSwitch = settings.getByRole('switch', { name: '故障后自动请求模型生成修复候选' })
@@ -58,6 +60,9 @@ try {
   await settings.getByText('自动修复任务（1）', { exact: true }).click()
   await settings.getByText(/正在停止/).waitFor()
   await settings.getByText(/UI repair cancellation fixture/).waitFor()
+  await settings.getByText('业务兼容性故障（1）', { exact: true }).click()
+  await settings.getByText('UI compatibility evidence fixture', { exact: true }).waitFor()
+  await settings.getByText(/业务故障记录失败，自动模型修复已暂停/).waitFor()
   let releaseCheck
   const checking = new Promise(resolve => { releaseCheck = resolve })
   await page.route('**/api/plugin-runtime/reconcile', async route => { await checking; await route.continue() })

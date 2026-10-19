@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { IcepakPluginClient } from '../apps/core/dist/icepak-plugin-client.js'
 import { ReportClient } from '../apps/core/dist/report-client.js'
-import { PluginProtocolError } from '../apps/core/dist/python-plugin-launch.js'
+import { PluginProtocolError, PluginResponseError } from '../apps/core/dist/python-plugin-launch.js'
 
 for (const kind of ['icepak', 'report']) test(`${kind} classifies host-detected protocol damage without quarantining business errors or timeouts`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-protocol-'))
@@ -28,9 +28,12 @@ if mode=='business': v={'id':r['id'],'ok':False,'error':{'code':'PLUGIN_PROTOCOL
 print(json.dumps(v))
 `)
   let failures = 0, released = 0
+  const reported = []
   const makeClient = timeoutMs => new (kind === 'icepak' ? IcepakPluginClient : ReportClient)({ timeoutMs,
     acquireRuntime: () => ({ python: process.platform === 'win32' ? 'python' : 'python3', pluginRoot: root, module: 'adapter',
-      protocolFailure(method, error) { assert.ok(error instanceof PluginProtocolError); failures++ }, release() { released++ } }) })
+      protocolFailure(method, error) { assert.ok(error instanceof PluginProtocolError); failures++ },
+      responseFailure(method, error) { assert.ok(error instanceof PluginResponseError); reported.push({ method, code: error.code, detail: error.detail }) },
+      release() { released++ } }) })
   const client = makeClient(5000)
   const call = (mode, target = client) => kind === 'icepak' ? target.call('health', { mode }) : target.renderTaskReport({ task: { mode } })
   for (const mode of ['empty', 'json', 'null', 'array', 'id', 'status', 'result', 'error']) {
@@ -46,5 +49,6 @@ print(json.dumps(v))
     await assert.rejects(client.call('health', {}, { signal: controller.signal }), /cancelled/)
   }
   assert.equal(failures, 8)
+  assert.deepEqual(reported, [{ method: kind === 'icepak' ? 'health' : 'render_task_report', code: 'PLUGIN_PROTOCOL_ERROR', detail: 'business rejection' }], 'only valid error responses reach business diagnostics; timeout, cancellation and malformed messages do not')
   assert.equal(released, kind === 'icepak' ? 12 : 11)
 })

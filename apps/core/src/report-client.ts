@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, type PythonPluginLease } from './python-plugin-launch.js'
+import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, PluginResponseError, type PythonPluginLease } from './python-plugin-launch.js'
 import type { PluginExecutionIdentity, RpcResponse } from '@thermal-agent/contracts'
 
 export interface ReportRenderInput {
@@ -62,9 +62,14 @@ export class ReportClient implements ReportPort {
 
   private async call(method: string, params: object): Promise<unknown> {
     const runtime = this.acquireRuntime?.()
-    try { return await this.callWithRuntime(method, params, runtime) }
+    try {
+      const result = await this.callWithRuntime(method, params, runtime)
+      runtime?.responseSuccess?.(method)
+      return result
+    }
     catch (error) {
       if (error instanceof PluginProtocolError) runtime?.protocolFailure?.(method, error)
+      if (error instanceof PluginResponseError) runtime?.responseFailure?.(method, error)
       throw error
     } finally { runtime?.release() }
   }
@@ -105,7 +110,7 @@ export class ReportClient implements ReportPort {
       child.stdin.end(`${JSON.stringify({ id, method, params })}\n`)
     })
     if (response.id !== id) throw new Error('Report plugin response id mismatch')
-    if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
+    if (!response.ok) throw new PluginResponseError(response.error.code, response.error.message)
     return { ...(response.result as Record<string, unknown>), pluginRuntime: runtime?.identity }
   }
 }

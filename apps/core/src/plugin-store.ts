@@ -18,12 +18,17 @@ export interface PluginValidation {
   validatedAt: string
 }
 export interface PluginActivation { current: string; previous?: string }
+export interface PluginExecutionFailure {
+  packageDigest: string; environmentDigest: string; method: string; code: string; detail: string; observedAt: string
+}
+const repairableErrors = new Set(['MODULENOTFOUNDERROR', 'IMPORTERROR', 'ATTRIBUTEERROR', 'TYPEERROR'])
 interface PluginState {
   schemaVersion: 1
   revisions: Record<string, PluginRevision>
   validations: Record<string, PluginValidation>
   active: Record<string, PluginActivation>
   events: Array<{ at: string; action: string; id: string; digest: string; detail: string }>
+  executionFailures?: PluginExecutionFailure[]
 }
 export interface PluginLease {
   revision: PluginRevision
@@ -95,6 +100,10 @@ export class PluginStore {
       if (state.revisions[activation.current]?.manifest.id !== id ||
         (activation.previous && state.revisions[activation.previous]?.manifest.id !== id)) throw new Error('Invalid plugin activation state')
     }
+    if (state.executionFailures !== undefined && (!Array.isArray(state.executionFailures) || state.executionFailures.length > 128 ||
+      state.executionFailures.some(item => !item || !state.revisions[item.packageDigest] || !/^[a-f0-9]{64}$/u.test(item.environmentDigest) ||
+        !/^[a-z_]{1,80}$/u.test(item.method) || !repairableErrors.has(item.code) || typeof item.detail !== 'string' || item.detail.length > 500 ||
+        typeof item.observedAt !== 'string' || !Number.isFinite(Date.parse(item.observedAt))))) throw new Error('Invalid plugin execution failure evidence')
     return state
   }
 
@@ -111,9 +120,26 @@ export class PluginStore {
     state.events.push({ at: new Date().toISOString(), action, id: revision.manifest.id, digest: revision.digest, detail })
   }
 
-  list(): { revisions: PluginRevision[]; active: Record<string, PluginActivation>; validations: PluginValidation[]; events: PluginState['events'] } {
+  list(): { revisions: PluginRevision[]; active: Record<string, PluginActivation>; validations: PluginValidation[]; events: PluginState['events']; executionFailures: PluginExecutionFailure[] } {
     return structuredClone({ revisions: Object.values(this.state.revisions), active: this.state.active,
-      validations: Object.values(this.state.validations), events: this.state.events })
+      validations: Object.values(this.state.validations), events: this.state.events, executionFailures: this.state.executionFailures ?? [] })
+  }
+
+  /** Plugin-reported compatibility symptoms, not a failed host validation or permission to retry work. */
+  recordExecutionResponse(digest: string, environmentDigest: string, method: string, error?: { code: string; detail: string }): void {
+    if (error && !repairableErrors.has(error.code)) return
+    if (!/^[a-z_]{1,80}$/u.test(method)) return
+    const revision = this.state.revisions[digest]
+    if (!revision || !(this.leases.get(revision.manifest.id) ?? 0) || this.validating.has(revision.manifest.id)) throw new Error('Execution evidence requires an existing execution lease')
+    if (!this.state.validations[`${digest}:${environmentDigest}`]?.passed) return
+    const failures = this.state.executionFailures ?? []
+    const matches = (item: PluginExecutionFailure) => item.packageDigest === digest && item.environmentDigest === environmentDigest && item.method === method
+    if (!error && !failures.some(matches)) return
+    const next = structuredClone(this.state)
+    next.executionFailures = failures.filter(item => !matches(item))
+    if (error) next.executionFailures.push({ packageDigest: digest, environmentDigest, method, code: error.code, detail: error.detail.slice(0, 500), observedAt: new Date().toISOString() })
+    next.executionFailures = next.executionFailures.slice(-128)
+    this.commit(next)
   }
 
   isBusy(id: string): boolean { return this.validating.has(id) || (this.leases.get(id) ?? 0) > 0 }

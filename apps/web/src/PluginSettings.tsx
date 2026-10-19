@@ -8,6 +8,8 @@ interface PluginStatus {
   runtimeRepairs?: Array<{ key: string; packageDigest: string; detectedAt: string; status: string; reason: string; error?: string }>
   automaticUpdates: boolean
   automaticRepair?: boolean
+  executionEvidenceError?: string
+  executionFailures?: Array<{ packageDigest: string; environmentDigest: string; method: string; code: string; detail: string; observedAt: string }>
   repairJobs?: { jobs: Array<{ id: string; state: string; startedAt: number; error?: string }>; error?: string }
   held: Record<string, string>
   active: Record<string, { current: string; previous?: string }>
@@ -88,6 +90,15 @@ export function PluginSettings() {
       <Button disabled={busy} onClick={() => void action('reconcile')}>{busy ? '正在处理…' : '立即检查环境与插件'}</Button>
     </div>
     <p>模型修复需同时开启自动升级，会消耗已配置模型的额度。每个版本与环境组合自动投递一次，五分钟后发起取消；候选仍需隔离验证后才能启用。</p>
+    {status?.executionEvidenceError && <p role="alert">业务故障记录失败，自动模型修复已暂停：{status.executionEvidenceError}</p>}
+    {!!status?.executionFailures?.length && <details>
+      <summary>业务兼容性故障（{status.executionFailures.length}）</summary>
+      <p>以下为插件返回的错误线索，尚未确认根因；不代表工程验证失败，也不会自动重试原业务操作。历史环境的记录仅供诊断。</p>
+      {status.executionFailures.map(item => <div key={`${item.packageDigest}:${item.environmentDigest}:${item.method}`}>
+        <p>{item.method} · {item.code} · {new Date(item.observedAt).toLocaleString()}</p>
+        <p>{item.detail}</p><p style={{ overflowWrap: 'anywhere' }}>插件摘要：{item.packageDigest}；环境摘要：{item.environmentDigest}</p>
+      </div>)}
+    </details>}
     {!!status?.repairJobs?.jobs.length && <details>
       <summary>自动修复任务（{status.repairJobs.jobs.length}）</summary>
       {status.repairJobs.jobs.map(job => <p key={job.id}>{new Date(job.startedAt).toLocaleString()} · {({ dispatching: '正在投递', running: '正在生成', stopping: '正在停止', 'candidate-ready': '已有候选，等待隔离验证', failed: '投递失败', 'timed-out': '已超时', cancelled: '已取消', interrupted: '重启后已终止' } as Record<string, string>)[job.state] ?? job.state}{job.error ? ` · ${job.error}` : ''}</p>)}

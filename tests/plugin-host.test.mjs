@@ -268,6 +268,57 @@ test('host admits automatic repair for a failed active environment and persists 
   assert.equal(dispatched, 1)
 })
 
+test('business compatibility symptoms reach repair context without quarantining or replaying work', async t => {
+  const f = await fixture(t), marker = join(f.root, 'business-error')
+  const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py')
+  const manifestPath = join(f.options.icepak.pluginRoot, 'plugin.json'), manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  manifest.capabilities.push('project_inspect'); await writeFile(manifestPath, JSON.stringify(manifest))
+  await writeFile(entry, (await readFile(entry, 'utf8')).replace("'ok' if r['method']=='health' else 'NOT_INSTALLED'", "'ok'").replace('print(json.dumps',
+    `import os\nif r['method']=='inspect_project' and os.path.exists(${JSON.stringify(marker)}):\n code=open(${JSON.stringify(marker)}).read(); print(json.dumps({'id':r['id'],'ok':False,'error':{'code':code,'message':'compatibility fixture'}})); sys.exit(0)\nprint(json.dumps`))
+  let host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  host.setAutomaticRepair(true)
+  await host.reconcile()
+  await writeFile(marker, 'VALUEERROR')
+  await assert.rejects(host.icepak.inspectProject({}), /VALUEERROR/)
+  assert.deepEqual(host.repairJobInputs().targets, [], 'ordinary input errors do not trigger repair')
+  for (const code of ['ATTRIBUTEERROR', 'TYPEERROR', 'MODULENOTFOUNDERROR', 'IMPORTERROR']) {
+    await writeFile(marker, code)
+    await assert.rejects(host.icepak.inspectProject({}), error => error.code === code)
+  }
+  const targets = host.repairJobInputs().targets
+  assert.equal(targets.length, 1)
+  const context = host.repairContext(targets[0].basePackageDigest, 'python/adapter/__main__.py')
+  let dispatched = 0, stopped = 0
+  const transport = { dispatch: async job => { dispatched++; assert.equal(job.basePackageDigest, targets[0].basePackageDigest) }, stop: async () => { stopped++ } }
+  await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
+  assert.equal(dispatched, 1, 'a passing health receipt does not hide a captured business failure')
+  assert.equal(context.executionFailures.length, 1)
+  assert.equal(context.executionFailures[0].method, 'inspect_project')
+  assert.equal(context.executionFailures[0].code, 'IMPORTERROR')
+  assert.ok(context.validations.every(item => item.passed), 'business symptoms never revoke a host validation')
+  assert.equal(host.status().runtimes.find(item => item.kind === 'icepak').phase, 'ready')
+  const candidate = host.stageRepairCandidate({ schemaVersion: 1, ...targets[0], version: '1.0.1', reason: 'Business fixture',
+    files: [{ path: context.source.path, content: context.source.content + '\n# staged diagnostic fixture\n' }] })
+  assert.equal(candidate.executionFailures[0].code, 'IMPORTERROR')
+  await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
+  assert.equal(stopped, 1)
+  assert.equal(host.status().repairJobs.jobs[0].state, 'candidate-ready')
+  await host.close()
+  host = new PluginHost(f.home, f.options)
+  assert.deepEqual(host.repairJobInputs().targets, [], 'restart has not inspected the current runtime')
+  await host.reconcile()
+  assert.deepEqual(host.repairJobInputs().targets, targets)
+  await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
+  assert.equal(dispatched, 1, 'business failure does not consume the model again after restart')
+  await host.icepak.probeEnvironment()
+  assert.deepEqual(host.repairJobInputs().targets, targets, 'another method succeeding cannot clear this failure')
+  await rm(marker)
+  await host.icepak.inspectProject({})
+  assert.deepEqual(host.repairJobInputs().targets, [])
+  assert.equal(host.status().executionFailures.length, 0)
+})
+
 test('first-start validation failure admits one repair without an active revision and refresh rejects stale evidence', async t => {
   const f = await fixture(t)
   const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py')

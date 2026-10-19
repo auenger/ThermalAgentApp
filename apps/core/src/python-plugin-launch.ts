@@ -15,6 +15,8 @@ export interface PythonPluginLease {
   /** Exact host-captured AEDT roots for this lease; never supplied by plugin manifests or task input. */
   aedtEnvironment?: Readonly<Record<string, string>>
   protocolFailure?(method: string, error: PluginProtocolError): void
+  responseFailure?(method: string, error: PluginResponseError): void
+  responseSuccess?(method: string): void
   spawn?: import('./plugin-runtime-storage.js').PythonSpawner
   identity?: import('@thermal-agent/contracts').PluginExecutionIdentity
   capabilities?: readonly string[]
@@ -26,6 +28,11 @@ export interface PythonPluginLease {
 
 /** Created only by host-side RPC decoding, never from a plugin-supplied error code. */
 export class PluginProtocolError extends Error {}
+
+/** A valid error envelope, distinct from host-detected protocol corruption. */
+export class PluginResponseError extends Error {
+  constructor(readonly code: string, readonly detail: string) { super(`${code}: ${detail}`) }
+}
 
 export function decodePluginResponse(line: string, id: string): import('@thermal-agent/contracts').RpcResponse {
   let value: unknown

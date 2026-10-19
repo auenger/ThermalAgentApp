@@ -69,6 +69,7 @@ export class PluginHost {
   private readonly pythonEnvironments: PluginPythonEnvironments
   private readonly runtimeStorage: PluginRuntimeStorage
   private readonly repairCandidates: PluginRepairCandidates
+  private executionEvidenceError?: string
   readonly repairJobs: PluginRepairJobs
   private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
   private maintenance?: Promise<void>
@@ -261,15 +262,21 @@ export class PluginHost {
   repairJobInputs(): RepairJobInputs {
     const registry = this.store.list(), trusted = this.trustedDigests()
     const targets = Object.values(this.runtimes).flatMap(runtime => {
-      if (!runtime.error || this.policy.held[runtime.id]) return []
-      return (runtime.repairTargets ?? []).filter(({ basePackageDigest, environmentDigest }) => {
+      if (this.policy.held[runtime.id]) return []
+      const active = registry.active[runtime.id]?.current
+      const activeSnapshot = active ? runtime.snapshots.get(active) : undefined
+      const businessTargets = !runtime.error && activeSnapshot ? registry.executionFailures.filter(item => item.packageDigest === active &&
+        item.environmentDigest === pluginEnvironmentDigest(activeSnapshot.environment)).map(item => ({ basePackageDigest: item.packageDigest, environmentDigest: item.environmentDigest })) : []
+      const validationTargets = (runtime.error ? runtime.repairTargets ?? [] : []).filter(({ basePackageDigest, environmentDigest }) => {
         const snapshot = runtime.snapshots.get(basePackageDigest)
         return trusted.includes(basePackageDigest) && snapshot && pluginEnvironmentDigest(snapshot.environment) === environmentDigest &&
           registry.validations.some(item => item.packageDigest === basePackageDigest && item.environmentDigest === environmentDigest && !item.passed)
       }).map(target => ({ ...target }))
+      return [...new Map([...validationTargets, ...businessTargets.filter(item => trusted.includes(item.basePackageDigest))]
+        .map(item => [`${item.basePackageDigest}:${item.environmentDigest}`, item])).values()]
     })
     const candidates = this.repairCandidates.list()
-    return { enabled: !this.closed && this.policy.automaticUpdates && this.policy.automaticRepair === true && !candidates.errors.length,
+    return { enabled: !this.closed && !this.executionEvidenceError && this.policy.automaticUpdates && this.policy.automaticRepair === true && !candidates.errors.length,
       canDispatch: !Object.values(this.runtimes).some(runtime => runtime.pending || this.store.isBusy(runtime.id)),
       targets, candidates: candidates.candidates }
   }
@@ -278,6 +285,7 @@ export class PluginHost {
     const registry = this.store.list()
     return { automaticUpdates: this.policy.automaticUpdates, automaticRepair: this.policy.automaticRepair === true,
       repairJobs: this.repairJobs.status(), held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
+      executionEvidenceError: this.executionEvidenceError,
       runtimeRepairs: this.pythonEnvironments.status(),
       runtimeStorage: this.runtimeStorage.status(),
       wheelAssets: this.releases.assets.collectionStatus(),
@@ -346,6 +354,8 @@ export class PluginHost {
       source = { path, content: new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(join(this.home, 'registry', 'packages', digest, path))) }
     }
     return { base, source, validations: this.store.list().validations.filter(item => item.packageDigest === digest),
+      executionFailures: this.store.list().executionFailures.filter(item => item.packageDigest === digest),
+      evidenceNote: 'Execution failures are plugin-reported compatibility symptoms captured by the host, not independent proof of the cause or failed engineering validation. No automatic replay of business operations.',
       proposalFormat: { schemaVersion: 1, basePackageDigest: digest, environmentDigest: 'Use an existing host validation environmentDigest',
         version: 'A distinct candidate version', reason: 'Describe the observed fault and proposed change', files: [{ path: `${base.manifest.entry.root}/module.py`, content: 'Replacement UTF-8 source; null removes an existing file' }] },
       execution: 'disabled-until-isolated-validation', constraints: 'Source-only candidate; existing permissions, capabilities, entry point and dependency lock remain fixed. Staging does not validate, trust or activate code.' }
@@ -356,7 +366,8 @@ export class PluginHost {
     const context = this.repairContext(proposal.basePackageDigest)
     const evidence = context.validations.find(item => item.environmentDigest === proposal.environmentDigest)
     if (!evidence) throw new Error('Repair requires existing host validation evidence for the base environment')
-    return this.repairCandidates.stage(proposal, context.base, join(this.home, 'registry', 'packages', context.base.digest), evidence)
+    return this.repairCandidates.stage(proposal, context.base, join(this.home, 'registry', 'packages', context.base.digest), evidence,
+      context.executionFailures.filter(item => item.environmentDigest === proposal.environmentDigest))
   }
 
   private trustedDigests(): string[] {
@@ -430,7 +441,12 @@ export class PluginHost {
     const snapshot = runtime.snapshots.get(digest)
     if (!snapshot) throw new Error('Plugin dependency runtime has not been prepared')
     const lease = managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected)
+    const executionResponse = (method: string, error?: { code: string; detail: string }) => {
+      try { this.store.recordExecutionResponse(digest, pluginEnvironmentDigest(snapshot.environment), method, error) }
+      catch (error) { this.executionEvidenceError = error instanceof Error ? error.message : String(error) }
+    }
     return { ...lease, aedtEnvironment: snapshot.aedtEnvironment ? { ...snapshot.aedtEnvironment } : undefined,
+      responseFailure: executionResponse, responseSuccess: (method: string) => executionResponse(method),
       spawn: this.runtimeStorage.forExecutable(snapshot.executable),
       protocolFailure: (method: string, error: Error) => {
         this.recoveryRequested.add(kind)

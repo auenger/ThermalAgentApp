@@ -2,7 +2,7 @@ import { spawnPython } from './plugin-runtime-storage.js'
 import { resolve, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, type PythonPluginLease } from './python-plugin-launch.js'
+import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, PluginResponseError, type PythonPluginLease } from './python-plugin-launch.js'
 import type {
   IcepakEnvironmentProbe,
   IcepakProjectOperationInput,
@@ -162,6 +162,7 @@ export class IcepakPluginClient {
     const runtime = this.acquireRuntime?.()
     try {
       const result = await this.callWithRuntime(method, params, options, runtime)
+      if (result && typeof result === 'object' && (result as { status?: string }).status === 'ok') runtime?.responseSuccess?.(method)
       if ((method === 'probe_environment' || method === 'probe_launchability') && result && typeof result === 'object') {
         const probe = result as IcepakEnvironmentProbe
         // Strip self-reported provenance even for legacy/unmanaged clients.
@@ -179,6 +180,7 @@ export class IcepakPluginClient {
     }
     catch (error) {
       if (error instanceof PluginProtocolError) runtime?.protocolFailure?.(method, error)
+      if (error instanceof PluginResponseError) runtime?.responseFailure?.(method, error)
       throw error
     } finally { runtime?.release() }
   }
@@ -308,7 +310,7 @@ export class IcepakPluginClient {
     })
 
     if (response.id !== id) throw new Error('Icepak plugin response id mismatch')
-    if (!response.ok) throw Object.assign(new Error(`${response.error.code}: ${response.error.message}`), { code: response.error.code })
+    if (!response.ok) throw new PluginResponseError(response.error.code, response.error.message)
     return response.result
   }
 }

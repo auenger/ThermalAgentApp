@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, lstatSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parseManagedPluginManifest } from '@thermal-agent/contracts'
-import { PluginStore, type PluginRevision, type PluginValidation } from './plugin-store.js'
+import { PluginStore, type PluginRevision, type PluginValidation, type PluginExecutionFailure } from './plugin-store.js'
 
 export const MAX_REPAIR_PROPOSAL_BYTES = 2 * 1024 * 1024
 const sha = (value: Buffer | string) => createHash('sha256').update(value).digest('hex')
@@ -16,6 +16,7 @@ export interface RepairCandidate {
   basePackageDigest: string; environmentDigest: string; packageDigest: string; pluginId: string; version: string; reason: string
   changes: Array<{ path: string; sha256: string | null }>
   evidence: PluginValidation
+  executionFailures?: PluginExecutionFailure[]
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 export function parseRepairProposal(value: unknown): RepairProposal {
@@ -64,7 +65,7 @@ export class PluginRepairCandidates {
     return value
   }
 
-  stage(proposal: RepairProposal, base: PluginRevision, baseRoot: string, evidence: PluginValidation): RepairCandidate {
+  stage(proposal: RepairProposal, base: PluginRevision, baseRoot: string, evidence: PluginValidation, executionFailures: PluginExecutionFailure[] = []): RepairCandidate {
     proposal = parseRepairProposal(proposal)
     if (base.digest !== proposal.basePackageDigest || evidence.packageDigest !== base.digest || evidence.environmentDigest !== proposal.environmentDigest) throw new Error('Repair evidence does not match its base')
     const manifest = parseManagedPluginManifest({ ...base.manifest, version: proposal.version })
@@ -105,7 +106,8 @@ export class PluginRepairCandidates {
       const record: RepairCandidate = { schemaVersion: 1, id, status: 'awaiting-isolated-validation', createdAt: new Date().toISOString(),
         basePackageDigest: base.digest, environmentDigest: proposal.environmentDigest, packageDigest: revision.digest,
         pluginId: manifest.id, version: manifest.version, reason: proposal.reason,
-        changes: changes.map(file => ({ path: file.path, sha256: file.content === null ? null : sha(file.content) })), evidence: structuredClone(evidence) }
+        changes: changes.map(file => ({ path: file.path, sha256: file.content === null ? null : sha(file.content) })), evidence: structuredClone(evidence),
+        executionFailures: structuredClone(executionFailures.filter(item => item.packageDigest === base.digest && item.environmentDigest === proposal.environmentDigest)) }
       writeFileSync(join(temporary, 'candidate.json'), JSON.stringify(record), { flag: 'wx', mode: 0o600 })
       renameSync(temporary, destination)
       return record
