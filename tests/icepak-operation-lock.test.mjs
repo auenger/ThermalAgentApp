@@ -42,6 +42,25 @@ test('plugin timeout terminates managed process before the shared gate is releas
   assert.equal(store.operation(), null)
 })
 
+test('pinning a runtime retains the shared AEDT operation gate', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'icepak-pin-lock-'))
+  const database = new LocalDatabase(join(root, 'db.sqlite'))
+  const store = new ModelPreparationStore(database.path)
+  t.after(async () => { store.close(); database.close(); await rm(root, { recursive: true, force: true }) })
+  let finish
+  const client = { solveProject: () => new Promise(resolve => { finish = resolve }) }
+  const port = lockIcepakOperations({ ...client, async pinRuntime() {
+    return { identity: { pluginId: 'test', pluginVersion: '1.0.0' }, port: client, release() {} }
+  } }, store)
+  const pin = await port.pinRuntime()
+  const active = pin.port.solveProject({})
+  assert.equal(store.operation().method, 'solveProject')
+  await assert.rejects(port.solveProject({}), error => error.code === 'ICEPAK_BUSY')
+  finish({ status: 'ok' }); await active
+  pin.release()
+  assert.equal(store.operation(), null)
+})
+
 test('a live owner cannot be displaced by startup recovery', async t => {
   const root = await mkdtemp(join(tmpdir(), 'icepak-owner-test-'))
   const database = new LocalDatabase(join(root, 'db.sqlite'))

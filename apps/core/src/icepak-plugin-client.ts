@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv } from './python-plugin-launch.js'
+import { pythonPluginArgs, pythonPluginEnv, type PythonPluginLease } from './python-plugin-launch.js'
 import type {
   IcepakEnvironmentProbe,
   IcepakProjectOperationInput,
@@ -11,12 +11,14 @@ import type {
   CadPluginInput,
   ModelPluginInput,
   ModelPluginResult,
+  PluginExecutionIdentity,
 } from '@thermal-agent/contracts'
 
 export interface IcepakPluginClientOptions {
   python?: string
   pluginRoot?: string
   timeoutMs?: number
+  acquireRuntime?: (expected?: PluginExecutionIdentity) => PythonPluginLease
 }
 
 export interface PluginCallOptions {
@@ -30,6 +32,7 @@ export interface PluginCallOptions {
 }
 
 export interface IcepakPluginPort {
+  pinRuntime?(expected?: PluginExecutionIdentity): Promise<PinnedIcepakPlugin>
   inspectCad?(input: CadPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
   prepareModel?(input: ModelPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
   validateModel?(input: ModelPluginInput, options?: PluginCallOptions): Promise<ModelPluginResult>
@@ -42,15 +45,49 @@ export interface IcepakPluginPort {
   fanSolve(input: IcepakProjectOperationInput & { outputDir: string }, options?: PluginCallOptions): Promise<IcepakProjectOperationResult>
 }
 
+export interface PinnedIcepakPlugin {
+  identity: PluginExecutionIdentity
+  port: IcepakPluginPort
+  release(): void
+}
+
+export async function pinIcepakPlugin(port: IcepakPluginPort, expected?: PluginExecutionIdentity): Promise<PinnedIcepakPlugin> {
+  if (port.pinRuntime) return port.pinRuntime(expected)
+  if (expected?.packageDigest) throw new Error('This plugin cannot restore a managed revision')
+  const probe = await port.probeEnvironment()
+  const identity = { pluginId: probe.pluginId ?? 'external-icepak', pluginVersion: probe.pluginVersion ?? 'unversioned' }
+  if (expected && (expected.pluginId !== identity.pluginId || expected.pluginVersion !== identity.pluginVersion)) throw new Error('Unmanaged plugin version changed')
+  return { identity, port, release() {} }
+}
+
 export class IcepakPluginClient {
+  private readonly acquireRuntime?: (expected?: PluginExecutionIdentity) => PythonPluginLease
   private readonly python: string
   private readonly pluginRoot: string
   private readonly timeoutMs: number
 
   constructor(options: IcepakPluginClientOptions = {}) {
+    this.acquireRuntime = options.acquireRuntime
     this.python = options.python ?? process.env.THERMAL_ICEPAK_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3')
     this.pluginRoot = resolve(options.pluginRoot ?? process.env.THERMAL_ICEPAK_PLUGIN_ROOT ?? 'plugins/icepak-pyaedt/python')
     this.timeoutMs = options.timeoutMs ?? 15_000
+  }
+
+  async pinRuntime(expected?: PluginExecutionIdentity): Promise<PinnedIcepakPlugin> {
+    const runtime = this.acquireRuntime?.(expected)
+    try {
+      const identity = runtime?.identity
+      const probe = identity ? undefined : await this.probeEnvironment()
+      const actual = identity ?? { pluginId: probe!.pluginId, pluginVersion: probe!.pluginVersion }
+      if (expected && (actual.pluginId !== expected.pluginId || actual.pluginVersion !== expected.pluginVersion || actual.packageDigest !== expected.packageDigest || actual.environmentDigest !== expected.environmentDigest)) throw new Error('Pinned plugin identity mismatch')
+      let released = false
+      const port = new IcepakPluginClient({ python: this.python, pluginRoot: this.pluginRoot, timeoutMs: this.timeoutMs,
+        ...(runtime ? { acquireRuntime: () => {
+          if (released) throw new Error('Plugin execution lease has ended')
+          return { ...runtime, release() {} }
+        } } : {}) })
+      return { identity: actual, port, release: () => { if (!released) { released = true; runtime?.release() } } }
+    } catch (error) { runtime?.release(); throw error }
   }
 
   async probeEnvironment(): Promise<IcepakEnvironmentProbe> {
@@ -98,10 +135,16 @@ export class IcepakPluginClient {
   }
 
   async call(method: string, params: object = {}, options: PluginCallOptions = {}): Promise<unknown> {
+    const runtime = this.acquireRuntime?.()
+    try { return await this.callWithRuntime(method, params, options, runtime) }
+    finally { runtime?.release() }
+  }
+
+  private async callWithRuntime(method: string, params: object, options: PluginCallOptions, runtime?: PythonPluginLease): Promise<unknown> {
     if (options.signal?.aborted) throw new Error(`Icepak plugin ${method} was cancelled before launch`)
     const id = randomUUID()
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
-    const child = spawn(this.python, pythonPluginArgs(this.pluginRoot, 'thermal_icepak_plugin'), {
+    const child = spawn(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_icepak_plugin'), {
       env: { ...pythonPluginEnv(), ...(options.operationId ? { THERMAL_ICEPAK_PARENT_PID: String(process.pid), THERMAL_ICEPAK_MANAGED_ONESHOT: '1' } : {}) },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,

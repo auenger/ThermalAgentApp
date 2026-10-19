@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv } from './python-plugin-launch.js'
-import type { RpcResponse } from '@thermal-agent/contracts'
+import { pythonPluginArgs, pythonPluginEnv, type PythonPluginLease } from './python-plugin-launch.js'
+import type { PluginExecutionIdentity, RpcResponse } from '@thermal-agent/contracts'
 
 export interface ReportRenderInput {
   outputPath: string
@@ -15,6 +15,7 @@ export interface ReportRenderInput {
 }
 
 export interface ReportRenderResult {
+  pluginRuntime?: PluginExecutionIdentity
   outputPath: string
   pageCount: number
   sizeBytes: number
@@ -30,14 +31,17 @@ export interface ReportClientOptions {
   python?: string
   pluginRoot?: string
   timeoutMs?: number
+  acquireRuntime?: () => PythonPluginLease
 }
 
 export class ReportClient implements ReportPort {
+  private readonly acquireRuntime?: () => PythonPluginLease
   private readonly python: string
   private readonly pluginRoot: string
   private readonly timeoutMs: number
 
   constructor(options: ReportClientOptions = {}) {
+    this.acquireRuntime = options.acquireRuntime
     const pluginRoot = resolve(options.pluginRoot ?? process.env.THERMAL_REPORT_PLUGIN_ROOT ?? 'plugins/report-reportlab/python')
     const pluginParent = resolve(pluginRoot, '..')
     const localPython = process.platform === 'win32'
@@ -54,8 +58,14 @@ export class ReportClient implements ReportPort {
   }
 
   private async call(method: string, params: object): Promise<unknown> {
+    const runtime = this.acquireRuntime?.()
+    try { return await this.callWithRuntime(method, params, runtime) }
+    finally { runtime?.release() }
+  }
+
+  private async callWithRuntime(method: string, params: object, runtime?: PythonPluginLease): Promise<unknown> {
     const id = randomUUID()
-    const child = spawn(this.python, pythonPluginArgs(this.pluginRoot, 'thermal_report_plugin'), {
+    const child = spawn(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_report_plugin'), {
       env: pythonPluginEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -67,14 +77,16 @@ export class ReportClient implements ReportPort {
     child.stdout.on('data', chunk => { stdout = (stdout + chunk).slice(-2_000_000) })
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-20_000) })
     const response = await new Promise<RpcResponse>((resolveResponse, reject) => {
+      let timedOut = false
       const timer = setTimeout(() => {
+        timedOut = true
         terminateProcessTree(child, { force: true })
-        reject(new Error(`Report plugin ${method} timed out`))
       }, this.timeoutMs)
       timer.unref()
       child.once('error', error => { clearTimeout(timer); reject(error) })
       child.once('close', code => {
         clearTimeout(timer)
+        if (timedOut) { reject(new Error(`Report plugin ${method} timed out`)); return }
         const line = stdout.trim().split(/\r?\n/u).at(-1) ?? ''
         if (!line) {
           reject(new Error(`Report plugin exited without a response (${code}): ${stderr.trim().slice(-500)}`))
@@ -83,10 +95,11 @@ export class ReportClient implements ReportPort {
         try { resolveResponse(JSON.parse(line) as RpcResponse) }
         catch { reject(new Error(`Report plugin returned invalid JSON: ${line.slice(0, 500)}`)) }
       })
+      child.stdin.on('error', () => { /* Process failure and cancellation are settled by close/error. */ })
       child.stdin.end(`${JSON.stringify({ id, method, params })}\n`)
     })
     if (response.id !== id) throw new Error('Report plugin response id mismatch')
     if (!response.ok) throw new Error(`${response.error.code}: ${response.error.message}`)
-    return response.result
+    return { ...(response.result as Record<string, unknown>), pluginRuntime: runtime?.identity }
   }
 }

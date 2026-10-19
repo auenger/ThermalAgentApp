@@ -20,7 +20,7 @@ export async function modelApp(existingHome, { realCad = false } = {}) {
     })
   }
   const plugin = {
-    async probeEnvironment() { return { status: 'NOT_INSTALLED', platform: 'darwin', aedtVersions: [], checks: [], diagnostics: [] } },
+    async probeEnvironment() { return { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', status: 'NOT_INSTALLED', platform: 'darwin', aedtVersions: [], checks: [], diagnostics: [] } },
     async inspectProject() { throw new Error('unexpected ordinary project check') },
     async fanCheck() { throw new Error('unexpected fan check') },
     async fanSolve() { throw new Error('unexpected fan solve') },

@@ -25,7 +25,7 @@ export async function parameterApp() {
   const calls = []
   const plugin = {
     failCheck: false, failSolve: false, checkDelay: 0,
-    async probeEnvironment() { return { status: 'UNAVAILABLE', platform: 'darwin', aedtVersions: [], checks: [], diagnostics: [] } },
+    async probeEnvironment() { return { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', status: 'UNAVAILABLE', platform: 'darwin', aedtVersions: [], checks: [], diagnostics: [] } },
     async inspectProject() { return { status: 'ok', project, parameterCatalog: catalog, validation: { verified: true, checks: [] } } },
     async checkChanges(input) {
       calls.push({ kind: 'check', input })

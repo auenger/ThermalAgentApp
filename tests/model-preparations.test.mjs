@@ -55,6 +55,10 @@ test('CAD App workflow without Agent creates verified engineering input and runs
   assert.equal(attempt.parameters.modelPreparationId, preparation.id)
   assert.equal(attempt.parameters.modelSpecSha256, preparation.specSha256)
   assert.equal(attempt.inputArtifactSha256, preparation.projectSha256)
+  const runtimeEvidence = completed.job.artifacts.find(artifact => artifact.role === 'PLUGIN_RUNTIME')
+  assert.ok(runtimeEvidence, 'model validation retains the host-recorded plugin identity')
+  const recordedIdentity = JSON.parse(await readFile(f.app.artifacts.resolveArtifact(runtimeEvidence.sha256), 'utf8'))
+  assert.equal(recordedIdentity.pluginVersion, attempt.pluginVersion)
   assert.equal(f.controls.calls.at(-1).input.setup, 'ThermalBaseline')
   const files = (await f.request('/model-files', undefined, 'GET')).body.files
   assert.ok(files.some(file => file.sha256 === task.requirementSnapshot.sourceModel.sha256 && file.labels.includes('原始模型')))

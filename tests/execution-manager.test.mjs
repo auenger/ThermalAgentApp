@@ -36,7 +36,7 @@ test('local execution snapshots input, records progress, and links immutable res
   await writeFile(source, 'source-project')
   const progress = []
   const plugin = {
-    probeEnvironment: unused, inspectProject: unused, fanCheck: unused, fanSolve: unused,
+    probeEnvironment: async () => ({ pluginId: 'fixture-icepak', pluginVersion: '1.2.3' }), inspectProject: unused, fanCheck: unused, fanSolve: unused,
     async solveProject(input, options) {
       progress.push('called')
       plugin.lastProjectPath = input.projectPath
@@ -67,6 +67,9 @@ test('local execution snapshots input, records progress, and links immutable res
   const task = database.createTask(createTask({ title: 'Baseline', description: '', ownerNodeId: 'local-node', requirementSnapshot: { targetTmaxC: 122 } }))
   database.transitionTask(task.id, 'READY', 1)
   const started = await manager.startBaseline(task.id, { projectPath: source, cores: 4 })
+  assert.equal(started.attempt.pluginId, 'fixture-icepak')
+  assert.equal(started.attempt.pluginVersion, '1.2.3')
+  assert.deepEqual(started.attempt.parameters.pluginRuntime, { pluginId: 'fixture-icepak', pluginVersion: '1.2.3' })
   const finished = await waitFor(
     () => database.getAttempt(started.attempt.id)?.status === 'SUCCEEDED' && database.getAttempt(started.attempt.id),
     'baseline attempt did not finish',
@@ -94,7 +97,7 @@ test('cancelling an active local attempt produces terminal Attempt and Task stat
   const source = join(root, 'Project1.aedt')
   await writeFile(source, 'source-project')
   const plugin = {
-    probeEnvironment: unused, inspectProject: unused, fanCheck: unused, fanSolve: unused,
+    probeEnvironment: async () => ({ pluginId: 'fixture-icepak', pluginVersion: '1.2.3' }), inspectProject: unused, fanCheck: unused, fanSolve: unused,
     solveProject(_input, options) {
       return new Promise((_resolve, reject) => {
         options.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
@@ -141,7 +144,7 @@ test('approved fan candidate reuses baseline evidence and returns for final revi
     }
   }
   const plugin = {
-    probeEnvironment: unused, inspectProject: unused, fanCheck: unused,
+    probeEnvironment: async () => ({ pluginId: 'fixture-icepak', pluginVersion: '1.2.3' }), inspectProject: unused, fanCheck: unused,
     solveProject(input) { return makeResult(input, 'solve', 100) },
     async fanSolve(input) {
       assert.equal(await readFile(input.projectPath, 'utf8'), 'baseline-solved')
@@ -182,7 +185,7 @@ test('explicit retry creates a bounded new Attempt from the immutable input', as
   await writeFile(source, 'retry-source')
   let calls = 0
   const plugin = {
-    probeEnvironment: unused, inspectProject: unused, fanCheck: unused, fanSolve: unused,
+    probeEnvironment: async () => ({ pluginId: 'fixture-icepak', pluginVersion: '1.2.3' }), inspectProject: unused, fanCheck: unused, fanSolve: unused,
     async solveProject(input) {
       calls += 1
       assert.equal(await readFile(input.projectPath, 'utf8'), 'retry-source')

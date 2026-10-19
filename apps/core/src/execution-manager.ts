@@ -1,9 +1,10 @@
 import { basename, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { IcepakCandidateInput, IcepakProjectOperationInput, IcepakProjectOperationResult, AttemptRecord, RunRecord, ThermalVerdict } from '@thermal-agent/contracts'
+import type { IcepakCandidateInput, IcepakProjectOperationInput, IcepakProjectOperationResult, AttemptRecord, RunRecord, ThermalVerdict, PluginExecutionIdentity } from '@thermal-agent/contracts'
 import type { LocalDatabase, ModelPreparationStore } from '@thermal-agent/sqlite-store'
-import type { IcepakPluginPort } from './icepak-plugin-client.js'
+import { pinIcepakPlugin, type PinnedIcepakPlugin, type IcepakPluginPort } from './icepak-plugin-client.js'
+import { parsePluginExecutionIdentity } from '@thermal-agent/contracts'
 import { provesIcepakSolve } from './icepak-readiness.js'
 import { TaskWorkspace } from './task-workspace.js'
 import { IcepakOperationBusyError } from './icepak-operation-lock.js'
@@ -28,7 +29,21 @@ export class IcepakExecutionManager {
     this.recoverInterruptedAttempts()
   }
 
-  async startBaseline(taskId: string, input: IcepakProjectOperationInput): Promise<StartedExecution> {
+  async startBaseline(taskId: string, input: IcepakProjectOperationInput, expectedRuntime?: PluginExecutionIdentity): Promise<StartedExecution> {
+    const snapshot = this.database.getTask(taskId)?.requirementSnapshot
+    const simulation = snapshot?.simulationInput as { preparationId?: string; validationSha256?: string } | undefined
+    if (simulation) {
+      const validated = this.modelStore?.jobs(taskId).find(job => job.kind === 'VALIDATE' && job.status === 'SUCCEEDED' &&
+        job.preparationId === simulation.preparationId && job.artifacts.some(artifact => artifact.role === 'VALIDATION_EVIDENCE' && artifact.sha256 === simulation.validationSha256))
+      const identity = validated?.artifacts.find(artifact => artifact.role === 'PLUGIN_RUNTIME')
+      if (identity) expectedRuntime = parsePluginExecutionIdentity(JSON.parse(await readFile(this.artifacts.resolveArtifact(identity.sha256), 'utf8')))
+    }
+    const pinned = await pinIcepakPlugin(this.plugin, expectedRuntime)
+    try { return await this.startBaselinePinned(taskId, input, pinned) }
+    catch (error) { pinned.release(); throw error }
+  }
+
+  private async startBaselinePinned(taskId: string, input: IcepakProjectOperationInput, pinned: PinnedIcepakPlugin): Promise<StartedExecution> {
     if (this.modelStore?.reconcileRecoveredOperation()) throw new IcepakOperationBusyError()
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
@@ -62,9 +77,9 @@ export class IcepakExecutionManager {
       taskId,
       kind: 'BASELINE',
       executorNodeId: task.ownerNodeId,
-      pluginId: 'icepak-pyaedt',
-      pluginVersion: '0.2.0',
-      parameters: { ...input, projectPath: undefined, ...(simulation ? { modelPreparationId: simulation.preparationId, modelSpecSha256: simulation.specSha256, modelValidationSha256: simulation.validationSha256 } : {}) },
+      pluginId: pinned.identity.pluginId,
+      pluginVersion: pinned.identity.pluginVersion,
+      parameters: { ...input, projectPath: undefined, pluginRuntime: pinned.identity, ...(simulation ? { modelPreparationId: simulation.preparationId, modelSpecSha256: simulation.specSha256, modelValidationSha256: simulation.validationSha256 } : {}) },
       inputArtifactSha256: inputArtifact.sha256,
     })
     this.database.linkAttemptArtifact({
@@ -84,9 +99,9 @@ export class IcepakExecutionManager {
     this.database.transitionTask(taskId, 'RUNNING', task.version + 1, 'Icepak 插件已启动')
 
     const controller = new AbortController()
-    const promise = this.executeBaseline(taskId, created.attempt.id, pluginInput, controller)
+    const promise = this.executeBaseline(taskId, created.attempt.id, pluginInput, controller, pinned.port)
     this.active.set(created.attempt.id, { controller, promise })
-    void promise.finally(() => this.active.delete(created.attempt.id))
+    void promise.finally(() => { this.active.delete(created.attempt.id); pinned.release() })
     return {
       run: this.database.getRun(created.run.id) as RunRecord,
       attempt: this.database.getAttempt(created.attempt.id) as AttemptRecord,
@@ -94,6 +109,14 @@ export class IcepakExecutionManager {
   }
 
   async startCandidate(taskId: string, input: IcepakCandidateInput): Promise<StartedExecution> {
+    const baseline = this.database.listTaskRuns(taskId).filter(run => run.kind === 'BASELINE' && run.status === 'COMPLETED').at(-1)
+    const selected = baseline?.selectedAttemptId ? this.database.getAttempt(baseline.selectedAttemptId) : null
+    const pinned = await pinIcepakPlugin(this.plugin, parsePluginExecutionIdentity(selected?.parameters.pluginRuntime))
+    try { return await this.startCandidatePinned(taskId, input, pinned) }
+    catch (error) { pinned.release(); throw error }
+  }
+
+  private async startCandidatePinned(taskId: string, input: IcepakCandidateInput, pinned: PinnedIcepakPlugin): Promise<StartedExecution> {
     if (this.modelStore?.reconcileRecoveredOperation()) throw new IcepakOperationBusyError()
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
@@ -129,8 +152,8 @@ export class IcepakExecutionManager {
     )
     const created = this.database.createRunWithAttempt({
       taskId, kind: 'CANDIDATE', executorNodeId: task.ownerNodeId,
-      pluginId: baselineAttempt.pluginId, pluginVersion: baselineAttempt.pluginVersion,
-      parameters: { ...input, expectedProfile, design: baselineResult.project.activeDesign, expectedVersion: undefined, baselineAttemptId: baselineAttempt.id }, inputArtifactSha256: candidateSourceSha,
+      pluginId: pinned.identity.pluginId, pluginVersion: pinned.identity.pluginVersion,
+      parameters: { ...input, pluginRuntime: pinned.identity, expectedProfile, design: baselineResult.project.activeDesign, expectedVersion: undefined, baselineAttemptId: baselineAttempt.id }, inputArtifactSha256: candidateSourceSha,
     })
     this.database.linkAttemptArtifact({
       attemptId: created.attempt.id, sha256: candidateSourceSha, role: 'INPUT_PROJECT', createdAt: new Date().toISOString(),
@@ -148,9 +171,9 @@ export class IcepakExecutionManager {
       nonGraphical: true,
     }
     const controller = new AbortController()
-    const promise = this.executeCandidate(taskId, created.attempt.id, pluginInput, controller)
+    const promise = this.executeCandidate(taskId, created.attempt.id, pluginInput, controller, pinned.port)
     this.active.set(created.attempt.id, { controller, promise })
-    void promise.finally(() => this.active.delete(created.attempt.id))
+    void promise.finally(() => { this.active.delete(created.attempt.id); pinned.release() })
     return {
       run: this.database.getRun(created.run.id) as RunRecord,
       attempt: this.database.getAttempt(created.attempt.id) as AttemptRecord,
@@ -158,6 +181,16 @@ export class IcepakExecutionManager {
   }
 
   async retryLatestRun(taskId: string, expectedVersion: number): Promise<StartedExecution> {
+    const latest = this.database.listTaskRuns(taskId).at(-1)
+    const previous = latest ? this.database.listRunAttempts(latest.id).at(-1) : undefined
+    const expected = parsePluginExecutionIdentity(previous?.parameters.pluginRuntime) ??
+      (previous ? { pluginId: previous.pluginId, pluginVersion: previous.pluginVersion } : undefined)
+    const pinned = await pinIcepakPlugin(this.plugin, expected)
+    try { return await this.retryLatestRunPinned(taskId, expectedVersion, pinned) }
+    catch (error) { pinned.release(); throw error }
+  }
+
+  private async retryLatestRunPinned(taskId: string, expectedVersion: number, pinned: PinnedIcepakPlugin): Promise<StartedExecution> {
     if (this.modelStore?.reconcileRecoveredOperation()) throw new IcepakOperationBusyError()
     const task = this.database.getTask(taskId)
     if (!task) throw new Error(`task ${taskId} was not found`)
@@ -200,10 +233,10 @@ export class IcepakExecutionManager {
     } as IcepakProjectOperationInput & { outputDir: string }
     const controller = new AbortController()
     const promise = run.kind === 'CANDIDATE'
-      ? this.executeCandidate(taskId, retried.attempt.id, pluginInput, controller)
-      : this.executeBaseline(taskId, retried.attempt.id, pluginInput, controller)
+      ? this.executeCandidate(taskId, retried.attempt.id, pluginInput, controller, pinned.port)
+      : this.executeBaseline(taskId, retried.attempt.id, pluginInput, controller, pinned.port)
     this.active.set(retried.attempt.id, { controller, promise })
-    void promise.finally(() => this.active.delete(retried.attempt.id))
+    void promise.finally(() => { this.active.delete(retried.attempt.id); pinned.release() })
     return { run: retried.run, attempt: this.database.getAttempt(retried.attempt.id) as AttemptRecord }
   }
 
@@ -224,6 +257,7 @@ export class IcepakExecutionManager {
     attemptId: string,
     input: IcepakProjectOperationInput & { outputDir: string },
     controller: AbortController,
+    plugin: IcepakPluginPort,
   ): Promise<void> {
     this.database.transitionAttempt(attemptId, 'RUNNING', { progressStage: 'plugin_running' })
     const heartbeat = setInterval(() => {
@@ -231,7 +265,7 @@ export class IcepakExecutionManager {
     }, 15_000)
     heartbeat.unref()
     try {
-      const result = await this.plugin.solveProject(input, {
+      const result = await plugin.solveProject(input, {
         signal: controller.signal,
         onProgress: stage => {
           try { this.database.heartbeatAttempt(attemptId, stage) } catch { /* ignore terminal races */ }
@@ -316,6 +350,7 @@ export class IcepakExecutionManager {
     attemptId: string,
     input: IcepakProjectOperationInput & { outputDir: string },
     controller: AbortController,
+    plugin: IcepakPluginPort,
   ): Promise<void> {
     this.database.transitionAttempt(attemptId, 'RUNNING', { progressStage: 'plugin_running' })
     const heartbeat = setInterval(() => {
@@ -324,7 +359,7 @@ export class IcepakExecutionManager {
     heartbeat.unref()
     try {
       const solve = (input as IcepakProjectOperationInput & { parameterPlanId?: string }).parameterPlanId
-        ? this.plugin.solveProject.bind(this.plugin) : this.plugin.fanSolve.bind(this.plugin)
+        ? plugin.solveProject.bind(plugin) : plugin.fanSolve.bind(plugin)
       const result = await solve(input, {
         signal: controller.signal,
         onProgress: stage => {

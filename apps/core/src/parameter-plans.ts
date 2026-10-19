@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { createTask } from '@thermal-agent/domain'
-import { parseParameterPlanRequest, resolveParameterChanges } from '@thermal-agent/contracts'
+import { parsePluginExecutionIdentity, parseParameterPlanRequest, resolveParameterChanges } from '@thermal-agent/contracts'
 import type { IcepakProjectOperationResult, ParameterPlan } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { IcepakPluginPort } from './icepak-plugin-client.js'
+import { pinIcepakPlugin, type PinnedIcepakPlugin, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { TaskWorkspace } from './task-workspace.js'
 import type { IcepakExecutionManager } from './execution-manager.js'
 
@@ -79,15 +79,18 @@ export class ParameterPlanManager {
     if (this.busy || this.database.listActiveAttempts().length) throw new Error('本机已有验证或求解运行')
     const controller = new AbortController()
     const operation = (async () => {
-      const source = this.database.getArtifact(base.source.sha256)!
-      const root = join(this.workspace.ensure(taskId), 'parameter-inspections', randomUUID())
-      const projectPath = await this.artifacts.materialize(source.sha256, join(root, 'input', source.originalName))
-      const inspected = await this.plugin.inspectProject({ projectPath, outputDir: join(root, 'inspect'),
-        version: base.parsed.project.aedtVersion, design: base.parsed.project.activeDesign }, { signal: controller.signal })
-      if (!inspected.parameterCatalog || inspected.validation?.verified !== true) throw new Error('参数清单读取失败')
-      const artifact = await this.artifacts.putBytes(Buffer.from(JSON.stringify(inspected.parameterCatalog)), 'parameter-catalog.json', 'application/json')
-      this.database.upsertArtifact(artifact)
-      this.database.linkAttemptArtifact({ attemptId: base.attempt.id, sha256: artifact.sha256, role: 'LOG', createdAt: new Date().toISOString() })
+      const pinned = await pinIcepakPlugin(this.plugin, parsePluginExecutionIdentity(base.attempt.parameters.pluginRuntime))
+      try {
+        const source = this.database.getArtifact(base.source.sha256)!
+        const root = join(this.workspace.ensure(taskId), 'parameter-inspections', randomUUID())
+        const projectPath = await this.artifacts.materialize(source.sha256, join(root, 'input', source.originalName))
+        const inspected = await pinned.port.inspectProject({ projectPath, outputDir: join(root, 'inspect'),
+          version: base.parsed.project.aedtVersion, design: base.parsed.project.activeDesign }, { signal: controller.signal })
+        if (!inspected.parameterCatalog || inspected.validation?.verified !== true) throw new Error('参数清单读取失败')
+        const artifact = await this.artifacts.putBytes(Buffer.from(JSON.stringify(inspected.parameterCatalog)), 'parameter-catalog.json', 'application/json')
+        this.database.upsertArtifact(artifact)
+        this.database.linkAttemptArtifact({ attemptId: base.attempt.id, sha256: artifact.sha256, role: 'LOG', createdAt: new Date().toISOString() })
+      } finally { pinned.release() }
     })()
     this.active.set(`catalog:${taskId}`, { controller, promise: operation })
     try { await operation; return await this.context(taskId) }
@@ -115,14 +118,18 @@ export class ParameterPlanManager {
   }
 
   private async check(plan: ParameterPlan, controller: AbortController): Promise<void> {
+    let pinned: PinnedIcepakPlugin | undefined
     try {
+      const baseline = this.database.getAttempt(plan.sourceAttemptId)
+      pinned = await pinIcepakPlugin(this.plugin, parsePluginExecutionIdentity(baseline?.parameters.pluginRuntime))
       const source = this.database.getArtifact(plan.sourceSha256)
       if (!source) throw new Error('基准工程已丢失')
       const root = join(this.workspace.ensure(plan.taskId), 'parameter-plans', plan.id)
       const projectPath = await this.artifacts.materialize(source.sha256, join(root, 'input', source.originalName))
-      const result = await this.plugin.checkChanges!({ projectPath, outputDir: join(root, 'check'),
+      const rawResult = await pinned.port.checkChanges!({ projectPath, outputDir: join(root, 'check'),
         version: plan.aedtVersion, design: plan.design, setup: plan.setup, changes: plan.changes,
         expectedProfile: { design: plan.design, setup: plan.setup, aedtVersion: plan.aedtVersion, artifact: { sha256: plan.sourceSha256 } } }, { signal: controller.signal })
+      const result = { ...rawResult, pluginRuntime: pinned.identity }
       if (result.inputSha256 !== plan.sourceSha256 || result.validation?.verified !== true || !result.validation.checks.includes('persistedParameters') || !result.verifiedProjectPath ||
         !result.actionResults || result.actionResults.length !== plan.changes.length ||
         plan.changes.some(change => !result.actionResults!.some(action => action.parameterId === change.parameter.id &&
@@ -134,7 +141,7 @@ export class ParameterPlanManager {
         evidenceSha256: evidence.sha256, actionResults: result.actionResults })
     } catch (error) {
       this.database.updateParameterPlan(plan.id, 'CHECKING', { status: 'FAILED', error: error instanceof Error ? error.message : '参数验证失败' })
-    }
+    } finally { pinned?.release() }
   }
 
   async execute(taskId: string, planId: string, expectedVersion: number) {
@@ -179,7 +186,7 @@ export class ParameterPlanManager {
       this.database.transitionTask(child.id, 'READY', child.version, `来自参数方案 ${plan.id} 的新工况基准`)
       const started = await this.executions.startBaseline(child.id, { projectPath: path, version: plan.aedtVersion,
         design: plan.design, setup: plan.setup, expectedProfile: { design: plan.design, setup: plan.setup, aedtVersion: plan.aedtVersion, artifact: { sha256: source.sha256 } }, cores: typeof base.attempt.parameters.cores === 'number' ? base.attempt.parameters.cores : undefined,
-        flowConvergenceCriterion: typeof base.attempt.parameters.flowConvergenceCriterion === 'number' ? base.attempt.parameters.flowConvergenceCriterion : undefined })
+        flowConvergenceCriterion: typeof base.attempt.parameters.flowConvergenceCriterion === 'number' ? base.attempt.parameters.flowConvergenceCriterion : undefined }, parsePluginExecutionIdentity(base.attempt.parameters.pluginRuntime))
       return this.database.updateParameterPlan(plan.id, 'STARTING', { status: 'EXECUTED', executionTaskId: childId, runId: started.run.id })
     } catch (error) {
       this.database.updateParameterPlan(plan.id, 'STARTING', { status: 'FAILED', error: error instanceof Error ? error.message : '启动失败' })

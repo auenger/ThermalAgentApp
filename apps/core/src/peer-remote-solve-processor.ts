@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
 import type { IcepakEnvironmentProbe, RemoteJobRecord } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
-import type { IcepakPluginPort } from './icepak-plugin-client.js'
+import { pinIcepakPlugin, type PinnedIcepakPlugin, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { PeerArtifactTransfer } from './peer-artifact-transfer.js'
 import type { DiscoveredPeer, PeerDiscovery } from './peer-discovery.js'
 import { PeerLeaseControl } from './peer-lease-control.js'
 import { PeerSecureChannel } from './peer-secure-channel.js'
+import { parsePluginExecutionIdentity } from '@thermal-agent/contracts'
 import { provesIcepakSolve } from './icepak-readiness.js'
 import { TaskWorkspace } from './task-workspace.js'
 
@@ -100,6 +101,7 @@ export class PeerRemoteSolveProcessor {
   }
 
   private async process(job: RemoteJobRecord, owner: DiscoveredPeer, controller: AbortController): Promise<void> {
+    let pinned: PinnedIcepakPlugin | undefined
     let timer: NodeJS.Timeout | undefined
     let renewalError: Error | undefined
     let renewing = false
@@ -137,6 +139,7 @@ export class PeerRemoteSolveProcessor {
       timer.unref()
 
       if (stage === 'INPUT_READY') {
+        pinned = await pinIcepakPlugin(this.plugin)
         const probe = await (this.readinessProbe?.() ?? this.plugin.probeEnvironment())
         if (probe.platform !== 'win32' || probe.status !== 'READY' || probe.licenseStatus !== 'AVAILABLE' ||
           !probe.capabilities.includes('baseline_solve')) throw new Error('Icepak is no longer READY for remote solve')
@@ -147,8 +150,9 @@ export class PeerRemoteSolveProcessor {
         await this.send(owner, { operation: 'task.baseline.start', ...jobReference(job) })
         this.database.transitionRemoteJob(job.attemptId, job.leaseId, job.epoch, 'INPUT_READY', 'RUNNING')
         stage = 'RUNNING'
-        const result = await this.plugin.solveProject({ ...job.parameters, projectPath,
+        const rawResult = await pinned.port.solveProject({ ...job.parameters, projectPath,
           outputDir: join(this.workspace.ensure(job.taskId), 'runs', job.attemptId, 'plugin') }, { signal: controller.signal })
+        const result = { ...rawResult, pluginRuntime: pinned.identity }
         if (controller.signal.aborted) throw renewalError ?? new Error('remote solve was cancelled')
         if (result.status !== 'ok' || result.mode !== 'solve' || result.inputSha256 !== job.inputSha256) {
           throw new Error('Icepak returned a mismatched Baseline result')
@@ -194,8 +198,8 @@ export class PeerRemoteSolveProcessor {
         const version = typeof job.parameters.version === 'string' ? job.parameters.version : ''
         const evidence = JSON.parse(await readFile(this.artifacts.resolveArtifact(staged.resultSha256), 'utf8'))
         if (provesIcepakSolve(evidence, version)) {
-          const probe = await this.plugin.probeEnvironment()
-          this.database.recordIcepakReadinessFromRemoteJob(job.attemptId, version, probe.pluginVersion, staged.resultSha256)
+          const identity = parsePluginExecutionIdentity(evidence.pluginRuntime)
+          if (identity) this.database.recordIcepakReadinessFromRemoteJob(job.attemptId, version, identity.pluginVersion, staged.resultSha256)
         }
       } catch (error) { console.error('remote Icepak readiness evidence was not recorded', error) }
       this.retryAfter.delete(job.attemptId)
@@ -215,7 +219,7 @@ export class PeerRemoteSolveProcessor {
         try { this.database.recordRemoteJobError(job.attemptId, job.leaseId, job.epoch,
           'REMOTE_OWNER_UNAVAILABLE', cause.message) } catch { /* newer lease won */ }
       }
-    } finally { if (timer) clearInterval(timer) }
+    } finally { if (timer) clearInterval(timer); pinned?.release() }
   }
 
   private async send(owner: DiscoveredPeer, message: object): Promise<unknown> {

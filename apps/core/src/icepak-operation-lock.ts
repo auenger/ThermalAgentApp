@@ -18,6 +18,10 @@ export function lockIcepakOperations(port: IcepakPluginPort, store: ModelPrepara
     get(target, key) {
       const value = Reflect.get(target, key)
       if (typeof value !== 'function') return value
+      if (key === 'pinRuntime') return async (...args: unknown[]) => {
+        const pinned = await value.apply(target, args)
+        return { ...pinned, port: lockIcepakOperations(pinned.port, store) }
+      }
       if (!protectedMethods.has(String(key))) return value.bind(target)
       return async (...args: unknown[]) => {
         const id = randomUUID()

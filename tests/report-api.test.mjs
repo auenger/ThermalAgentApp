@@ -3,12 +3,16 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { createCoreApp } from '@thermal-agent/core'
+import { createCoreApp, ReportClient } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 
 test('approved task generates an auditable PDF, stores REPORT evidence, and serves it idempotently', async t => {
   const home = await mkdtemp(join(tmpdir(), 'thermal-agent-report-'))
-  const app = createCoreApp({ home, startAgentRuntime: false })
+  const actualReporter = new ReportClient()
+  const runtimeFixture = { pluginId: 'report-fixture', pluginVersion: '1.0.0', packageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64) }
+  const app = createCoreApp({ home, startAgentRuntime: false, reportClient: {
+    async renderTaskReport(input) { return { ...await actualReporter.renderTaskReport(input), pluginRuntime: runtimeFixture } },
+  } })
   app.server.listen(0, '127.0.0.1')
   await new Promise(resolve => app.server.once('listening', resolve))
   t.after(async () => { await app.close(); await rm(home, { recursive: true, force: true }) })
@@ -48,6 +52,11 @@ test('approved task generates an auditable PDF, stores REPORT evidence, and serv
   assert.equal(report.link.role, 'REPORT')
   assert.equal(report.artifact.mediaType, 'application/pdf')
   assert.deepEqual((await readFile(app.artifacts.resolveArtifact(report.artifact.sha256))).subarray(0, 4).toString(), '%PDF')
+  const identityLog = app.database.listAttemptArtifacts(attempt.id).find(item => item.role === 'LOG')
+  assert.ok(identityLog)
+  const identityEvidence = JSON.parse(await readFile(app.artifacts.resolveArtifact(identityLog.sha256), 'utf8'))
+  assert.deepEqual(identityEvidence.pluginRuntime, runtimeFixture)
+  assert.equal(identityEvidence.reportSha256, report.artifact.sha256)
 
   const second = await fetch(`${base}/api/tasks/${task.id}/report`, { method: 'POST' })
   assert.equal(second.status, 201)

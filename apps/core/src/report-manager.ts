@@ -58,7 +58,7 @@ export class ReportManager {
     const outputDir = join(this.workspace.ensure(taskId), 'reports')
     await mkdir(outputDir, { recursive: true })
     const outputPath = join(outputDir, `${taskId}.pdf`)
-    await this.reporter.renderTaskReport({
+    const rendered = await this.reporter.renderTaskReport({
       outputPath,
       generatedAt: new Date().toISOString(),
       task: task as unknown as Record<string, unknown>,
@@ -67,6 +67,12 @@ export class ReportManager {
     })
     const artifact = await this.artifacts.importFile(outputPath, `${taskId}-thermal-report.pdf`, 'application/pdf')
     this.database.upsertArtifact(artifact)
+    if (rendered.pluginRuntime) {
+      const runtime = await this.artifacts.putBytes(Buffer.from(JSON.stringify({ reportSha256: artifact.sha256, pluginRuntime: rendered.pluginRuntime })),
+        `${taskId}-report-runtime.json`, 'application/json')
+      this.database.upsertArtifact(runtime)
+      this.database.linkAttemptArtifact({ attemptId: selected.id, sha256: runtime.sha256, role: 'LOG', createdAt: new Date().toISOString() })
+    }
     const link = this.database.linkAttemptArtifact({
       attemptId: selected.id,
       sha256: artifact.sha256,

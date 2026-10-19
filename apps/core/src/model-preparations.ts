@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { basename, extname, join, relative, resolve } from 'node:path'
-import { createThermalModelSpec, NATURAL_CONVECTION_TEMPLATE, parseThermalModelSpec, THERMAL_MODEL_MATERIALS, validateThermalModelSpec } from '@thermal-agent/contracts'
+import { parsePluginExecutionIdentity, createThermalModelSpec, NATURAL_CONVECTION_TEMPLATE, parseThermalModelSpec, THERMAL_MODEL_MATERIALS, validateThermalModelSpec } from '@thermal-agent/contracts'
 import type { CadInspection, ModelPreparation, ModelPreparationJob, ModelPreparationContext, ModelPluginInput, ModelPluginResult, ThermalModelSpec } from '@thermal-agent/contracts'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
 import { ModelPreparationStore, type LocalDatabase } from '@thermal-agent/sqlite-store'
-import type { IcepakPluginPort } from './icepak-plugin-client.js'
+import { pinIcepakPlugin, type PinnedIcepakPlugin, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { TaskWorkspace } from './task-workspace.js'
 import { IcepakOperationBusyError } from './icepak-operation-lock.js'
 
@@ -79,10 +79,10 @@ export class ModelPreparationManager {
       status: 'QUEUED', catalog: null, projectSha256: null, catalogSha256: null, previewSha256: null, environment: null, createdAt: new Date().toISOString() }
     this.store.createInspection(inspection)
     const job = this.newJob(taskId, 'INSPECT', input.requestId, operationInput, inspection.id, null)
-    this.run(job, async (root, options) => {
+    this.run(job, async (root, options, plugin) => {
       const sourcePath = await this.artifacts.materialize(sourceSha, join(root, 'input', artifact.originalName))
       const outputDir = join(root, 'plugin')
-      const result = await this.plugin.inspectCad!({ sourcePath, sourceSha256: sourceSha, inspectionId: inspection.id, version: input.version, healing: input.healing, outputDir }, options)
+      const result = await plugin.inspectCad!({ sourcePath, sourceSha256: sourceSha, inspectionId: inspection.id, version: input.version, healing: input.healing, outputDir }, options)
       this.checkResult(result, 'inspect_cad', sourceSha)
       if (result.environment?.aedtVersion !== inspection.version) throw new ModelPreparationConflict('ENVIRONMENT_MISMATCH', '导入结果的 AEDT 版本不一致')
       const catalog = result.catalog
@@ -93,7 +93,7 @@ export class ModelPreparationManager {
       const catalogLink = links.find(a => a.role === 'OBJECT_CATALOG')!
       const persistedCatalog = JSON.parse(await readFile(this.artifacts.resolveArtifact(catalogLink.sha256), 'utf8'))
       if (JSON.stringify(persistedCatalog) !== JSON.stringify(catalog)) throw new ModelPreparationConflict('CATALOG_MISMATCH', '对象清单文件与返回数据不一致')
-      this.store.updateJob(job.id, { artifacts: links })
+      this.store.updateJob(job.id, { artifacts: [...this.store.job(job.id)!.artifacts, ...links] })
       this.store.finishInspection(inspection.id, { status: 'SUCCEEDED', catalog, projectSha256: links.find(a => a.role === 'IMPORTED_PROJECT')!.sha256,
         catalogSha256: catalogLink.sha256, previewSha256: links.find(a => a.role === 'PREVIEW')?.sha256 ?? null, environment: result.environment })
     })
@@ -132,17 +132,17 @@ export class ModelPreparationManager {
       spec: draft.spec, specSha256: sha(draft.spec), status: 'PREPARING', projectSha256: null, validationSha256: null, createdAt: now, updatedAt: now }
     this.store.createPreparation(preparation)
     const job = this.newJob(taskId, 'PREPARE', input.requestId, normalized, inspection.id, preparation.id)
-    this.run(job, async (root, options) => {
+    this.run(job, async (root, options, plugin) => {
       const specArtifact = await this.artifacts.putBytes(Buffer.from(JSON.stringify(draft.spec)), 'model-spec.json', 'application/json')
       this.database.upsertArtifact(specArtifact)
       if (specArtifact.sha256 !== preparation.specSha256) throw new Error('配置身份不一致')
       const pluginInput = await this.modelInput(preparation, inspection.projectSha256!, root)
-      const result = await this.plugin.prepareModel!(pluginInput, options)
+      const result = await plugin.prepareModel!(pluginInput, options)
       this.checkResult(result, 'prepare_model', inspection.projectSha256!, preparation.specSha256)
       if (result.environment?.aedtVersion !== preparation.spec.aedtVersion) throw new ModelPreparationConflict('ENVIRONMENT_MISMATCH', '生成结果的 AEDT 版本不一致')
       const links = await this.archive(result, pluginInput.outputDir, ['GENERATED_PROJECT', 'PREPARATION_EVIDENCE'])
       links.push({ role: 'MODEL_SPEC', sha256: specArtifact.sha256, originalName: specArtifact.originalName })
-      this.store.updateJob(job.id, { artifacts: links })
+      this.store.updateJob(job.id, { artifacts: [...this.store.job(job.id)!.artifacts, ...links] })
       this.store.updatePreparation(preparation.id, { status: 'PREPARED', projectSha256: links.find(a => a.role === 'GENERATED_PROJECT')!.sha256 })
     })
     return this.store.job(job.id)!
@@ -158,13 +158,13 @@ export class ModelPreparationManager {
     if (!this.plugin.validateModel) throw new ModelPreparationConflict('PLUGIN_UNAVAILABLE', '插件尚不支持热模型验证', 501)
     this.store.updatePreparation(prep.id, { status: 'VALIDATING' })
     const job = this.newJob(taskId, 'VALIDATE', requestId, input, prep.inspectionId, prep.id)
-    this.run(job, async (root, options) => {
+    this.run(job, async (root, options, plugin) => {
       const pluginInput = await this.modelInput(prep, prep.projectSha256!, root)
-      const result = await this.plugin.validateModel!(pluginInput, options)
+      const result = await plugin.validateModel!(pluginInput, options)
       this.checkResult(result, 'validate_model', prep.projectSha256!, prep.specSha256)
       if (result.environment?.aedtVersion !== prep.spec.aedtVersion) throw new ModelPreparationConflict('ENVIRONMENT_MISMATCH', '验证结果的 AEDT 版本不一致')
       const links = await this.archive(result, pluginInput.outputDir, ['VALIDATION_EVIDENCE', 'MESH_STATS'])
-      this.store.updateJob(job.id, { artifacts: links })
+      this.store.updateJob(job.id, { artifacts: [...this.store.job(job.id)!.artifacts, ...links] })
       const verification = result.validation
       if (verification?.verified !== true || verification.meshGenerated !== true || verification.selfContained !== true || !verification.design || !verification.setup || !verification.checks.includes('persistedModelSpec')) throw new ModelPreparationConflict('VALIDATION_INCOMPLETE', '工程读回、自包含或网格检查未完整通过')
       const evidence = JSON.parse(await readFile(this.artifacts.resolveArtifact(links.find(a => a.role === 'VALIDATION_EVIDENCE')!.sha256), 'utf8'))
@@ -221,14 +221,24 @@ export class ModelPreparationManager {
     if (required.some(role => !roles.has(role))) throw new ModelPreparationConflict('ARTIFACT_MISSING', '插件缺少必要的工程或验证产物')
     return links
   }
-  private run(job: ModelPreparationJob, action: (root: string, options: { signal: AbortSignal; onProgress: (stage: string) => void }) => Promise<void>) {
+  private run(job: ModelPreparationJob, action: (root: string, options: { signal: AbortSignal; onProgress: (stage: string) => void }, plugin: IcepakPluginPort) => Promise<void>) {
     const controller = new AbortController()
     const root = join(this.workspace.ensure(job.taskId), 'model-preparations', job.preparationId ?? job.inspectionId, job.id)
     const promise = (async () => {
       this.store.updateJob(job.id, { status: 'RUNNING', stage: 'plugin_starting' })
       if (job.kind === 'INSPECT') this.store.finishInspection(job.inspectionId, { status: 'RUNNING' })
+      let pinned: PinnedIcepakPlugin | undefined
       try {
-        await action(root, { signal: controller.signal, onProgress: stage => this.store.updateJob(job.id, { stage }) })
+        const predecessor = this.store.jobs(job.taskId).filter(previous => previous.status === 'SUCCEEDED' &&
+          (job.kind === 'PREPARE' ? previous.kind === 'INSPECT' && previous.inspectionId === job.inspectionId :
+            job.kind === 'VALIDATE' ? previous.kind === 'PREPARE' && previous.preparationId === job.preparationId : false)).at(-1)
+        const identityLink = predecessor?.artifacts.find(artifact => artifact.role === 'PLUGIN_RUNTIME')
+        const expected = identityLink ? parsePluginExecutionIdentity(JSON.parse(await readFile(this.artifacts.resolveArtifact(identityLink.sha256), 'utf8'))) : undefined
+        pinned = await pinIcepakPlugin(this.plugin, expected)
+        const identity = await this.artifacts.putBytes(Buffer.from(JSON.stringify(pinned.identity)), 'plugin-runtime.json', 'application/json')
+        this.database.upsertArtifact(identity)
+        this.store.updateJob(job.id, { artifacts: [{ role: 'PLUGIN_RUNTIME', sha256: identity.sha256, originalName: identity.originalName }] })
+        await action(root, { signal: controller.signal, onProgress: stage => this.store.updateJob(job.id, { stage }) }, pinned.port)
         if (controller.signal.aborted) throw new Error('cancelled')
         this.store.updateJob(job.id, { status: 'SUCCEEDED', stage: 'completed' })
       } catch (error) {
@@ -243,7 +253,7 @@ export class ModelPreparationManager {
         this.store.updateJob(job.id, { status, stage: status.toLowerCase(), error: failure })
         if (job.kind === 'INSPECT') this.store.finishInspection(job.inspectionId, { status })
         else if (job.preparationId) this.store.updatePreparation(job.preparationId, { status })
-      }
+      } finally { pinned?.release() }
     })()
     this.active.set(job.id, { controller, promise })
     void promise.finally(() => this.active.delete(job.id))

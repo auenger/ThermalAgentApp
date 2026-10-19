@@ -30,3 +30,6 @@ export { ParameterPlanManager } from './parameter-plans.js'
 
 export { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
 export { lockIcepakOperations, IcepakOperationBusyError } from './icepak-operation-lock.js'
+export { PluginStore, pluginEnvironmentDigest } from './plugin-store.js'
+export { PluginAdaptationController } from './plugin-adaptation.js'
+export { managedPythonRuntime } from './plugin-python-runtime.js'
