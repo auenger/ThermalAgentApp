@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Button, Switch } from '@fluentui/react-components'
 
 interface PluginStatus {
+  repairCandidates?: { candidates: Array<{ id: string; pluginId: string; version: string; reason: string; createdAt: string;
+    basePackageDigest: string; environmentDigest: string; changes: Array<{ path: string; sha256: string | null }> }>; errors: string[] }
   runtimeStorage?: { checkedAt?: string; removed: string[]; retained: Array<{ directory: string; reason: string }>; error?: string }
   runtimeRepairs?: Array<{ key: string; packageDigest: string; detectedAt: string; status: string; reason: string; error?: string }>
   automaticUpdates: boolean
@@ -100,6 +102,19 @@ export function PluginSettings() {
     <p>发布者须由本机管理员预先配置。导入后检查可触发已授权的工程样例求解验证；通过对应验证后才会启用候选。</p>
     {status?.releases.releases.map(release => <p key={release.digest}>受信发布者：{release.publisherId} · {release.id} · {status.active[release.id]?.current === release.digest ? '当前使用' : '已登记候选'}</p>)}
     {status?.releases.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}
+    {!!status?.repairCandidates?.candidates.length && <details>
+      <summary>修复候选（{status.repairCandidates.candidates.length}）</summary>
+      <p>以下候选仅已存档，尚未执行隔离验证，也未启用。当前插件继续按已有策略运行。</p>
+      {status.repairCandidates.candidates.map(candidate => <details key={candidate.id}>
+        <summary>{names[candidate.pluginId] ?? candidate.pluginId} v{candidate.version} · 等待隔离验证</summary>
+        <div style={{ overflowWrap: 'anywhere' }}>
+          <p>{candidate.reason}</p>
+          <p>提交时间：{new Date(candidate.createdAt).toLocaleString()}<br />基础插件：{candidate.basePackageDigest}<br />证据环境：{candidate.environmentDigest}</p>
+          <ul>{candidate.changes.map(change => <li key={change.path}>{change.sha256 ? '修改或新增' : '删除'}：{change.path}</li>)}</ul>
+        </div>
+      </details>)}
+    </details>}
+    {status?.repairCandidates?.errors.map((detail, index) => <p key={index} role="alert">修复候选读取失败：{detail}</p>)}
     {status?.runtimeStorage?.checkedAt && <details>
       <summary>依赖环境存储</summary>
       <p>最近检查：{new Date(status.runtimeStorage.checkedAt).toLocaleString()} · 已清理 {status.runtimeStorage.removed.length} 个 · 保留 {status.runtimeStorage.retained.length} 个</p>

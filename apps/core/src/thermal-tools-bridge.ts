@@ -14,6 +14,7 @@ import { CAD_EXTENSIONS } from './model-capabilities.js'
 import { TaskWorkspace } from './task-workspace.js'
 import type { PluginHost } from './plugin-host.js'
 import { MAX_PLUGIN_RELEASE_BYTES } from './plugin-release.js'
+import { MAX_REPAIR_PROPOSAL_BYTES } from './plugin-repair-candidates.js'
 
 export class ThermalToolsBridge {
   private server?: Server
@@ -92,7 +93,20 @@ export class ThermalToolsBridge {
       const status = request.method === 'POST' ? await this.plugins.reconcile() : this.plugins.status()
       writeJson(response, 200, { automaticUpdates: status.automaticUpdates, held: status.held, runtimes: status.runtimes,
         active: status.active, revisions: status.revisions.map(revision => ({ digest: revision.digest, manifest: revision.manifest })),
-        validations: status.validations, releases: status.releases, updates: status.updates, scope: 'Configured update sources and trusted packages only; signed reports require PDF readback; external engineering packages remain candidates' })
+        validations: status.validations, releases: status.releases, updates: status.updates, repairCandidates: status.repairCandidates,
+        scope: 'Configured update sources and trusted packages only; repair candidates cannot execute before isolated validation' })
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/plugins/repair-context') {
+      if (!this.plugins) throw new Error('Managed plugin host is unavailable')
+      const value = await readJson(request, 4096)
+      if (!isObject(value) || typeof value.packageDigest !== 'string' || value.path !== undefined && typeof value.path !== 'string') throw new Error('Invalid repair context request')
+      writeJson(response, 200, this.plugins.repairContext(value.packageDigest, value.path as string | undefined))
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/plugins/repair-candidates') {
+      if (!this.plugins) throw new Error('Managed plugin host is unavailable')
+      writeJson(response, 201, { candidate: this.plugins.stageRepairCandidate(await readJson(request, MAX_REPAIR_PROPOSAL_BYTES)), activated: false, executed: false })
       return
     }
     if (request.method === 'POST' && url.pathname === '/v1/plugins/install') {

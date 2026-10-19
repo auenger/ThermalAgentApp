@@ -22,6 +22,7 @@ try {
   // UI-only status fixture; real asset downloads, rebuilds and collection use Node integration tests.
   await page.route('**/api/plugin-runtime', async route => {
     const response = await route.fetch(), value = await response.json()
+    value.repairCandidates = { candidates: [{ id: 'ui-fixture', pluginId: 'report-reportlab', version: '0.1.1', reason: 'UI candidate fixture', createdAt: '2026-10-19T00:00:00Z', basePackageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64), changes: [{ path: 'python/adapter.py', sha256: 'c'.repeat(64) }] }], errors: [] }
     value.runtimeRepairs = [{ key: 'ui-fixture', packageDigest: 'a'.repeat(64), status: 'prepared',
       detectedAt: '2026-10-19T00:00:00Z', reason: 'UI fixture: dependency file changed; not an AEDT validation certificate' }]
     value.runtimeStorage = { checkedAt: '2026-10-19T00:00:00Z', removed: ['ui-fixture-removed'],
@@ -67,6 +68,10 @@ try {
   await settings.getByText(/历史作业或就绪证据仍有引用/).waitFor()
   await settings.getByText(/依赖资产：已下载 1 个/).waitFor()
   await settings.getByText(/连续失败 2 次/).waitFor()
+  await settings.getByText('修复候选（1）', { exact: true }).click()
+  await settings.getByText(/以下候选仅已存档/).waitFor()
+  await settings.getByText(/v0.1.1 · 等待隔离验证/).click()
+  await settings.getByText('UI candidate fixture', { exact: true }).waitFor()
   const directory = resolve('.thermal-agent/screenshots/plugin-settings')
   await mkdir(directory, { recursive: true })
   await page.screenshot({ path: join(directory, 'desktop.png'), fullPage: true })

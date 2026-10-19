@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { randomUUID, generateKeyPairSync, sign, createHash } from 'node:crypto'
 import { PluginRuntimeStorage } from '../apps/core/dist/plugin-runtime-storage.js'
+import { ThermalToolsBridge } from '../apps/core/dist/thermal-tools-bridge.js'
 import { PluginHost } from '../apps/core/dist/plugin-host.js'
 import { createCoreApp } from '../apps/core/dist/server.js'
 import { LocalDatabase, ModelPreparationStore } from '@thermal-agent/sqlite-store'
@@ -395,4 +396,68 @@ test('overlapping rollback requests cannot toggle versions or invalidate the suc
   assert.equal(host.status().active['icepak-pyaedt'].current, previous)
   assert.equal(host.status().runtimes.find(item => item.id === 'icepak-pyaedt').error, undefined)
   assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+})
+
+
+test('DSH repair proposals archive untrusted source with host evidence and never enter the executable registry', async t => {
+  const f = await fixture(t)
+  let host = new PluginHost(f.home, f.options)
+  const database = new LocalDatabase(join(f.root, 'bridge.sqlite'))
+  let bridge = new ThermalToolsBridge(f.root, database, host.icepak, 'fixture', host)
+  const address = await bridge.start()
+  t.after(async () => { await bridge.stop(); database.close(); await host.close() })
+  await host.icepak.probeEnvironment()
+  const active = host.status().active['icepak-pyaedt'].current
+  const context = host.repairContext(active)
+  const path = 'python/adapter/__main__.py'
+  assert.match(host.repairContext(active, path).source.content, /pluginVersion/)
+  assert.throws(() => host.repairContext(active, '../policy.json'), /listed Python/)
+  const marker = join(f.root, 'candidate-executed')
+  const proposal = { schemaVersion: 1, basePackageDigest: active, environmentDigest: context.validations[0].environmentDigest,
+    version: '1.0.1', reason: 'Fixture candidate; not engineering validation',
+    files: [{ path, content: `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text('must never run')\n` }] }
+  const request = async (path, body, authenticated = true) => fetch(`${address.url}${path}`, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(authenticated ? { Authorization: `Bearer ${address.token}` } : {}) }, body: JSON.stringify(body) })
+  assert.equal((await request('/v1/plugins/repair-candidates', proposal, false)).status, 401)
+  const read = await request('/v1/plugins/repair-context', { packageDigest: active, path })
+  assert.equal(read.status, 200); assert.equal((await read.json()).source.path, path)
+  const response = await request('/v1/plugins/repair-candidates', proposal)
+  assert.equal(response.status, 201)
+  const result = await response.json(), candidate = result.candidate
+  assert.equal(result.executed, false); assert.equal(result.activated, false)
+  assert.equal(candidate.status, 'awaiting-isolated-validation')
+  const candidateManifest = JSON.parse(await readFile(join(f.home, 'repair-candidates', candidate.id, 'registry', 'packages', candidate.packageDigest, 'plugin.json'), 'utf8'))
+  assert.deepEqual(candidateManifest, { ...context.base.manifest, version: '1.0.1' })
+  assert.deepEqual(candidate.evidence, context.validations[0])
+  assert.deepEqual(host.stageRepairCandidate(proposal), candidate, 'identical proposals are idempotent')
+  assert.equal(host.status().repairCandidates.candidates.length, 1)
+  assert.equal(host.store.list().revisions.some(item => item.digest === candidate.packageDigest), false)
+  await host.reconcile()
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+  await assert.rejects(readFile(marker), { code: 'ENOENT' })
+  for (const bad of [
+    { ...proposal, environmentDigest: 'f'.repeat(64) },
+    { ...proposal, basePackageDigest: 'f'.repeat(64) },
+    { ...proposal, permissions: ['arbitrary-execution'] },
+    { ...proposal, version: '1'.repeat(81) + '.0.0' },
+    { ...proposal, files: [{ path: '../escape.py', content: 'pass' }] },
+    { ...proposal, files: [{ path: 'plugin.json', content: '{}' }] },
+    { ...proposal, files: [{ path: 'python/NUL.py', content: 'pass' }] },
+    { ...proposal, files: [{ path, content: 'a'.repeat(1024 * 1024 + 1) }] },
+    { ...proposal, files: [{ path, content: null }] },
+    { ...proposal, files: [{ path, content: host.repairContext(active, path).source.content }] },
+  ]) assert.throws(() => host.stageRepairCandidate(bad))
+  assert.equal(host.status().repairCandidates.candidates.length, 1)
+  assert.equal(host.status().active['icepak-pyaedt'].current, active)
+  await bridge.stop(); await host.close()
+  host = new PluginHost(f.home, f.options)
+  assert.deepEqual(host.status().repairCandidates.candidates[0], candidate)
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+  const candidateSource = join(f.home, 'repair-candidates', candidate.id, 'registry', 'packages', candidate.packageDigest, path)
+  await writeFile(candidateSource, 'changed after staging')
+  assert.throws(() => host.stageRepairCandidate(proposal), /integrity|changed|digest/i)
+  await assert.rejects(readFile(marker), { code: 'ENOENT' })
+  for (let i = 1; i < 32; i++) host.stageRepairCandidate({ ...proposal, reason: `separate proposal ${i}` })
+  assert.equal(host.status().repairCandidates.candidates.length, 32)
+  assert.throws(() => host.stageRepairCandidate({ ...proposal, reason: 'one too many' }), /storage is full/)
 })

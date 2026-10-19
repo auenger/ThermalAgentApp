@@ -20,6 +20,7 @@ import { inspectAedtEnvironment } from './aedt-environment.js'
 import { PluginPythonEnvironments } from './plugin-python-environment.js'
 import { PluginHomeOwner } from './plugin-home-owner.js'
 import { PluginRuntimeStorage } from './plugin-runtime-storage.js'
+import { PluginRepairCandidates, parseRepairProposal } from './plugin-repair-candidates.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -64,6 +65,7 @@ export class PluginHost {
   private readonly preparationTasks = new Map<string, Promise<PythonRuntimeSnapshot>>()
   private readonly pythonEnvironments: PluginPythonEnvironments
   private readonly runtimeStorage: PluginRuntimeStorage
+  private readonly repairCandidates: PluginRepairCandidates
   private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
   private maintenance?: Promise<void>
   private runtimeRequests = 0
@@ -93,6 +95,7 @@ export class PluginHost {
         return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
       }))
       this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'), this.runtimeStorage, this.releases.assets)
+      this.repairCandidates = new PluginRepairCandidates(join(home, 'repair-candidates'))
       this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
         const path = join(home, 'update-sources.json')
         return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
@@ -254,6 +257,7 @@ export class PluginHost {
       runtimeRepairs: this.pythonEnvironments.status(),
       runtimeStorage: this.runtimeStorage.status(),
       wheelAssets: this.releases.assets.collectionStatus(),
+      repairCandidates: this.repairCandidates.list(),
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
@@ -303,6 +307,31 @@ export class PluginHost {
     const runtime = Object.values(this.runtimes).find(item => item.id === release.id)
     if (runtime && !known.has(release.digest)) this.invalidateRetry(runtime)
     return release
+  }
+
+  repairContext(digest: string, path?: string) {
+    if (this.closed) throw new Error('Plugin host is closed')
+    this.releaseStatus = this.releases.scan()
+    if (!/^[a-f0-9]{64}$/u.test(digest) || !this.trustedDigests().includes(digest)) throw new Error('Repair base must be a trusted registered package')
+    const base = this.store.verify(digest)
+    let source: { path: string; content: string } | undefined
+    if (path !== undefined) {
+      const file = base.files.find(item => item.path === path)
+      if (!file || !/\.(py|json)$/u.test(path) || file.bytes > 128 * 1024) throw new Error('Repair source must be a listed Python or JSON file no larger than 128 KiB')
+      source = { path, content: new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(join(this.home, 'registry', 'packages', digest, path))) }
+    }
+    return { base, source, validations: this.store.list().validations.filter(item => item.packageDigest === digest),
+      proposalFormat: { schemaVersion: 1, basePackageDigest: digest, environmentDigest: 'Use an existing host validation environmentDigest',
+        version: 'A distinct candidate version', reason: 'Describe the observed fault and proposed change', files: [{ path: `${base.manifest.entry.root}/module.py`, content: 'Replacement UTF-8 source; null removes an existing file' }] },
+      execution: 'disabled-until-isolated-validation', constraints: 'Source-only candidate; existing permissions, capabilities, entry point and dependency lock remain fixed. Staging does not validate, trust or activate code.' }
+  }
+
+  stageRepairCandidate(value: unknown) {
+    const proposal = parseRepairProposal(value)
+    const context = this.repairContext(proposal.basePackageDigest)
+    const evidence = context.validations.find(item => item.environmentDigest === proposal.environmentDigest)
+    if (!evidence) throw new Error('Repair requires existing host validation evidence for the base environment')
+    return this.repairCandidates.stage(proposal, context.base, join(this.home, 'registry', 'packages', context.base.digest), evidence)
   }
 
   private trustedDigests(): string[] {
