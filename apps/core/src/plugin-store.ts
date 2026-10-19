@@ -172,6 +172,22 @@ export class PluginStore {
     return structuredClone(revision)
   }
 
+  /** Host RPC observations may revoke an existing receipt while its execution lease is held. */
+  recordProtocolFailure(digest: string, environmentDigest: string, method: string, detail: string): void {
+    const revision = this.state.revisions[digest]
+    if (!revision || !(this.leases.get(revision.manifest.id) ?? 0) || this.validating.has(revision.manifest.id)) {
+      throw new Error('Runtime failure requires an existing execution lease')
+    }
+    const key = `${digest}:${environmentDigest}`, receipt = this.state.validations[key]
+    if (!receipt?.passed) return
+    const next = structuredClone(this.state)
+    const failure = `${method.slice(0, 80)}: ${detail.slice(0, 1000)}`
+    next.validations[key] = { ...receipt, passed: false,
+      checks: [...receipt.checks, { name: 'runtime-protocol', passed: false, detail: failure }], validatedAt: new Date().toISOString() }
+    this.event(next, 'runtime-protocol-failed', revision, `${environmentDigest}: ${failure}`)
+    this.commit(next)
+  }
+
   /** Only a host-owned validator may call this; never accept model-supplied validation receipts. */
   async validate(digest: string, environment: PluginEnvironment,
     validator: (lease: PluginLease) => Promise<PluginValidation['checks']>): Promise<PluginValidation> {

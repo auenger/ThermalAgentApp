@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, type PythonPluginLease } from './python-plugin-launch.js'
+import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, type PythonPluginLease } from './python-plugin-launch.js'
 import type { PluginExecutionIdentity, RpcResponse } from '@thermal-agent/contracts'
 
 export interface ReportRenderInput {
@@ -63,7 +63,10 @@ export class ReportClient implements ReportPort {
   private async call(method: string, params: object): Promise<unknown> {
     const runtime = this.acquireRuntime?.()
     try { return await this.callWithRuntime(method, params, runtime) }
-    finally { runtime?.release() }
+    catch (error) {
+      if (error instanceof PluginProtocolError) runtime?.protocolFailure?.(method, error)
+      throw error
+    } finally { runtime?.release() }
   }
 
   private async callWithRuntime(method: string, params: object, runtime?: PythonPluginLease): Promise<unknown> {
@@ -92,11 +95,11 @@ export class ReportClient implements ReportPort {
         if (timedOut) { reject(new Error(`Report plugin ${method} timed out`)); return }
         const line = stdout.trim().split(/\r?\n/u).at(-1) ?? ''
         if (!line) {
-          reject(new Error(`Report plugin exited without a response (${code}): ${stderr.trim().slice(-500)}`))
+          reject(new PluginProtocolError(`Report plugin exited without a response (${code}): ${stderr.trim().slice(-500)}`))
           return
         }
-        try { resolveResponse(JSON.parse(line) as RpcResponse) }
-        catch { reject(new Error(`Report plugin returned invalid JSON: ${line.slice(0, 500)}`)) }
+        try { resolveResponse(decodePluginResponse(line, id)) }
+        catch (error) { reject(error) }
       })
       child.stdin.on('error', () => { /* Process failure and cancellation are settled by close/error. */ })
       child.stdin.end(`${JSON.stringify({ id, method, params })}\n`)

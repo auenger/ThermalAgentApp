@@ -2,7 +2,7 @@ import { spawnPython } from './plugin-runtime-storage.js'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
-import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, type PythonPluginLease } from './python-plugin-launch.js'
+import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, type PythonPluginLease } from './python-plugin-launch.js'
 import type {
   IcepakEnvironmentProbe,
   IcepakProjectOperationInput,
@@ -165,7 +165,10 @@ export class IcepakPluginClient {
       }
       return result
     }
-    finally { runtime?.release() }
+    catch (error) {
+      if (error instanceof PluginProtocolError) runtime?.protocolFailure?.(method, error)
+      throw error
+    } finally { runtime?.release() }
   }
 
   private async callWithRuntime(method: string, params: object, options: PluginCallOptions, runtime?: PythonPluginLease): Promise<unknown> {
@@ -267,18 +270,18 @@ export class IcepakPluginClient {
           return
         }
         if (stdoutOverflow) {
-          reject(new Error(`Icepak plugin ${method} response exceeded 64 MB`))
+          reject(new PluginProtocolError(`Icepak plugin ${method} response exceeded 64 MB`))
           return
         }
         const line = lineBuffer.trim() || responseLine
         if (!line) {
-          reject(new Error(`Icepak plugin exited without a response (${code}): ${stderr.trim().slice(-500)}`))
+          reject(new PluginProtocolError(`Icepak plugin exited without a response (${code}): ${stderr.trim().slice(-500)}`))
           return
         }
         try {
-          resolveResponse(JSON.parse(line) as RpcResponse)
-        } catch {
-          reject(new Error(`Icepak plugin returned invalid JSON: ${line.slice(0, 500)}`))
+          resolveResponse(decodePluginResponse(line, id))
+        } catch (error) {
+          reject(error)
         }
       })
       try {

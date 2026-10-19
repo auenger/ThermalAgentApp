@@ -227,3 +227,48 @@ test('Core plugin management API uses the managed default client and rejects for
   assert.equal((await policy.json()).automaticUpdates, false)
   assert.equal(JSON.parse(await readFile(join(f.home, 'policy.json'), 'utf8')).automaticUpdates, false)
 })
+
+for (const automatic of [true, false]) test(`runtime protocol quarantine respects pins, restart and automatic updates=${automatic}`, async t => {
+  const f = await fixture(t)
+  let host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  await host.icepak.probeEnvironment()
+  const previous = host.status().active['icepak-pyaedt'].current
+  await host.close()
+  await f.source('icepak', '2.0.0')
+  const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py'), marker = join(f.root, 'break-protocol')
+  await writeFile(entry, (await readFile(entry, 'utf8')).replace('print(json.dumps',
+    `import os\nif r['method']=='probe_environment' and os.path.exists(${JSON.stringify(marker)}):\n print('invalid protocol'); sys.exit(0)\nprint(json.dumps`))
+  host = new PluginHost(f.home, f.options)
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '2.0.0')
+  const broken = host.status().active['icepak-pyaedt'].current
+  host.setAutomaticUpdates(automatic)
+  const pinned = await host.icepak.pinRuntime(), other = await host.icepak.pinRuntime()
+  await writeFile(marker, 'fail')
+  try {
+    await assert.rejects(pinned.port.probeEnvironment(), /invalid JSON/)
+    assert.equal(host.isCurrentIcepakRuntime(pinned.identity), false)
+    const receipt = host.status().validations.find(item => item.packageDigest === broken && item.environmentDigest === pinned.identity.environmentDigest)
+    assert.equal(receipt.passed, false)
+    assert.equal(receipt.checks.at(-1).name, 'runtime-protocol')
+    await host.reconcile()
+    assert.equal(host.status().active['icepak-pyaedt'].current, broken, 'other pinned work retains the active revision')
+  } finally { pinned.release(); other.release() }
+  if (!automatic) {
+    await assert.rejects(host.icepak.probeEnvironment(), /Previous validation failed/)
+    assert.equal(host.status().active['icepak-pyaedt'].current, broken)
+    await host.close()
+    host = new PluginHost(f.home, f.options)
+    await assert.rejects(host.icepak.probeEnvironment(), /Previous validation failed/)
+    assert.equal(host.status().active['icepak-pyaedt'].current, broken)
+    return
+  }
+  // The final pin release schedules recovery; no failed business call is retried.
+  for (let i = 0; i < 100 && host.status().active['icepak-pyaedt'].current !== previous; i++) await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(host.status().active['icepak-pyaedt'].current, previous)
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+  await host.close()
+  host = new PluginHost(f.home, f.options)
+  assert.equal((await host.icepak.probeEnvironment()).pluginVersion, '1.0.0')
+  assert.equal(host.status().events.filter(event => event.action === 'runtime-protocol-failed' && event.digest === broken).length, 1)
+})

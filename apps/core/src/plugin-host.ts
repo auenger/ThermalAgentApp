@@ -66,6 +66,7 @@ export class PluginHost {
   private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
   private maintenance?: Promise<void>
   private runtimeRequests = 0
+  private readonly recoveryRequested = new Set<Kind>()
   private assetRetention?: Set<string>
   private readonly assetRequests = new Map<string, number>()
   private releaseStatus: ReturnType<PluginReleaseInbox['scan']> = { releases: [], errors: [] }
@@ -353,8 +354,21 @@ export class PluginHost {
     if (!digest || !this.trustedDigests().includes(digest)) throw new Error('Plugin release is no longer trusted')
     const snapshot = runtime.snapshots.get(digest)
     if (!snapshot) throw new Error('Plugin dependency runtime has not been prepared')
-    return { ...managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected),
-      spawn: this.runtimeStorage.forExecutable(snapshot.executable) }
+    const lease = managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected)
+    return { ...lease, spawn: this.runtimeStorage.forExecutable(snapshot.executable),
+      protocolFailure: (method: string, error: Error) => {
+        this.recoveryRequested.add(kind)
+        runtime.inspectedAt = 0
+        if (this.store.list().active[runtime.id]?.current === digest) runtime.error = `Plugin protocol failure: ${error.message}`
+        this.store.recordProtocolFailure(digest, pluginEnvironmentDigest(snapshot.environment), method, error.message)
+      },
+      release: () => {
+        lease.release()
+        if (this.recoveryRequested.has(kind) && !this.closed) {
+          // Do not repeat the failed operation; only select a runtime for subsequent work.
+          setImmediate(() => { if (!this.closed) void this.ensure(kind).catch(() => {}) })
+        }
+      } }
   }
 
   private prepareSnapshot(kind: Kind, digest: string): Promise<PythonRuntimeSnapshot> {
@@ -476,6 +490,7 @@ export class PluginHost {
       }
       if (this.closed) throw new Error('Plugin host is closed')
       runtime.snapshot = snapshot
+      this.recoveryRequested.delete(kind)
       runtime.baseSnapshot = snapshot
       runtime.aedtInstallations = aedtInstallations
       const registry = this.store.list(), active = registry.active[runtime.id]?.current

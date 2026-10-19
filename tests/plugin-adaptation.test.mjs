@@ -3,7 +3,7 @@ import test from 'node:test'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PluginStore } from '../apps/core/dist/plugin-store.js'
+import { PluginStore, pluginEnvironmentDigest } from '../apps/core/dist/plugin-store.js'
 import { PluginAdaptationController } from '../apps/core/dist/plugin-adaptation.js'
 import { managedPythonRuntime } from '../apps/core/dist/plugin-python-runtime.js'
 import { IcepakPluginClient } from '../apps/core/dist/icepak-plugin-client.js'
@@ -158,4 +158,23 @@ test('a workflow pin prevents switching between calls and can restore its record
   const wrongEnvironment = { ...workflow.identity, environmentDigest: '0'.repeat(64) }
   await assert.rejects(client.pinRuntime(wrongEnvironment), /environment/)
   assert.equal(f.store.isBusy(f.id), false)
+})
+
+test('runtime protocol quarantine is durable and scoped to the observed environment', async t => {
+  const f = await fixture(t), revision = await f.install('1.0.0', { versions: ['1', '2'] })
+  const other = { ...environment, versions: { fixture: '2' } }
+  await f.controller.reconcile(f.id, environment, f.policy(), f.validate)
+  await f.store.validate(revision.digest, other, f.validate)
+  const receipt = f.store.list().validations.find(item => item.environmentDigest === pluginEnvironmentDigest(environment))
+  assert.throws(() => f.store.recordProtocolFailure(revision.digest, receipt.environmentDigest, 'health', 'invalid JSON'), /execution lease/)
+  const lease = f.store.acquire(f.id, environment)
+  try {
+    f.store.recordProtocolFailure(revision.digest, receipt.environmentDigest, 'health', 'invalid JSON')
+    f.store.recordProtocolFailure(revision.digest, receipt.environmentDigest, 'health', 'duplicate')
+    assert.throws(() => f.store.acquire(f.id, environment), /validation required/)
+  } finally { lease.release() }
+  const reopened = new PluginStore(join(f.root, 'store'))
+  assert.equal(reopened.list().events.filter(event => event.action === 'runtime-protocol-failed').length, 1)
+  assert.equal((await f.controller.reconcile(f.id, environment, f.policy(), f.validate)).status, 'unavailable')
+  assert.equal((await f.controller.reconcile(f.id, other, f.policy(), f.validate)).status, 'unchanged')
 })

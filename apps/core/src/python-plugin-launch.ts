@@ -12,6 +12,7 @@ export function pythonPluginEnv(): NodeJS.ProcessEnv {
 }
 
 export interface PythonPluginLease {
+  protocolFailure?(method: string, error: PluginProtocolError): void
   spawn?: import('./plugin-runtime-storage.js').PythonSpawner
   identity?: import('@thermal-agent/contracts').PluginExecutionIdentity
   capabilities?: readonly string[]
@@ -19,6 +20,26 @@ export interface PythonPluginLease {
   pluginRoot: string
   module: string
   release(): void
+}
+
+/** Created only by host-side RPC decoding, never from a plugin-supplied error code. */
+export class PluginProtocolError extends Error {}
+
+export function decodePluginResponse(line: string, id: string): import('@thermal-agent/contracts').RpcResponse {
+  let value: unknown
+  try { value = JSON.parse(line) } catch { throw new PluginProtocolError('Plugin returned invalid JSON') }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new PluginProtocolError('Plugin returned an invalid RPC envelope')
+  const response = value as Record<string, unknown>
+  if (response.id !== id || typeof response.ok !== 'boolean') throw new PluginProtocolError('Plugin response ID or status is invalid')
+  if (response.ok) {
+    if (!Object.hasOwn(response, 'result')) throw new PluginProtocolError('Plugin response result is missing')
+  } else {
+    const error = response.error as Record<string, unknown> | undefined
+    if (!error || typeof error !== 'object' || Array.isArray(error) || typeof error.code !== 'string' || !error.code || typeof error.message !== 'string') {
+      throw new PluginProtocolError('Plugin response error is invalid')
+    }
+  }
+  return value as import('@thermal-agent/contracts').RpcResponse
 }
 
 export function requirePluginCapability(runtime: PythonPluginLease | undefined, method: string, accepted: readonly string[]): void {
