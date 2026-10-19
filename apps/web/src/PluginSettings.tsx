@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Button, Switch } from '@fluentui/react-components'
 
 interface PluginStatus {
+  runtimeRepairs?: Array<{ key: string; packageDigest: string; detectedAt: string; status: string; reason: string; error?: string }>
   automaticUpdates: boolean
   held: Record<string, string>
   active: Record<string, { current: string; previous?: string }>
@@ -83,6 +84,15 @@ export function PluginSettings() {
     <p>发布者须由本机管理员预先配置。导入后检查可触发已授权的工程样例求解验证；通过对应验证后才会启用候选。</p>
     {status?.releases.releases.map(release => <p key={release.digest}>受信发布者：{release.publisherId} · {release.id} · {status.active[release.id]?.current === release.digest ? '当前使用' : '已登记候选'}</p>)}
     {status?.releases.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}
+    {!!status?.runtimeRepairs?.length && <details>
+      <summary>依赖环境重建记录</summary>
+      <p>重建完成后仍须通过插件验证；已开始的作业保留原运行环境。</p>
+      {status.runtimeRepairs.map(repair => <div key={repair.key} style={{ overflowWrap: 'anywhere' }}>
+        <p>{({ rebuilding: '正在重建', prepared: '环境已重新准备', failed: '重建未完成' } as Record<string, string>)[repair.status] ?? repair.status} · {new Date(repair.detectedAt).toLocaleString()}</p>
+        <p>插件包：{repair.packageDigest}<br />原因：{repair.reason}</p>
+        {repair.error && <p role="alert">{repair.error}</p>}
+      </div>)}
+    </details>}
     {status?.runtimes.map(runtime => {
       const active = status.active[runtime.id]
       const revision = status.revisions.find(item => item.digest === active?.current)

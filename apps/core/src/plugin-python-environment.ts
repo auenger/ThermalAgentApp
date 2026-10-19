@@ -7,6 +7,12 @@ import type { ManagedPluginManifest } from '@thermal-agent/contracts'
 import { terminateProcessTree } from '@thermal-agent/process-control'
 import { inspectPythonRuntime, type PythonRuntimeSnapshot } from './python-environment.js'
 import { pluginEnvironmentDigest } from './plugin-store.js'
+import { pythonEnvironmentFiles } from './python-environment-files.js'
+
+export interface PythonEnvironmentRepair {
+  packageDigest: string; key: string; previousDirectory: string; reason: string; detectedAt: string;
+  status: 'rebuilding' | 'prepared' | 'failed'; replacementDirectory?: string; error?: string
+}
 
 /** No shell, index access, source builds, user pip settings, or mutation of an existing environment. */
 async function command(python: string, args: string[], signal?: AbortSignal): Promise<void> {
@@ -33,10 +39,27 @@ async function command(python: string, args: string[], signal?: AbortSignal): Pr
 
 /** A venv is created at its final unique path: Python environments must not be moved after creation. */
 export class PluginPythonEnvironments {
+  private readonly repairs = new Map<string, PythonEnvironmentRepair>()
   constructor(private readonly home: string) {}
 
+  status(): PythonEnvironmentRepair[] { return structuredClone([...this.repairs.values()]) }
+
+  private async recordRepair(repair: PythonEnvironmentRepair): Promise<void> {
+    this.repairs.delete(repair.key); this.repairs.set(repair.key, structuredClone(repair))
+    if (this.repairs.size > 20) this.repairs.delete(this.repairs.keys().next().value!)
+    const path = join(this.home, `${repair.key}.repair.json`), temporary = `${path}.${randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, JSON.stringify(repair), { flag: 'wx', mode: 0o600 })
+      await rename(temporary, path)
+    } finally { await rm(temporary, { force: true }) }
+  }
+
   async prepare(input: { digest: string; root: string; manifest: ManagedPluginManifest; base: PythonRuntimeSnapshot;
-    distributions: string[]; signal?: AbortSignal }): Promise<PythonRuntimeSnapshot> {
+    distributions: string[]; signal?: AbortSignal; allowRepair?: boolean; onInvalidated?: () => void }): Promise<PythonRuntimeSnapshot> {
+    const checkCancelled = () => {
+      if (input.signal?.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
+    }
+    checkCancelled()
     const lock = input.manifest.pythonRuntime
     if (!lock) return input.base
     await mkdir(this.home, { recursive: true })
@@ -54,26 +77,61 @@ export class PluginPythonEnvironments {
       }
       return snapshot
     }
+    let repair: PythonEnvironmentRepair | undefined
+    try {
+      const path = join(this.home, `${key}.repair.json`), stat = await lstat(path)
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size < 10_000) {
+        const record = JSON.parse(await readFile(path, 'utf8')) as PythonEnvironmentRepair
+        if (record.key === key && record.packageDigest === input.digest && ['prepared', 'failed', 'rebuilding'].includes(record.status) &&
+          typeof record.reason === 'string' && typeof record.detectedAt === 'string' && /^env-[a-f0-9-]{36}$/u.test(record.previousDirectory)) {
+          this.repairs.set(key, record)
+          if (this.repairs.size > 20) this.repairs.delete(this.repairs.keys().next().value!)
+          if (record.status !== 'prepared') repair = record
+        }
+      }
+    } catch { /* Repair notes are diagnostics, not executable runtime indices. */ }
     try {
       const stat = await lstat(index)
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1000) throw new Error('Invalid isolated runtime index')
       const record = JSON.parse(await readFile(index, 'utf8'))
       if (record.key !== key || typeof record.directory !== 'string' || !/^env-[a-f0-9-]{36}$/u.test(record.directory)) throw new Error('Invalid isolated runtime index')
-      const directory = join(this.home, record.directory), entry = await lstat(directory)
-      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('Invalid isolated runtime directory')
-      const snapshot = await inspect(directory)
-      if (record.environmentDigest !== pluginEnvironmentDigest(snapshot.environment)) throw new Error('Isolated runtime contents changed since installation')
-      return snapshot
+      const directory = join(this.home, record.directory)
+      try {
+        if (record.schemaVersion !== 2 || !/^[a-f0-9]{64}$/u.test(record.filesDigest ?? '')) throw new Error('Runtime cache requires host file-inventory migration')
+        const before = await pythonEnvironmentFiles(directory, input.signal)
+        if (before !== record.filesDigest) throw new Error('Isolated runtime files changed since installation')
+        const snapshot = await inspect(directory)
+        checkCancelled()
+        if (record.environmentDigest !== pluginEnvironmentDigest(snapshot.environment) ||
+          await pythonEnvironmentFiles(directory, input.signal) !== before) throw new Error('Isolated runtime contents changed since installation')
+        if (repair) await this.recordRepair({ ...repair, status: 'prepared', replacementDirectory: record.directory, error: undefined }).catch(() => {})
+        return snapshot
+      } catch (error) {
+        checkCancelled()
+        input.onInvalidated?.()
+        if ((error as { code?: string })?.code === 'VALIDATION_DEFERRED' || input.allowRepair === false) throw error
+        repair = { packageDigest: input.digest, key, previousDirectory: record.directory,
+          reason: error instanceof Error ? error.message : String(error), detectedAt: new Date().toISOString(), status: 'rebuilding' }
+        await this.recordRepair(repair)
+        // Preserve the original directory and its receipt; never execute it to repair itself.
+        await rename(index, join(this.home, `${key}.quarantined-${randomUUID()}.json`))
+      }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    input.onInvalidated?.()
+    if (input.allowRepair === false) throw new Error('Runtime rebuilding requires automatic updates to be enabled')
+    const name = `env-${randomUUID()}`, directory = join(this.home, name)
+    let created = false
     const failurePath = join(this.home, `${key}.failure.json`)
     try {
-      const failure = JSON.parse(await readFile(failurePath, 'utf8'))
-      if (Number.isFinite(failure.at) && Date.now() - failure.at < 15 * 60_000) throw new Error(`Runtime preparation retry deferred: ${String(failure.error).slice(0, 3000)}`)
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-    if ((await readdir(this.home)).filter(name => name.startsWith('env-')).length >= 64) throw new Error('Isolated runtime storage is full; archive unused runtimes before installing more')
-    const name = `env-${randomUUID()}`, directory = join(this.home, name)
-    await mkdir(directory)
-    try {
+      try {
+        const failure = JSON.parse(await readFile(failurePath, 'utf8'))
+        if (Number.isFinite(failure.at) && Date.now() - failure.at < 15 * 60_000) throw Object.assign(new Error(`Runtime preparation retry deferred: ${String(failure.error).slice(0, 3000)}`), { code: 'RUNTIME_RETRY_DEFERRED' })
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      if ((await readdir(this.home)).filter(name => name.startsWith('env-')).length >= 64) throw new Error('Isolated runtime storage is full; archive unused runtimes before installing more')
+      checkCancelled()
+      if (repair) await this.recordRepair({ ...repair, status: 'rebuilding', error: undefined })
+      await mkdir(directory)
+      created = true
       const wheelPaths: string[] = [], requirements: string[] = []
       for (const wheel of lock.wheels) {
         const path = join(input.root, wheel.path), stat = await lstat(path)
@@ -93,17 +151,20 @@ export class PluginPythonEnvironments {
         '--require-hashes', '--only-binary=:all:', '--no-compile', '--no-cache-dir', '--disable-pip-version-check', '-r', requirementsPath], input.signal)
       await command(python, ['-m', 'pip', '--isolated', 'check', '--disable-pip-version-check'], input.signal)
       const snapshot = await inspect(directory)
+      const filesDigest = await pythonEnvironmentFiles(directory, input.signal)
       if (input.signal?.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
       const temporary = join(this.home, `${key}-${randomUUID()}.tmp`)
-      await writeFile(temporary, JSON.stringify({ key, directory: name, environmentDigest: pluginEnvironmentDigest(snapshot.environment) }), { flag: 'wx', mode: 0o600 })
+      await writeFile(temporary, JSON.stringify({ schemaVersion: 2, key, directory: name, filesDigest, environmentDigest: pluginEnvironmentDigest(snapshot.environment) }), { flag: 'wx', mode: 0o600 })
       await rename(temporary, index)
       await rm(failurePath, { force: true }).catch(() => {})
+      if (repair) await this.recordRepair({ ...repair, status: 'prepared', replacementDirectory: name }).catch(() => {})
       return snapshot
     } catch (error) {
-      await rm(directory, { recursive: true, force: true })
-      if ((error as { code?: string })?.code !== 'VALIDATION_DEFERRED') {
+      if (created) await rm(directory, { recursive: true, force: true })
+      if (!['VALIDATION_DEFERRED', 'RUNTIME_RETRY_DEFERRED'].includes((error as { code?: string })?.code ?? '')) {
         await writeFile(failurePath, JSON.stringify({ at: Date.now(), error: error instanceof Error ? error.message : String(error) }), { mode: 0o600 })
       }
+      if (repair) await this.recordRepair({ ...repair, status: 'failed', error: error instanceof Error ? error.message : String(error) }).catch(() => {})
       throw error
     }
   }

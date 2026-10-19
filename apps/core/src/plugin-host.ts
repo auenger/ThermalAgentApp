@@ -123,7 +123,7 @@ export class PluginHost {
   isCurrentIcepakRuntime(identity?: PluginExecutionIdentity): boolean {
     const runtime = this.runtimes.icepak
     const registry = this.store.list()
-    return !!identity?.packageDigest && !this.closed && !runtime.error && !runtime.pending && !!runtime.snapshot &&
+    return !!identity?.packageDigest && !this.closed && !runtime.error && !runtime.pending && runtime.result?.status !== 'busy' && !!runtime.snapshot &&
       identity.pluginId === runtime.id && registry.active[runtime.id]?.current === identity.packageDigest &&
       registry.revisions.find(revision => revision.digest === identity.packageDigest)?.manifest.version === identity.pluginVersion &&
       identity.environmentDigest === pluginEnvironmentDigest(runtime.snapshot.environment) && this.trustedDigests().includes(identity.packageDigest)
@@ -156,6 +156,7 @@ export class PluginHost {
   status() {
     const registry = this.store.list()
     return { automaticUpdates: this.policy.automaticUpdates, held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
+      runtimeRepairs: this.pythonEnvironments.status(),
       runtimes: Object.entries(this.runtimes).map(([kind, runtime]) => ({ kind, id: runtime.id,
         phase: runtime.pending ? 'checking' : runtime.error ? 'unavailable' : runtime.snapshot ? 'ready' : 'pending',
         environment: runtime.snapshot?.environment, inspectedAt: runtime.inspectedAt || null,
@@ -277,11 +278,19 @@ export class PluginHost {
     this.preparationAborts.add(controller)
     try {
       const snapshot = await this.pythonEnvironments.prepare({ digest, root: join(this.home, 'registry', 'packages', digest, revision.manifest.entry.root),
-        manifest: revision.manifest, base, distributions: runtime.distributions, signal: controller.signal })
+        manifest: revision.manifest, base, distributions: runtime.distributions, signal: controller.signal, allowRepair: this.policy.automaticUpdates,
+        onInvalidated: () => {
+          runtime.snapshots.delete(digest)
+          if (this.store.list().active[runtime.id]?.current === digest) runtime.snapshot = undefined
+        } })
       this.store.verify(digest)
       if (this.closed || controller.signal.aborted) throw Object.assign(new Error('Runtime preparation cancelled'), { code: 'VALIDATION_DEFERRED' })
       runtime.snapshots.set(digest, snapshot)
       return snapshot
+    } catch (error) {
+      runtime.snapshots.delete(digest)
+      if (this.store.list().active[runtime.id]?.current === digest) runtime.snapshot = undefined
+      throw error
     } finally { this.preparationAborts.delete(controller) }
   }
 

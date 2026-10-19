@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { mkdtemp, mkdir, cp, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, cp, readFile, writeFile, rm, access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { PluginHost } from '../apps/core/dist/plugin-host.js'
@@ -63,8 +63,27 @@ test('signed report with locked wheels activates in a separate interpreter, rend
     task: { id: 'ISOLATED-RUNTIME', title: '独立依赖报告', executionStatus: 'COMPLETED', approvalStatus: 'APPROVED', thermalVerdict: 'FAIL' }, runs: [], events: [] })
   assert.equal(report.pluginRuntime.packageDigest, good.digest)
   assert.equal((await readFile(report.outputPath)).subarray(0, 4).toString(), '%PDF')
+  const oldPython = host.status().runtimes.find(r => r.id === 'report-reportlab').pythonExecutable
+  const site = execFileSync(oldPython, ['-I', '-B', '-c', 'import site;print(site.getsitepackages()[0])'], { encoding: 'utf8' }).trim()
+  const marker = join(root, 'damaged-runtime-executed')
+  const injection = join(site, 'unexpected.pth')
+  await writeFile(injection, `import pathlib;pathlib.Path(${JSON.stringify(marker)}).write_text("executed")\n`)
+  const held = host.store.acquire('report-reportlab', upgradedEnvironment)
+  try {
+    await host.reconcile()
+    assert.equal(host.status().runtimes.find(r => r.id === 'report-reportlab').pythonExecutable, oldPython, 'held work defers rebuilding')
+  } finally { held.release() }
+  await host.reconcile()
+  status = host.status()
+  assert.equal(status.active['report-reportlab'].current, good.digest)
+  assert.notEqual(status.runtimes.find(r => r.id === 'report-reportlab').pythonExecutable, oldPython)
+  assert.equal(status.runtimeRepairs.find(item => item.packageDigest === good.digest).status, 'prepared')
+  assert.equal(status.validations.filter(v => v.packageDigest === good.digest && v.passed).length, 2, 'rebuilt environment must pass fresh PDF validation')
+  await assert.rejects(access(marker), error => error.code === 'ENOENT', 'changed .pth must be detected before interpreter startup')
+  assert.match(await readFile(injection, 'utf8'), /executed/, 'old environment is not overwritten')
   await host.close(); host = new PluginHost(home, options); await host.reconcile()
   assert.equal(host.status().active['report-reportlab'].current, good.digest)
+  assert.equal(host.status().runtimeRepairs.find(item => item.packageDigest === good.digest).status, 'prepared')
   await host.rollback('report-reportlab')
   assert.equal(host.status().active['report-reportlab'].current, baseline)
   assert.deepEqual(host.status().runtimes.find(r => r.id === 'report-reportlab').environment, baselineEnvironment)
@@ -75,4 +94,15 @@ test('signed report with locked wheels activates in a separate interpreter, rend
   status = host.status()
   assert.equal(status.active['report-reportlab'].current, good.digest)
   assert.equal(status.validations.find(v => v.packageDigest === bad.digest)?.passed, false)
+  // Simulate exhausted local runtime storage while the active environment needs rebuilding.
+  for (let i = 0; i < 64; i++) await mkdir(join(home, 'python-environments', `env-quota-fixture-${i}`))
+  const activePython = status.runtimes.find(r => r.id === 'report-reportlab').pythonExecutable
+  const activeSite = execFileSync(activePython, ['-I', '-B', '-c', 'import site;print(site.getsitepackages()[0])'], { encoding: 'utf8' }).trim()
+  await writeFile(join(activeSite, 'broken.pth'), `import pathlib;pathlib.Path(${JSON.stringify(marker)}).write_text("executed")\n`)
+  await host.reconcile()
+  status = host.status()
+  assert.equal(status.active['report-reportlab'].current, baseline, 'failed rebuild selects a still-usable trusted version')
+  assert.equal(status.runtimeRepairs.find(item => item.packageDigest === good.digest).status, 'failed')
+  assert.match(status.runtimeRepairs.find(item => item.packageDigest === good.digest).error, /storage is full/)
+  await assert.rejects(access(marker), error => error.code === 'ENOENT')
 })

@@ -19,6 +19,13 @@ try {
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve))
   browser = await chromium.launch({ headless: true })
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  // UI-only recovery history fixture; real rebuild behavior is covered by plugin-isolated-report.test.mjs.
+  await page.route('**/api/plugin-runtime', async route => {
+    const response = await route.fetch(), value = await response.json()
+    value.runtimeRepairs = [{ key: 'ui-fixture', packageDigest: 'a'.repeat(64), status: 'prepared',
+      detectedAt: '2026-10-19T00:00:00Z', reason: 'UI fixture: dependency file changed; not an AEDT validation certificate' }]
+    await route.fulfill({ response, json: value })
+  })
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(`http://127.0.0.1:${app.server.address().port}`)
@@ -50,6 +57,8 @@ try {
   await settings.getByText(/自动获取已关闭/).waitFor()
   assert.equal(networkCalls, before)
   assert.equal(plugins.status().automaticUpdates, false)
+  await settings.getByText('依赖环境重建记录', { exact: true }).click()
+  await settings.getByText(/环境已重新准备/).waitFor()
   const directory = resolve('.thermal-agent/screenshots/plugin-settings')
   await mkdir(directory, { recursive: true })
   await page.screenshot({ path: join(directory, 'desktop.png'), fullPage: true })
