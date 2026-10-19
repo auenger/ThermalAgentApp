@@ -108,7 +108,8 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   let cachedProbe: IcepakEnvironmentProbe | null = null
   let probedAt = 0
   const capabilityHeartbeat = async (): Promise<PeerHeartbeat> => {
-    if (!cachedProbe || Date.now() - probedAt > 60_000) {
+    if (!cachedProbe || Date.now() - probedAt > 60_000 ||
+      (!options.pluginClient && !plugins.isCurrentIcepakRuntime(cachedProbe.pluginRuntime))) {
       try { cachedProbe = await pluginClient.probeEnvironment() }
       catch { cachedProbe = null }
       probedAt = Date.now()

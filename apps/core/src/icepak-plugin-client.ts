@@ -140,7 +140,23 @@ export class IcepakPluginClient {
 
   async call(method: string, params: object = {}, options: PluginCallOptions = {}): Promise<unknown> {
     const runtime = this.acquireRuntime?.()
-    try { return await this.callWithRuntime(method, params, options, runtime) }
+    try {
+      const result = await this.callWithRuntime(method, params, options, runtime)
+      if ((method === 'probe_environment' || method === 'probe_launchability') && result && typeof result === 'object') {
+        const probe = result as IcepakEnvironmentProbe
+        // Strip self-reported provenance even for legacy/unmanaged clients.
+        const { pluginRuntime: _reported, ...facts } = probe
+        if (runtime?.identity && facts.status === 'READY') {
+          facts.status = facts.platform === 'win32' && facts.pyaedtAvailable ? 'DETECTED' : 'DEGRADED'
+          facts.licenseStatus = 'UNKNOWN'
+          delete facts.readinessVerifiedAt
+          delete facts.readinessExpiresAt
+        }
+        return runtime?.identity ? { ...facts, pluginId: runtime.identity.pluginId, pluginVersion: runtime.identity.pluginVersion,
+          pluginRuntime: { ...runtime.identity } } : facts
+      }
+      return result
+    }
     finally { runtime?.release() }
   }
 

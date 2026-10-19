@@ -107,6 +107,16 @@ export class PluginHost {
     this.engineeringStore = store
   }
 
+  /** Invalidate cached capability advertisements as soon as a managed runtime changes. */
+  isCurrentIcepakRuntime(identity?: PluginExecutionIdentity): boolean {
+    const runtime = this.runtimes.icepak
+    const registry = this.store.list()
+    return !!identity?.packageDigest && !this.closed && !runtime.error && !runtime.pending && !!runtime.snapshot &&
+      identity.pluginId === runtime.id && registry.active[runtime.id]?.current === identity.packageDigest &&
+      registry.revisions.find(revision => revision.digest === identity.packageDigest)?.manifest.version === identity.pluginVersion &&
+      identity.environmentDigest === pluginEnvironmentDigest(runtime.snapshot.environment) && this.trustedDigests().includes(identity.packageDigest)
+  }
+
   private readPolicy(): Policy {
     const value = JSON.parse(readFileSync(this.policyPath, 'utf8')) as Policy
     if (typeof value.automaticUpdates !== 'boolean' || !Array.isArray(value.builtinDigests) ||

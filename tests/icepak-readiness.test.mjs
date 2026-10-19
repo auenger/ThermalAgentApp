@@ -5,14 +5,34 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
+import { DatabaseSync } from 'node:sqlite'
+import { LocalDatabase } from '@thermal-agent/sqlite-store'
 import { createCoreApp, effectiveIcepakProbe, ICEPAK_READINESS_TTL_MS, NodeIdentity, PeerTaskInbox } from '@thermal-agent/core'
 
-test('recent verified local solve attests READY without treating installation or launch as license proof', async t => {
+test('legacy readiness database migrates without inventing managed provenance', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-readiness-migration-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'old.sqlite')
+  const legacy = new DatabaseSync(path)
+  legacy.exec(`CREATE TABLE icepak_readiness(version TEXT PRIMARY KEY, plugin_version TEXT NOT NULL,
+    result_sha256 TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT NOT NULL, verified_at TEXT NOT NULL)`)
+  legacy.prepare('INSERT INTO icepak_readiness VALUES (?, ?, ?, ?, ?, ?)').run('2024.2', '0.2.0', 'a'.repeat(64), 'LOCAL_ATTEMPT', 'old-attempt', new Date().toISOString())
+  legacy.close()
+  const database = new LocalDatabase(path)
+  try {
+    assert.equal(database.listIcepakReadiness()[0].sourceId, 'old-attempt')
+    assert.equal(database.listIcepakReadiness()[0].pluginRuntime, undefined)
+  } finally { database.close() }
+})
+
+for (const managed of [false, true]) test(`recent verified ${managed ? 'managed' : 'legacy'} local solve binds READY to its evidence`, async t => {
   const root = await mkdtemp(join(tmpdir(), 'thermal-readiness-'))
   const home = join(root, 'app')
+  const identity = { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', packageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64) }
   const base = { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', protocolVersion: '1.0.0',
     status: 'DETECTED', platform: 'win32', aedtVersions: ['2024.2', '2025.1'], selectedVersion: '2025.1',
-    pyaedtAvailable: true, licenseStatus: 'UNKNOWN', capabilities: ['baseline_solve'], diagnostics: ['installation found'] }
+    pyaedtAvailable: true, licenseStatus: 'UNKNOWN', capabilities: ['baseline_solve'], diagnostics: ['installation found'],
+    ...(managed ? { pluginRuntime: identity } : {}) }
   const plugin = {
     async probeEnvironment() { return base },
     async solveProject(input) {
@@ -28,6 +48,7 @@ test('recent verified local solve attests READY without treating installation or
         metrics: { tmaxC: 80, converged: true, solverNormalCompletion: true }, artifacts: { projectPath: output } }
     },
   }
+  if (managed) plugin.pinRuntime = async () => ({ identity, port: plugin, release() {} })
   let app = createCoreApp({ home, startAgentRuntime: false, pluginClient: plugin })
   t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }) })
   app.server.listen(0, '127.0.0.1')
@@ -36,6 +57,7 @@ test('recent verified local solve attests READY without treating installation or
   assert.ok(address && typeof address !== 'string')
   const probeUrl = () => `http://127.0.0.1:${address.port}/api/plugins/icepak/probe`
   assert.equal((await (await fetch(probeUrl())).json()).probe.status, 'DETECTED')
+  if (managed) assert.equal((await effectiveIcepakProbe({ ...base, status: 'READY', licenseStatus: 'AVAILABLE' }, app.database, app.artifacts)).status, 'DETECTED', 'plugin cannot self-attest readiness')
   const ownerIdentity = NodeIdentity.loadOrCreate(join(root, 'owner'))
   app.database.trustPeer(ownerIdentity.publicIdentity, 'Owner')
   app.database.setRemoteExecutionEnabled(true)
@@ -69,6 +91,7 @@ test('recent verified local solve attests READY without treating installation or
   }
   assert.ok(readiness)
   assert.equal(readiness.source, 'LOCAL_ATTEMPT')
+  if (managed) assert.deepEqual(readiness.pluginRuntime, identity)
   let probe = (await (await fetch(probeUrl())).json()).probe
   assert.equal(probe.status, 'READY')
   assert.equal(probe.licenseStatus, 'AVAILABLE')
@@ -79,6 +102,14 @@ test('recent verified local solve attests READY without treating installation or
     new Date(Date.parse(readiness.verifiedAt) + ICEPAK_READINESS_TTL_MS + 1))).status, 'DETECTED')
   assert.equal((await effectiveIcepakProbe({ ...base, pluginVersion: '0.3.0' }, app.database, app.artifacts)).status, 'DETECTED')
   assert.equal((await effectiveIcepakProbe({ ...base, platform: 'linux' }, app.database, app.artifacts)).status, 'DETECTED')
+  if (managed) {
+    for (const field of ['packageDigest', 'environmentDigest']) {
+      assert.equal((await effectiveIcepakProbe({ ...base, pluginRuntime: { ...identity, [field]: 'c'.repeat(64) } }, app.database, app.artifacts)).status, 'DETECTED')
+    }
+    assert.equal((await effectiveIcepakProbe({ ...base, pluginRuntime: undefined }, app.database, app.artifacts)).status, 'DETECTED')
+  } else {
+    assert.equal((await effectiveIcepakProbe({ ...base, pluginRuntime: identity }, app.database, app.artifacts)).status, 'DETECTED', 'legacy evidence cannot certify a managed runtime')
+  }
 
   await app.close()
   app = createCoreApp({ home, startAgentRuntime: false, pluginClient: plugin })
@@ -88,4 +119,9 @@ test('recent verified local solve attests READY without treating installation or
   assert.ok(address && typeof address !== 'string')
   probe = (await (await fetch(probeUrl())).json()).probe
   assert.equal(probe.status, 'READY')
+  const evidencePath = app.artifacts.resolveArtifact(readiness.resultSha256)
+  const bytes = await readFile(evidencePath)
+  const corrupted = Buffer.from(bytes); corrupted[0] = 32
+  await writeFile(evidencePath, corrupted)
+  assert.equal((await effectiveIcepakProbe(base, app.database, app.artifacts)).status, 'DETECTED', 'same-sized corrupt evidence must not attest readiness')
 })

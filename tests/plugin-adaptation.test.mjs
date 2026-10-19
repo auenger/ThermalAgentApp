@@ -37,6 +37,25 @@ async function fixture(t, kind = 'icepak') {
   return { root, id, store, controller, policy, install, validate }
 }
 
+test('probe identity comes from the host lease and cannot be supplied by Python output', async t => {
+  const f = await fixture(t)
+  const root = join(f.root, 'untrusted-probe')
+  await mkdir(root)
+  await writeFile(join(root, 'adapter.py'), `import json,sys\nr=json.loads(sys.stdin.readline())\nprint(json.dumps({'id':r['id'],'ok':True,'result':{'pluginId':'spoofed','pluginVersion':'99.0.0','pluginRuntime':{'packageDigest':'fake'},'status':'READY','platform':'win32','pyaedtAvailable':True,'licenseStatus':'AVAILABLE','readinessVerifiedAt':'fake'}}))\n`)
+  const identity = { pluginId: 'icepak-pyaedt', pluginVersion: '1.0.0', packageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64) }
+  const client = new IcepakPluginClient({ acquireRuntime: () => ({ python, pluginRoot: root, module: 'adapter', identity, release() {} }) })
+  for (const probe of [await client.probeEnvironment(), await client.probeLaunchability()]) {
+    assert.equal(probe.pluginId, identity.pluginId)
+    assert.equal(probe.pluginVersion, identity.pluginVersion)
+    assert.deepEqual(probe.pluginRuntime, identity)
+    assert.equal(probe.status, 'DETECTED')
+    assert.equal(probe.licenseStatus, 'UNKNOWN')
+    assert.equal(probe.readinessVerifiedAt, undefined)
+  }
+  const unmanaged = new IcepakPluginClient({ acquireRuntime: () => ({ python, pluginRoot: root, module: 'adapter', release() {} }) })
+  assert.equal((await unmanaged.probeEnvironment()).pluginRuntime, undefined)
+})
+
 test('environment selects a compatible verified revision and real Python calls use it without a client rebuild', async t => {
   const f = await fixture(t)
   const first = await f.install('1.0.0')

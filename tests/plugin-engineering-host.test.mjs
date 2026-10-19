@@ -105,6 +105,7 @@ test('engineering signed update reaches independent validation, activation and p
   const pinned = await host.icepak.pinRuntime()
   try {
     assert.equal(pinned.identity.packageDigest, good.digest)
+    assert.equal(host.isCurrentIcepakRuntime(pinned.identity), true)
     assert.equal((await pinned.port.probeEnvironment()).pluginVersion, '1.0.1')
     const newer = f.release('1.0.2')
     await host.reconcile()
@@ -114,6 +115,7 @@ test('engineering signed update reaches independent validation, activation and p
   await host.reconcile()
   const stable = host.status().active['icepak-pyaedt'].current
   assert.notEqual(stable, good.digest)
+  assert.equal(host.isCurrentIcepakRuntime(pinned.identity), false, 'old heartbeat cache becomes invalid immediately after upgrade')
   const bad = f.release('1.0.3', 'lost-write')
   await host.reconcile()
   status = host.status()

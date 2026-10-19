@@ -199,7 +199,7 @@ export class PeerRemoteSolveProcessor {
         const evidence = JSON.parse(await readFile(this.artifacts.resolveArtifact(staged.resultSha256), 'utf8'))
         if (provesIcepakSolve(evidence, version)) {
           const identity = parsePluginExecutionIdentity(evidence.pluginRuntime)
-          if (identity) this.database.recordIcepakReadinessFromRemoteJob(job.attemptId, version, identity.pluginVersion, staged.resultSha256)
+          if (identity) this.database.recordIcepakReadinessFromRemoteJob(job.attemptId, version, identity.pluginVersion, staged.resultSha256, identity)
         }
       } catch (error) { console.error('remote Icepak readiness evidence was not recorded', error) }
       this.retryAfter.delete(job.attemptId)

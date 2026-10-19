@@ -2,6 +2,7 @@ export * from './parameters.js'
 export * from './plugins.js'
 export * from './model-preparation.js'
 import type { IcepakEditableParameter, IcepakParameterChange, IcepakActionResult } from './parameters.js'
+import type { PluginExecutionIdentity } from './plugins.js'
 export const EXECUTION_STATUSES = [
   'DRAFT',
   'READY',
@@ -407,6 +408,8 @@ export interface AttemptArtifactRecord {
 }
 
 export interface IcepakEnvironmentProbe {
+  /** Assigned by the host lease, never accepted from plugin stdout. */
+  pluginRuntime?: PluginExecutionIdentity
   pluginId: string
   pluginVersion: string
   protocolVersion: string
@@ -423,6 +426,7 @@ export interface IcepakEnvironmentProbe {
 }
 
 export interface IcepakReadinessRecord {
+  pluginRuntime?: PluginExecutionIdentity
   version: string
   pluginVersion: string
   resultSha256: string

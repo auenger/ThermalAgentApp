@@ -10,7 +10,9 @@ import { createCoreApp, createPeerBeacon } from '@thermal-agent/core'
 import { createTask } from '@thermal-agent/domain'
 
 const heartbeat = { pluginStatus: 'READY', aedtVersions: ['2024.2'], maxConcurrent: 1, activeAttempts: 0 }
+const runtimeIdentity = { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', packageDigest: 'a'.repeat(64), environmentDigest: 'b'.repeat(64) }
 const plugin = {
+  async pinRuntime() { return { identity: runtimeIdentity, port: plugin, release() {} } },
   async probeEnvironment() {
     return { pluginId: 'icepak-pyaedt', pluginVersion: '0.2.0', protocolVersion: '1', status: 'READY',
       platform: 'win32', aedtVersions: ['2024.2'], licenseStatus: 'AVAILABLE', capabilities: ['baseline_solve'] }
@@ -23,6 +25,7 @@ const plugin = {
     await writeFile(projectPath, Buffer.concat([bytes, Buffer.from('-solved')]))
     await writeFile(convergencePath, JSON.stringify({ converged: true }))
     return { status: 'ok', mode: 'solve', inputSha256: createHash('sha256').update(bytes).digest('hex'),
+      project: { aedtVersion: '2024.2' }, solve: { succeeded: true },
       validation: { verified: true, checks: [] }, metrics: { tmaxC: 80, converged: true, solverNormalCompletion: true },
       artifacts: { projectPath, convergencePath } }
   },
@@ -93,6 +96,8 @@ test('two Apps execute and verify one remote Icepak Baseline end to end', async 
     await delay(50)
   }
   assert.equal(finished, true, JSON.stringify(executor.database.getRemoteJob(offer.attempt.id)))
+  for (let index = 0; index < 50 && !executor.database.listIcepakReadiness().length; index++) await delay(20)
+  assert.deepEqual(executor.database.listIcepakReadiness()[0]?.pluginRuntime, runtimeIdentity, 'executor readiness retains the actual pinned runtime')
   const finalTask = owner.database.getTask(task.id)
   assert.equal(finalTask.executionStatus, 'WAITING_FOR_APPROVAL')
   assert.equal(finalTask.thermalVerdict, 'PASS')

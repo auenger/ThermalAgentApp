@@ -39,6 +39,7 @@ import type {
   IcepakReadinessRecord,
 } from '@thermal-agent/contracts'
 import { assertAttemptTransition, assertTaskTransition } from '@thermal-agent/domain'
+import { parsePluginExecutionIdentity, type PluginExecutionIdentity } from '@thermal-agent/contracts'
 import { OPTIMIZATION_SKILL_SEEDS, optimizationDefinition } from './optimization-skills.js'
 export { ModelPreparationStore } from './model-preparations.js'
 
@@ -448,6 +449,7 @@ export class LocalDatabase {
     this.ensureColumn('remote_jobs', 'convergence_sha256', 'TEXT')
     this.ensureColumn('remote_jobs', 'failure_notification_status', 'TEXT')
     this.ensureColumn('peers', 'free_disk_bytes', 'INTEGER')
+    this.ensureColumn('icepak_readiness', 'plugin_runtime_json', 'TEXT')
     this.seedOptimizationSkills()
   }
 
@@ -677,6 +679,7 @@ export class LocalDatabase {
         resultSha256: String(row.result_sha256),
         source: row.source as IcepakReadinessRecord['source'], sourceId: String(row.source_id),
         verifiedAt: String(row.verified_at),
+        ...(row.plugin_runtime_json ? { pluginRuntime: parsePluginExecutionIdentity(JSON.parse(String(row.plugin_runtime_json))) } : {}),
       }))
   }
 
@@ -689,30 +692,34 @@ export class LocalDatabase {
       !this.listAttemptArtifacts(attemptId).some(item => item.role === 'SOLVER_RESULT' && item.sha256 === resultSha256) ||
       !this.listAttemptArtifacts(attemptId).some(item => item.role === 'SOLVED_PROJECT' && item.sha256 === attempt.outputArtifactSha256) ||
       !this.getArtifact(resultSha256)) throw new PeerConflictError('local solve evidence cannot attest Icepak readiness')
-    return this.upsertIcepakReadiness(version, attempt.pluginVersion, resultSha256, 'LOCAL_ATTEMPT', attemptId)
+    return this.upsertIcepakReadiness(version, attempt.pluginVersion, resultSha256, 'LOCAL_ATTEMPT', attemptId,
+      parsePluginExecutionIdentity(attempt.parameters.pluginRuntime))
   }
 
   recordIcepakReadinessFromRemoteJob(attemptId: string, version: string,
-    pluginVersion: string, resultSha256: string): IcepakReadinessRecord {
+    pluginVersion: string, resultSha256: string, pluginRuntime?: PluginExecutionIdentity): IcepakReadinessRecord {
     const job = this.getRemoteJob(attemptId)
     if (!job || job.executorNodeId !== this.getLocalIdentity()?.nodeId || job.status !== 'COMPLETED' ||
       job.resultSha256 !== resultSha256 || !this.getArtifact(resultSha256)) {
       throw new PeerConflictError('remote solve evidence cannot attest Icepak readiness')
     }
-    return this.upsertIcepakReadiness(version, pluginVersion, resultSha256, 'REMOTE_JOB', attemptId)
+    return this.upsertIcepakReadiness(version, pluginVersion, resultSha256, 'REMOTE_JOB', attemptId, pluginRuntime)
   }
 
   private upsertIcepakReadiness(version: string, pluginVersion: string, resultSha256: string,
-    source: IcepakReadinessRecord['source'], sourceId: string): IcepakReadinessRecord {
+    source: IcepakReadinessRecord['source'], sourceId: string, pluginRuntime?: PluginExecutionIdentity): IcepakReadinessRecord {
+    const identity = parsePluginExecutionIdentity(pluginRuntime)
+    if (identity && (identity.pluginId !== 'icepak-pyaedt' || identity.pluginVersion !== pluginVersion)) throw new PeerConflictError('Readiness plugin identity mismatch')
     if (!/^20\d{2}\.[1-9]$/u.test(version) || !pluginVersion || pluginVersion.length > 80) {
       throw new PeerConflictError('Icepak readiness version is invalid')
     }
     const now = new Date().toISOString()
-    this.db.prepare(`INSERT INTO icepak_readiness(version, plugin_version, result_sha256, source, source_id, verified_at)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(version) DO UPDATE SET
+    this.db.prepare(`INSERT INTO icepak_readiness(version, plugin_version, result_sha256, source, source_id, verified_at, plugin_runtime_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(version) DO UPDATE SET
       plugin_version = excluded.plugin_version, result_sha256 = excluded.result_sha256,
-      source = excluded.source, source_id = excluded.source_id, verified_at = excluded.verified_at`)
-      .run(version, pluginVersion, resultSha256, source, sourceId, now)
+      source = excluded.source, source_id = excluded.source_id, verified_at = excluded.verified_at,
+      plugin_runtime_json = excluded.plugin_runtime_json`)
+      .run(version, pluginVersion, resultSha256, source, sourceId, now, identity ? JSON.stringify(identity) : null)
     return this.listIcepakReadiness().find(item => item.version === version) as IcepakReadinessRecord
   }
 

@@ -1,4 +1,5 @@
-import { stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
 import type { IcepakEnvironmentProbe } from '@thermal-agent/contracts'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
@@ -9,6 +10,11 @@ export async function effectiveIcepakProbe(
   base: IcepakEnvironmentProbe, database: LocalDatabase, artifacts: ArtifactStore,
   now = new Date(),
 ): Promise<IcepakEnvironmentProbe> {
+  if (base.pluginRuntime && base.status === 'READY') {
+    // Managed code cannot promote itself to READY; only matching host solve evidence can.
+    base = { ...base, status: base.platform === 'win32' && base.pyaedtAvailable ? 'DETECTED' : 'DEGRADED',
+      licenseStatus: 'UNKNOWN', readinessVerifiedAt: undefined, readinessExpiresAt: undefined }
+  }
   if (base.status === 'READY' || base.platform !== 'win32' ||
     !['DETECTED', 'LAUNCHABLE', 'PROJECT_COMPATIBLE'].includes(base.status) || !base.pyaedtAvailable) return base
   const recent = []
@@ -16,10 +22,21 @@ export async function effectiveIcepakProbe(
     const age = now.getTime() - Date.parse(record.verifiedAt)
     if (!Number.isFinite(age) || age < 0 || age >= ICEPAK_READINESS_TTL_MS ||
       record.pluginVersion !== base.pluginVersion || !base.aedtVersions.includes(record.version)) continue
+    const current = base.pluginRuntime, saved = record.pluginRuntime
+    if (current?.packageDigest || saved?.packageDigest) {
+      if (!current?.packageDigest || !current.environmentDigest || !saved?.packageDigest ||
+        current.pluginId !== saved.pluginId || current.pluginVersion !== saved.pluginVersion ||
+        current.packageDigest !== saved.packageDigest || current.environmentDigest !== saved.environmentDigest) continue
+    }
     const artifact = database.getArtifact(record.resultSha256)
     if (!artifact) continue
     try {
-      if ((await stat(artifacts.resolveArtifact(record.resultSha256))).size === artifact.sizeBytes) recent.push(record)
+      const path = artifacts.resolveArtifact(record.resultSha256)
+      if (artifact.sizeBytes > 64 * 1024 * 1024 || (await stat(path)).size !== artifact.sizeBytes) continue
+      const bytes = await readFile(path)
+      if (createHash('sha256').update(bytes).digest('hex') !== record.resultSha256 ||
+        !provesIcepakSolve(JSON.parse(bytes.toString('utf8')), record.version)) continue
+      recent.push(record)
     } catch { /* lost evidence cannot attest readiness */ }
   }
   if (!recent.length) return base
