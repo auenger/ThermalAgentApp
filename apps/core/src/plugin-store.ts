@@ -74,6 +74,8 @@ export class PluginStore {
   private readonly statePath: string
   private readonly leases = new Map<string, number>()
   private readonly validating = new Set<string>()
+  private draining = false
+  private readonly drained = new Set<() => void>()
 
   constructor(private readonly home: string) {
     this.packages = join(home, 'packages')
@@ -116,7 +118,15 @@ export class PluginStore {
 
   isBusy(id: string): boolean { return this.validating.has(id) || (this.leases.get(id) ?? 0) > 0 }
 
+  /** Stop new leases and retain home ownership until every existing execution/pin releases. */
+  drain(): Promise<void> {
+    this.draining = true
+    if (![...this.leases.values()].some(count => count > 0)) return Promise.resolve()
+    return new Promise(resolve => this.drained.add(resolve))
+  }
+
   install(source: string): PluginRevision {
+    if (this.draining) throw new Error('Plugin store is closing')
     const collected = collect(resolve(source))
     const manifestFile = collected.find(file => file.path === 'plugin.json')
     if (!manifestFile || manifestFile.bytes > 64 * 1024) throw new Error('Missing or oversized plugin.json')
@@ -165,12 +175,13 @@ export class PluginStore {
   /** Only a host-owned validator may call this; never accept model-supplied validation receipts. */
   async validate(digest: string, environment: PluginEnvironment,
     validator: (lease: PluginLease) => Promise<PluginValidation['checks']>): Promise<PluginValidation> {
+    if (this.draining) throw new Error('Plugin store is closing')
     const revision = this.verify(digest), id = revision.manifest.id
     const problems = pluginCompatibility(revision.manifest, environment)
     if (problems.length) throw new Error(problems.join('; '))
     if (this.validating.has(id) || (this.leases.get(id) ?? 0) > 0) throw new Error('Plugin is busy')
-    this.validating.add(id)
     const lease = this.acquireRevision(digest)
+    this.validating.add(id)
     const environmentDigest = pluginEnvironmentDigest(environment)
     try {
       let checks: PluginValidation['checks']
@@ -194,6 +205,7 @@ export class PluginStore {
   }
 
   activate(digest: string, environment: PluginEnvironment, approvedPermissions: readonly string[]): void {
+    if (this.draining) throw new Error('Plugin store is closing')
     const revision = this.verify(digest), id = revision.manifest.id
     if ((this.leases.get(id) ?? 0) > 0 || this.validating.has(id)) throw new Error('Plugin is busy')
     const problems = pluginCompatibility(revision.manifest, environment)
@@ -235,6 +247,7 @@ export class PluginStore {
   }
 
   private acquireRevision(digest: string): PluginLease {
+    if (this.draining) throw new Error('Plugin store is closing')
     const revision = this.verify(digest), id = revision.manifest.id
     this.leases.set(id, (this.leases.get(id) ?? 0) + 1)
     let released = false
@@ -242,6 +255,10 @@ export class PluginStore {
       if (released) return
       released = true
       this.leases.set(id, (this.leases.get(id) ?? 1) - 1)
+      if (this.draining && ![...this.leases.values()].some(count => count > 0)) {
+        for (const resolve of this.drained) resolve()
+        this.drained.clear()
+      }
     } }
   }
 }

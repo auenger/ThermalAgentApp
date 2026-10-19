@@ -67,17 +67,21 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const home = resolve(options.home)
   mkdirSync(home, { recursive: true })
   const database = new LocalDatabase(join(home, 'data', 'thermal.db'))
+  let plugins: PluginHost
+  try { plugins = options.pluginHost ?? new PluginHost(join(home, 'plugins')) }
+  catch (error) { database.close(); throw error }
   let nodeIdentity: NodeIdentity
   try {
     nodeIdentity = NodeIdentity.loadOrCreate(home, database.getLocalIdentity()?.nodeId)
     database.bindLocalIdentity(nodeIdentity.publicIdentity)
   } catch (error) {
     database.close()
+    void plugins.close()
     throw error
   }
   const modelStore = new ModelPreparationStore(database.path)
   try { modelStore.recover() }
-  catch (error) { modelStore.close(); database.close(); throw error }
+  catch (error) { modelStore.close(); database.close(); void plugins.close(); throw error }
   database.adoptLegacyLocalTasks(nodeIdentity.nodeId)
   database.reconcileLeases()
   const leaseSweep = setInterval(() => {
@@ -89,7 +93,6 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const taskWorkspace = new TaskWorkspace(home)
   const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
-  const plugins = options.pluginHost ?? new PluginHost(join(home, 'plugins'))
   plugins.attachEngineeringStore(modelStore)
   const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)

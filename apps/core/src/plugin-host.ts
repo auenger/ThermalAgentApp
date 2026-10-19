@@ -18,6 +18,7 @@ import { ENGINEERING_CAPABILITIES, engineeringPolicyBinding, parseEngineeringVal
 import { realpath } from 'node:fs/promises'
 import { inspectAedtEnvironment } from './aedt-environment.js'
 import { PluginPythonEnvironments } from './plugin-python-environment.js'
+import { PluginHomeOwner } from './plugin-home-owner.js'
 
 type Kind = 'icepak' | 'report'
 interface Policy { automaticUpdates: boolean; builtinDigests: string[]; held: Record<string, string> }
@@ -43,6 +44,7 @@ interface Runtime {
 
 /** Local Core owns installation, environment facts, policy, and activation. DSH consumes these services. */
 export class PluginHost {
+  private readonly owner: PluginHomeOwner
   readonly store: PluginStore
   readonly icepak: IcepakPluginPort
   readonly report: ReportPort
@@ -73,42 +75,45 @@ export class PluginHost {
     this.inspect = options.inspect ?? inspectPythonRuntime
     this.refreshMs = options.refreshMs ?? 5 * 60_000
     mkdirSync(home, { recursive: true })
-    this.store = new PluginStore(join(home, 'registry'))
-    this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'))
-    this.releases = new PluginReleaseInbox(home, this.store, options.publishers ?? (() => {
-      const path = join(home, 'publishers.json')
-      return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
-    }))
-    this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
-      const path = join(home, 'update-sources.json')
-      return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
-    }), options.fetchUpdates)
-    this.controllers = { icepak: new PluginAdaptationController(this.store), report: new PluginAdaptationController(this.store) }
-    this.policyPath = join(home, 'policy.json')
-    this.policy = existsSync(this.policyPath) ? this.readPolicy() : { automaticUpdates: true, builtinDigests: [], held: {} }
-    const icepak = options.icepak ?? new IcepakPluginClient().runtimeConfiguration()
-    const report = options.report ?? new ReportClient().runtimeConfiguration()
-    this.runtimes = {
-      icepak: { id: 'icepak-pyaedt', python: icepak.python, source: icepak.pluginRoot, distributions: ['pyaedt'],
-        permissions: ['engineering-copy-write', 'aedt-launch'], imported: false, inspectedAt: 0, snapshots: new Map() },
-      report: { id: 'report-reportlab', python: report.python, source: report.pluginRoot, distributions: ['reportlab', 'pypdf'],
-        permissions: ['report-write'], imported: false, inspectedAt: 0, snapshots: new Map() },
-    }
-    const icepakClient = new IcepakPluginClient({ acquireRuntime: expected => this.acquire('icepak', expected) })
-    this.icepak = new Proxy(icepakClient, { get: (target, key) => {
-      if (key === 'prepareRuntime') return () => this.ensure('icepak')
-      const value = Reflect.get(target, key)
-      if (typeof value !== 'function') return value
-      return async (...args: unknown[]) => {
-        await this.ensure('icepak')
-        if (key === 'pinRuntime' && (args[0] as PluginExecutionIdentity | undefined)?.packageDigest) {
-          await this.prepareSnapshot('icepak', (args[0] as PluginExecutionIdentity).packageDigest!)
-        }
-        return value.apply(target, args)
+    this.owner = new PluginHomeOwner(home)
+    try {
+      this.store = new PluginStore(join(home, 'registry'))
+      this.pythonEnvironments = new PluginPythonEnvironments(join(home, 'python-environments'))
+      this.releases = new PluginReleaseInbox(home, this.store, options.publishers ?? (() => {
+        const path = join(home, 'publishers.json')
+        return existsSync(path) ? parsePluginPublishers(JSON.parse(readFileSync(path, 'utf8'))) : []
+      }))
+      this.updates = new PluginUpdateFeed(this.releases, options.updateSources ?? (() => {
+        const path = join(home, 'update-sources.json')
+        return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : []
+      }), options.fetchUpdates)
+      this.controllers = { icepak: new PluginAdaptationController(this.store), report: new PluginAdaptationController(this.store) }
+      this.policyPath = join(home, 'policy.json')
+      this.policy = existsSync(this.policyPath) ? this.readPolicy() : { automaticUpdates: true, builtinDigests: [], held: {} }
+      const icepak = options.icepak ?? new IcepakPluginClient().runtimeConfiguration()
+      const report = options.report ?? new ReportClient().runtimeConfiguration()
+      this.runtimes = {
+        icepak: { id: 'icepak-pyaedt', python: icepak.python, source: icepak.pluginRoot, distributions: ['pyaedt'],
+          permissions: ['engineering-copy-write', 'aedt-launch'], imported: false, inspectedAt: 0, snapshots: new Map() },
+        report: { id: 'report-reportlab', python: report.python, source: report.pluginRoot, distributions: ['reportlab', 'pypdf'],
+          permissions: ['report-write'], imported: false, inspectedAt: 0, snapshots: new Map() },
       }
-    } })
-    const reporter = new ReportClient({ acquireRuntime: () => this.acquire('report') })
-    this.report = { renderTaskReport: async input => { await this.ensure('report'); return reporter.renderTaskReport(input) } }
+      const icepakClient = new IcepakPluginClient({ acquireRuntime: expected => this.acquire('icepak', expected) })
+      this.icepak = new Proxy(icepakClient, { get: (target, key) => {
+        if (key === 'prepareRuntime') return () => this.ensure('icepak')
+        const value = Reflect.get(target, key)
+        if (typeof value !== 'function') return value
+        return async (...args: unknown[]) => {
+          await this.ensure('icepak')
+          if (key === 'pinRuntime' && (args[0] as PluginExecutionIdentity | undefined)?.packageDigest) {
+            await this.prepareSnapshot('icepak', (args[0] as PluginExecutionIdentity).packageDigest!)
+          }
+          return value.apply(target, args)
+        }
+      } })
+      const reporter = new ReportClient({ acquireRuntime: () => this.acquire('report') })
+      this.report = { renderTaskReport: async input => { await this.ensure('report'); return reporter.renderTaskReport(input) } }
+    } catch (error) { this.owner.release(); throw error }
   }
 
   private readonly inspect: typeof inspectPythonRuntime
@@ -139,6 +144,7 @@ export class PluginHost {
   }
 
   private savePolicy(policy: Policy): void {
+    if (this.closed) throw new Error('Plugin host is closed')
     const path = join(this.home, `policy-${randomUUID()}.tmp`)
     writeFileSync(path, JSON.stringify(policy), { flag: 'wx', mode: 0o600 })
     try { renameSync(path, this.policyPath) }
@@ -245,6 +251,8 @@ export class PluginHost {
     await this.updates.close()
     await Promise.allSettled(Object.values(this.runtimes).flatMap(runtime => runtime.pending ? [runtime.pending] : []))
     await Promise.allSettled([...this.preparationTasks.values()])
+    await this.store.drain()
+    this.owner.release()
   }
 
   private acquire(kind: Kind, expected?: PluginExecutionIdentity) {

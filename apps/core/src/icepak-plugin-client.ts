@@ -83,12 +83,20 @@ export class IcepakPluginClient {
       const actual = identity ?? { pluginId: probe!.pluginId, pluginVersion: probe!.pluginVersion }
       if (expected && (actual.pluginId !== expected.pluginId || actual.pluginVersion !== expected.pluginVersion || actual.packageDigest !== expected.packageDigest || actual.environmentDigest !== expected.environmentDigest)) throw new Error('Pinned plugin identity mismatch')
       let released = false
+      let calls = 0
       const port = new IcepakPluginClient({ python: this.python, pluginRoot: this.pluginRoot, timeoutMs: this.timeoutMs,
         ...(runtime ? { acquireRuntime: () => {
           if (released) throw new Error('Plugin execution lease has ended')
-          return { ...runtime, release() {} }
+          calls++
+          let ended = false
+          return { ...runtime, release() {
+            if (ended) return
+            ended = true
+            calls--
+            if (released && calls === 0) runtime.release()
+          } }
         } } : {}) })
-      return { identity: actual, port, release: () => { if (!released) { released = true; runtime?.release() } } }
+      return { identity: actual, port, release: () => { if (!released) { released = true; if (calls === 0) runtime?.release() } } }
     } catch (error) { runtime?.release(); throw error }
   }
 

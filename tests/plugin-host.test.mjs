@@ -31,6 +31,67 @@ async function fixture(t) {
   return { root, home: join(root, 'plugins'), options, source }
 }
 
+test('host shutdown retains exclusive home ownership until pinned work releases', async t => {
+  const f = await fixture(t)
+  const host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  assert.throws(() => new PluginHost(f.home, f.options), /already owned/)
+  const pinned = await host.icepak.pinRuntime()
+  let closed = false
+  const closing = host.close().then(() => { closed = true })
+  try {
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(closed, false)
+    assert.throws(() => new PluginHost(f.home, f.options), /already owned/)
+    assert.throws(() => host.setAutomaticUpdates(false), /closed/)
+    await assert.rejects(host.icepak.probeEnvironment(), /closed/)
+  } finally { pinned.release(); await closing }
+  const replacement = new PluginHost(f.home, f.options)
+  const digest = host.status().active['icepak-pyaedt'].current
+  assert.throws(() => host.store.install(f.options.icepak.pluginRoot), /closing/)
+  assert.throws(() => host.store.activate(digest, environment, []), /closing/)
+  await assert.rejects(host.store.validate(digest, environment, async () => []), /closing/)
+  assert.equal(host.store.isBusy('icepak-pyaedt'), false)
+  await replacement.close()
+  await writeFile(join(f.home, 'policy.json'), '{invalid')
+  assert.throws(() => new PluginHost(f.home, f.options), /JSON/)
+  await rm(join(f.home, 'policy.json'))
+  await new PluginHost(f.home, f.options).close()
+})
+
+test('a duplicate default Core is rejected before task recovery and releases failed startup resources', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'thermal-core-owner-'))
+  let app = createCoreApp({ home: root, startAgentRuntime: false })
+  t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }) })
+  assert.throws(() => createCoreApp({ home: root, startAgentRuntime: false }), /already owned/)
+  assert.ok(app.database.listTasks(1))
+  await app.close()
+  app = createCoreApp({ home: root, startAgentRuntime: false })
+  assert.ok(app.database.listTasks(1))
+})
+
+test('releasing a workflow pin cannot surrender ownership while its Python call is still running', async t => {
+  const f = await fixture(t)
+  const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py')
+  await writeFile(entry, (await readFile(entry, 'utf8')).replace('print(json.dumps', 'import time\nif r["method"] == "probe_environment": time.sleep(0.4)\nprint(json.dumps'))
+  const host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  const pinned = await host.icepak.pinRuntime()
+  const call = pinned.port.probeEnvironment()
+  pinned.release(); pinned.release()
+  let closed = false
+  const closing = host.close().then(() => { closed = true })
+  try {
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(closed, false)
+    assert.equal(host.store.isBusy('icepak-pyaedt'), true)
+    assert.throws(() => new PluginHost(f.home, f.options), /already owned/)
+    await assert.rejects(pinned.port.probeEnvironment(), /lease has ended/)
+    assert.equal((await call).pluginVersion, '1.0.0')
+  } finally { await call; await closing }
+  await new PluginHost(f.home, f.options).close()
+})
+
 test('a cold managed engineering call initializes before acquiring its operation gate', async t => {
   const f = await fixture(t)
   const database = new LocalDatabase(join(f.root, 'cold.sqlite'))
