@@ -12,6 +12,47 @@ export interface AedtInstallationEvidence {
 }
 export interface AedtEnvironmentSnapshot { digest: string; installations: AedtInstallationEvidence[] }
 
+export interface AedtLaunchBindings {
+  digest: string
+  environment: Record<string, string>
+  repairs: Array<{ variable: string; previous?: string; path: string }>
+  diagnostics: string[]
+}
+
+/** Derive process-local launch settings from host inventory, without writing machine/user settings. */
+export function aedtLaunchBindings(snapshot: AedtEnvironmentSnapshot, automatic: boolean): AedtLaunchBindings {
+  const environment: Record<string, string> = {}, repairs: AedtLaunchBindings['repairs'] = [], diagnostics: string[] = []
+  const candidates = new Map<string, Set<string>>()
+  const explicit = new Map<string, AedtInstallationEvidence>()
+  for (const record of snapshot.installations) {
+    if (/^ANSYSEM(?:SV|_PY_CLIENT)?_ROOT\d{3}$/u.test(record.source)) {
+      environment[record.source] = record.root
+      explicit.set(record.source, record)
+    }
+    const version = /^ANSYSEM_ROOT(\d{2}[1-9])$/u.exec(record.source)?.[1]
+      ?? /^ProgramFiles\/(?:AnsysEM|ANSYS Inc)\/v(\d{2}[1-9])$/iu.exec(record.source)?.[1]
+    if (!version || !record.resolvedRoot || record.status !== 'present') continue
+    const paths = candidates.get(`ANSYSEM_ROOT${version}`) ?? new Set<string>()
+    for (const file of record.files) {
+      if (/^(?:Win64\/)?ansysedt\.exe$/iu.test(file.path)) paths.add(resolve(record.resolvedRoot, file.path, '..'))
+    }
+    candidates.set(`ANSYSEM_ROOT${version}`, paths)
+  }
+  if (automatic) for (const [variable, paths] of [...candidates].sort(([a], [b]) => a.localeCompare(b))) {
+    // A working explicitly configured installation wins over other installations of the same release.
+    if (explicit.get(variable)?.files.some(file => /^ansysedt\.exe$/iu.test(file.path))) continue
+    const unique = [...paths].filter((path, index, all) => all.findIndex(other => other.toLowerCase() === path.toLowerCase()) === index)
+    if (unique.length !== 1) { diagnostics.push(`${variable}: multiple installation paths; automatic binding deferred`); continue }
+    const previous = environment[variable], path = unique[0]
+    if (previous !== path) {
+      environment[variable] = path
+      repairs.push({ variable, previous, path })
+    }
+  }
+  const ordered = Object.fromEntries(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b)))
+  return { digest: createHash('sha256').update(JSON.stringify({ schemaVersion: 1, environment: ordered })).digest('hex'), environment: ordered, repairs, diagnostics }
+}
+
 /** Host-only filesystem inventory. Does not load DLLs, execute AEDT, or consume a license. */
 export async function inspectAedtEnvironment(platform: string, environment: NodeJS.ProcessEnv = process.env,
   limits = { maxFiles: 5000, maxBytes: 4 * 1024 ** 3, timeoutMs: 60_000 }): Promise<AedtEnvironmentSnapshot> {

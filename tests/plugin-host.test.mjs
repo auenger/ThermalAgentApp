@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -266,6 +266,55 @@ test('host admits automatic repair only for a failed active environment and pers
   await host.reconcile()
   await host.repairJobs.reconcile(() => host.repairJobInputs(), transport)
   assert.equal(dispatched, 1)
+})
+
+test('host repairs missing AEDT launch variables in real Python calls and preserves pinned launch settings', async t => {
+  const f = await fixture(t)
+  const programFiles = join(f.root, 'Program Files'), install = join(programFiles, 'ANSYS Inc', 'v261', 'AnsysEM')
+  await mkdir(install, { recursive: true }); await writeFile(join(install, 'ansysedt.exe'), 'NOT AEDT: installation inventory fixture')
+  const canonicalInstall = await realpath(install)
+  const previousProgramFiles = process.env.ProgramFiles, previousRoot = process.env.ANSYSEM_ROOT261
+  process.env.ProgramFiles = programFiles; delete process.env.ANSYSEM_ROOT261
+  t.after(() => {
+    if (previousProgramFiles === undefined) delete process.env.ProgramFiles; else process.env.ProgramFiles = previousProgramFiles
+    if (previousRoot === undefined) delete process.env.ANSYSEM_ROOT261; else process.env.ANSYSEM_ROOT261 = previousRoot
+  })
+  for (const kind of ['icepak', 'report']) {
+    const path = join(f.options[kind].pluginRoot, 'plugin.json'), manifest = JSON.parse(await readFile(path, 'utf8'))
+    manifest.compatibility.platforms = ['win32']; await writeFile(path, JSON.stringify(manifest))
+  }
+  f.options.inspect = async () => ({ executable, environment: { ...structuredClone(environment), platform: 'win32' } })
+  const entry = join(f.options.icepak.pluginRoot, 'adapter', '__main__.py')
+  await writeFile(entry, (await readFile(entry, 'utf8')).replace('import sys,json', 'import sys,json,os')
+    .replace("'aedtVersions':[]", "'aedtVersions':[], 'launchRoot':os.environ.get('ANSYSEM_ROOT261')"))
+  let host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  host.setAutomaticUpdates(false)
+  assert.equal((await host.icepak.probeEnvironment()).launchRoot, null)
+  const unboundIdentity = (await host.icepak.pinRuntime())
+  const unboundDigest = unboundIdentity.identity.environmentDigest
+  unboundIdentity.release()
+  host.setAutomaticUpdates(true)
+  assert.equal((await host.icepak.probeEnvironment()).launchRoot, canonicalInstall)
+  const pinned = await host.icepak.pinRuntime()
+  const identity = pinned.identity
+  assert.notEqual(identity.environmentDigest, unboundDigest)
+  assert.equal(host.status().runtimes.find(item => item.id === 'icepak-pyaedt').aedtBindings.repairs[0].path, canonicalInstall)
+  const conflicting = join(f.root, 'other-install')
+  await mkdir(conflicting); await writeFile(join(conflicting, 'ansysedt.exe'), 'other fixture')
+  process.env.ANSYSEM_ROOT261 = conflicting
+  try {
+    await host.reconcile()
+    assert.equal((await pinned.port.probeEnvironment()).launchRoot, canonicalInstall, 'live workflow retains the captured binding')
+  } finally { pinned.release() }
+  await host.reconcile()
+  assert.equal((await host.icepak.probeEnvironment()).launchRoot, conflicting, 'new work honors a valid explicit setting')
+  delete process.env.ANSYSEM_ROOT261
+  await host.close()
+  host = new PluginHost(f.home, f.options)
+  assert.equal((await host.icepak.probeEnvironment()).launchRoot, canonicalInstall, 'restart reconstructs the same automatic repair')
+  assert.equal(process.env.ANSYSEM_ROOT261, undefined, 'repair does not change the parent environment')
+  assert.equal(host.status().revisions.find(item => item.digest === identity.packageDigest).manifest.version, identity.pluginVersion)
 })
 
 for (const automatic of [true, false]) test(`runtime protocol quarantine respects pins, restart and automatic updates=${automatic}`, async t => {

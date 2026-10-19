@@ -16,7 +16,7 @@ import type { ModelPreparationStore } from '@thermal-agent/sqlite-store'
 import { withIcepakOperation } from './icepak-operation-lock.js'
 import { ENGINEERING_CAPABILITIES, engineeringPolicyBinding, parseEngineeringValidationPolicy, validateEngineeringPlugin, type EngineeringValidationPolicy } from './plugin-engineering-validation.js'
 import { realpath } from 'node:fs/promises'
-import { inspectAedtEnvironment } from './aedt-environment.js'
+import { inspectAedtEnvironment, aedtLaunchBindings, type AedtLaunchBindings } from './aedt-environment.js'
 import { PluginPythonEnvironments } from './plugin-python-environment.js'
 import { PluginHomeOwner } from './plugin-home-owner.js'
 import { PluginRuntimeStorage } from './plugin-runtime-storage.js'
@@ -36,6 +36,7 @@ interface Runtime {
   engineeringPolicy?: EngineeringValidationPolicy
   engineeringDiagnostic?: string
   aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>
+  aedtBindings?: AedtLaunchBindings
   snapshot?: PythonRuntimeSnapshot
   baseSnapshot?: PythonRuntimeSnapshot
   snapshots: Map<string, PythonRuntimeSnapshot>
@@ -285,6 +286,7 @@ export class PluginHost {
         pythonExecutable: runtime.snapshot?.executable,
         dependencyMode: registry.revisions.find(item => item.digest === registry.active[runtime.id]?.current)?.manifest.pythonRuntime ? 'isolated' : 'base',
         aedtInstallations: runtime.aedtInstallations,
+        aedtBindings: runtime.aedtBindings ? structuredClone(runtime.aedtBindings) : undefined,
         busy: this.store.isBusy(runtime.id), result: runtime.result, error: runtime.error,
         retry: runtime.retry ? { ...runtime.retry } : undefined,
         engineeringValidation: kind === 'icepak' ? { configured: !!runtime.engineeringPolicy, diagnostic: runtime.engineeringDiagnostic,
@@ -426,7 +428,8 @@ export class PluginHost {
     const snapshot = runtime.snapshots.get(digest)
     if (!snapshot) throw new Error('Plugin dependency runtime has not been prepared')
     const lease = managedPythonRuntime(this.store, runtime.id, kind, snapshot.executable, () => snapshot.environment)(expected)
-    return { ...lease, spawn: this.runtimeStorage.forExecutable(snapshot.executable),
+    return { ...lease, aedtEnvironment: snapshot.aedtEnvironment ? { ...snapshot.aedtEnvironment } : undefined,
+      spawn: this.runtimeStorage.forExecutable(snapshot.executable),
       protocolFailure: (method: string, error: Error) => {
         this.recoveryRequested.add(kind)
         this.invalidateRetry(runtime)
@@ -526,6 +529,8 @@ export class PluginHost {
       this.releaseStatus = this.releases.scan()
       const snapshot = await this.inspect(runtime.python, runtime.distributions)
       let aedtInstallations: Runtime['aedtInstallations']
+      let aedtBindings: AedtLaunchBindings | undefined
+      let bindingPolicy: boolean | undefined
       if (this.closed) throw new Error('Plugin host is closed')
       // A workflow may have started while the environment scan was in flight. Never change its facts.
       if (this.store.isBusy(runtime.id)) { runtime.result = { status: 'busy', diagnostics: [] }; return }
@@ -540,6 +545,12 @@ export class PluginHost {
         runtime.engineeringDiagnostic = undefined
         const aedt = await inspectAedtEnvironment(snapshot.environment.platform)
         snapshot.environment.versions['aedt-installations'] = aedt.digest
+        if (snapshot.environment.platform === 'win32') {
+          bindingPolicy = this.policy.automaticUpdates
+          aedtBindings = aedtLaunchBindings(aedt, bindingPolicy)
+          snapshot.aedtEnvironment = { ...aedtBindings.environment }
+          snapshot.environment.versions['aedt-launch-bindings'] = aedtBindings.digest
+        }
         aedtInstallations = aedt.installations.map(item => ({ source: item.source, root: item.resolvedRoot ?? item.root,
           status: item.status, fileCount: item.files.length }))
         const path = join(this.home, 'engineering-validation.json')
@@ -548,7 +559,7 @@ export class PluginHost {
             const policy = parseEngineeringValidationPolicy(JSON.parse(readFileSync(path, 'utf8')))
             if (!this.engineeringStore || snapshot.environment.platform !== 'win32') throw new Error('Engineering upgrades require the Windows Core operation gate')
             const match = /^(20\d{2})\.([1-9])$/u.exec(policy.aedtVersion)
-            const install = match ? process.env[`ANSYSEM_ROOT${match[1].slice(2)}${match[2]}`] : undefined
+            const install = match ? snapshot.aedtEnvironment?.[`ANSYSEM_ROOT${match[1].slice(2)}${match[2]}`] : undefined
             if (!install || (await realpath(join(install, 'ansysedt.exe'))).toLowerCase() !== (await realpath(policy.aedtExecutablePath)).toLowerCase()) throw new Error('Configured AEDT executable must match the selected ANSYSEM_ROOT installation')
             snapshot.environment.versions['engineering-validation'] = await engineeringPolicyBinding(policy, runtime.builtinDigest!)
             runtime.engineeringPolicy = policy
@@ -562,10 +573,12 @@ export class PluginHost {
         return
       }
       if (this.closed) throw new Error('Plugin host is closed')
+      if (bindingPolicy !== undefined && bindingPolicy !== this.policy.automaticUpdates) throw Object.assign(new Error('AEDT launch binding deferred after policy change'), { code: 'VALIDATION_DEFERRED' })
       runtime.snapshot = snapshot
       this.recoveryRequested.delete(kind)
       runtime.baseSnapshot = snapshot
       runtime.aedtInstallations = aedtInstallations
+      runtime.aedtBindings = aedtBindings
       if (rollback) {
         const checkTarget = () => {
           const active = this.store.list().active[runtime.id]
@@ -622,6 +635,7 @@ export class PluginHost {
     // Signed reports have a host fixture; external engineering adapters still require an engineering validator.
     if (!this.trustedDigests().includes(lease.revision.digest)) throw new Error('Plugin is not a trusted executable release')
     const acquireRuntime = () => ({ python: snapshot.executable, pluginRoot: lease.root, module: lease.revision.manifest.entry.module,
+      aedtEnvironment: snapshot.aedtEnvironment ? { ...snapshot.aedtEnvironment } : undefined,
       spawn: this.runtimeStorage.forExecutable(snapshot.executable), release() {} })
     const client = kind === 'icepak' ? new IcepakPluginClient({ acquireRuntime }) : new ReportClient({ acquireRuntime })
     const health = await client.health() as { pluginId?: string; pluginVersion?: string; protocolVersion?: string; status?: string }
@@ -640,7 +654,8 @@ export class PluginHost {
       try {
         const referenceClient = new IcepakPluginClient({ acquireRuntime: () => {
           this.store.verify(reference.revision.digest)
-          return { python: runtime.baseSnapshot!.executable, pluginRoot: reference.root, module: reference.revision.manifest.entry.module, release() {} }
+          return { python: runtime.baseSnapshot!.executable, pluginRoot: reference.root, module: reference.revision.manifest.entry.module,
+            aedtEnvironment: runtime.baseSnapshot!.aedtEnvironment ? { ...runtime.baseSnapshot!.aedtEnvironment } : undefined, release() {} }
         } })
         const results = await withIcepakOperation(this.engineeringStore, 'plugin-upgrade-validation', options => validateEngineeringPlugin({
           home: this.home, policy: runtime.engineeringPolicy!, candidate: client as IcepakPluginClient, reference: referenceClient,

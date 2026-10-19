@@ -12,6 +12,8 @@ export function pythonPluginEnv(): NodeJS.ProcessEnv {
 }
 
 export interface PythonPluginLease {
+  /** Exact host-captured AEDT roots for this lease; never supplied by plugin manifests or task input. */
+  aedtEnvironment?: Readonly<Record<string, string>>
   protocolFailure?(method: string, error: PluginProtocolError): void
   spawn?: import('./plugin-runtime-storage.js').PythonSpawner
   identity?: import('@thermal-agent/contracts').PluginExecutionIdentity

@@ -73,7 +73,7 @@ architecture = {'amd64': 'x64', 'x86_64': 'x64', 'aarch64': 'arm64', 'arm64': 'a
 print(json.dumps({'executable': str(executable), 'environment': {'platform': sys.platform, 'architecture': architecture, 'versions': versions}}))
 `
 
-export interface PythonRuntimeSnapshot { executable: string; environment: PluginEnvironment }
+export interface PythonRuntimeSnapshot { executable: string; environment: PluginEnvironment; aedtEnvironment?: Record<string, string> }
 
 export async function inspectPythonRuntime(python: string, distributions: readonly string[], timeoutMs = 60_000, launch: PythonSpawner = spawnPython): Promise<PythonRuntimeSnapshot> {
   if (distributions.length > 128 || distributions.some(name => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}$/u.test(name))) throw new Error('Invalid Python distribution names')

@@ -74,9 +74,10 @@ export class PluginPythonEnvironments {
       for (const wheel of lock.wheels) if (snapshot.environment.versions[wheel.name] !== wheel.version) throw new Error(`Installed dependency does not match lock: ${wheel.name}`)
       // Binding the independent host reference also invalidates receipts when the shipped verifier changes.
       snapshot.environment.versions['host-reference'] = pluginEnvironmentDigest(input.base.environment)
-      for (const fact of ['aedt-installations', 'engineering-validation']) {
+      for (const fact of ['aedt-installations', 'aedt-launch-bindings', 'engineering-validation']) {
         if (input.base.environment.versions[fact]) snapshot.environment.versions[fact] = input.base.environment.versions[fact]
       }
+      if (input.base.aedtEnvironment) snapshot.aedtEnvironment = { ...input.base.aedtEnvironment }
       return snapshot
     }
     let repair: PythonEnvironmentRepair | undefined

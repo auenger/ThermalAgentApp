@@ -22,6 +22,7 @@ interface PluginStatus {
     retry?: { consecutiveFailures: number; nextRetryAt: string; reason: string };
     dependencyMode?: 'isolated' | 'base'; pythonExecutable?: string;
     aedtInstallations?: Array<{ source: string; root: string; status: string; fileCount: number }>;
+    aedtBindings?: { repairs: Array<{ variable: string; previous?: string; path: string }>; diagnostics: string[] };
     engineeringValidation?: { configured: boolean; diagnostic?: string; supportedCapabilities: string[] };
     environment?: { platform: string; architecture: string; versions: Record<string, string> };
     result?: { status: string; diagnostics: string[] } }>
@@ -159,6 +160,12 @@ export function PluginSettings() {
         {runtime.aedtInstallations?.map(item => <p key={item.source} style={{ overflowWrap: 'anywhere' }}>
           AEDT：{item.root} · {item.status === 'present' ? `已采集 ${item.fileCount} 个原生运行文件` : '未找到主程序'}
         </p>)}
+        {!!runtime.aedtBindings?.repairs.length && <details>
+          <summary>本机启动路径适配（{runtime.aedtBindings.repairs.length}）</summary>
+          <p>已为插件进程补齐安装路径，未修改系统设置。启动及求解能力仍需验证。</p>
+          {runtime.aedtBindings.repairs.map(item => <p key={item.variable} style={{ overflowWrap: 'anywhere' }}>{item.variable}：{item.previous ? `${item.previous} → ` : ''}{item.path}</p>)}
+        </details>}
+        {runtime.aedtBindings?.diagnostics.map(detail => <p key={detail} role="alert">安装路径适配：{detail}</p>)}
         {runtime.error && <p role="alert">{runtime.error}</p>}
         {runtime.retry && <p>本轮检查未完成，后续检查最早于 {new Date(runtime.retry.nextRetryAt).toLocaleString()} 重试（连续失败 {runtime.retry.consecutiveFailures} 次）。发现新版本或更新策略变化后会提前重新检查。</p>}
         {runtime.engineeringValidation && <p>{runtime.engineeringValidation.configured

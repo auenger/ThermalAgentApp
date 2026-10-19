@@ -1,5 +1,5 @@
 import { spawnPython } from './plugin-runtime-storage.js'
-import { resolve } from 'node:path'
+import { resolve, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { terminateProcessTree } from '@thermal-agent/process-control'
 import { pythonPluginArgs, pythonPluginEnv, requirePluginCapability, decodePluginResponse, PluginProtocolError, type PythonPluginLease } from './python-plugin-launch.js'
@@ -19,6 +19,18 @@ export interface IcepakPluginClientOptions {
   pluginRoot?: string
   timeoutMs?: number
   acquireRuntime?: (expected?: PluginExecutionIdentity) => PythonPluginLease
+}
+
+export function icepakPluginEnvironment(bindings?: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
+  const environment = pythonPluginEnv()
+  if (bindings === undefined) return environment
+  const root = /^ANSYSEM(?:SV|_PY_CLIENT)?_ROOT\d{3}$/iu
+  for (const key of Object.keys(environment)) if (root.test(key)) delete environment[key]
+  for (const [key, value] of Object.entries(bindings)) {
+    if (!root.test(key) || key !== key.toUpperCase() || !isAbsolute(value) || value.includes('\0')) throw new Error('Invalid host AEDT launch binding')
+    environment[key] = value
+  }
+  return environment
 }
 
 export interface PluginCallOptions {
@@ -183,7 +195,7 @@ export class IcepakPluginClient {
     const id = randomUUID()
     const timeoutMs = options.timeoutMs ?? this.timeoutMs
     const child = (runtime?.spawn ?? spawnPython)(runtime?.python ?? this.python, pythonPluginArgs(runtime?.pluginRoot ?? this.pluginRoot, runtime?.module ?? 'thermal_icepak_plugin'), {
-      env: { ...pythonPluginEnv(), ...(options.operationId ? { THERMAL_ICEPAK_PARENT_PID: String(process.pid), THERMAL_ICEPAK_MANAGED_ONESHOT: '1' } : {}) },
+      env: { ...icepakPluginEnvironment(runtime?.aedtEnvironment), ...(options.operationId ? { THERMAL_ICEPAK_PARENT_PID: String(process.pid), THERMAL_ICEPAK_MANAGED_ONESHOT: '1' } : {}) },
       windowsHide: true,
     })
     let lineBuffer = ''

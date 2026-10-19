@@ -29,6 +29,7 @@ try {
     value.runtimeStorage = { checkedAt: '2026-10-19T00:00:00Z', removed: ['ui-fixture-removed'],
       retained: [{ directory: 'ui-fixture-retained', reason: 'saved workflow or readiness reference' }] }
     value.runtimes[0].retry = { consecutiveFailures: 2, nextRetryAt: '2026-10-19T00:05:00Z', reason: 'UI retry fixture' }
+    value.runtimes[0].aedtBindings = { repairs: [{ variable: 'ANSYSEM_ROOT261', path: 'C:/Program Files/ANSYS Inc/v261/AnsysEM' }], diagnostics: [] }
     value.updates = { ...value.updates, assetDownloaded: 1, assetCached: 3, assetBytes: 34 * 1024 * 1024 }
     await route.fulfill({ response, json: value })
   })
@@ -78,6 +79,8 @@ try {
   await settings.getByText(/历史作业或就绪证据仍有引用/).waitFor()
   await settings.getByText(/依赖资产：已下载 1 个/).waitFor()
   await settings.getByText(/连续失败 2 次/).waitFor()
+  await settings.getByText('本机启动路径适配（1）', { exact: true }).click()
+  await settings.getByText(/已为插件进程补齐安装路径/).waitFor()
   await settings.getByText('修复候选（1）', { exact: true }).click()
   await settings.getByText(/以下候选仅已存档/).waitFor()
   await settings.getByText(/v0.1.1 · 等待隔离验证/).click()

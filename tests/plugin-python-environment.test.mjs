@@ -32,6 +32,8 @@ test('locked offline wheels create independent verified runtimes without modifyi
   await writeFile(pipConfig, `[global]\ntarget = ${outside}\n`)
   process.env.PIP_TARGET = outside; process.env.PIP_CONFIG_FILE = pipConfig
   const base = await inspectPythonRuntime(python, [])
+  base.aedtEnvironment = { ANSYSEM_ROOT261: join(root, 'aedt-fixture') }
+  base.environment.versions['aedt-launch-bindings'] = createHash('sha256').update(JSON.stringify(base.aedtEnvironment)).digest('hex')
   const query = executable => execFileSync(executable, ['-I', '-B', '-c', 'import thermal_runtime_fixture;print(thermal_runtime_fixture.VALUE)'], { encoding: 'utf8', stdio: 'pipe' }).trim()
   assert.throws(() => query(base.executable), /No module named/)
   async function input(version, dependency = '') {
@@ -48,10 +50,15 @@ test('locked offline wheels create independent verified runtimes without modifyi
   const first = await input('1.0'), second = await input('2.0')
   assert.throws(() => parseManagedPluginManifest({ ...first.manifest, hostApi: 1 }), /host API 2/)
   const one = await manager.prepare(first), two = await manager.prepare(second)
+  assert.deepEqual(one.aedtEnvironment, base.aedtEnvironment)
+  assert.notEqual(one.aedtEnvironment, base.aedtEnvironment, 'prepared launch settings are copied, not shared')
+  assert.equal(one.environment.versions['aedt-launch-bindings'], base.environment.versions['aedt-launch-bindings'])
   assert.equal(query(one.executable), '1.0'); assert.equal(query(two.executable), '2.0')
   assert.notEqual(one.executable, two.executable)
   assert.equal((await manager.prepare(first)).executable, one.executable, 'completed environments retain their fixed path after restart/reuse')
-  assert.equal((await new PluginPythonEnvironments(environments).prepare(second)).executable, two.executable)
+  const reused = await new PluginPythonEnvironments(environments).prepare(second)
+  assert.equal(reused.executable, two.executable)
+  assert.deepEqual(reused.aedtEnvironment, base.aedtEnvironment, 'cached environments recover the host launch settings after restart')
   assert.throws(() => query(base.executable), /No module named/)
   const bad = await input('3.0', 'thermal-missing-dependency==1.0')
   await assert.rejects(access(outside), error => error.code === 'ENOENT', 'user pip configuration cannot redirect installation')
