@@ -10,7 +10,7 @@
 
 CAD 首版目标是从 STEP 和用户填写的工程信息生成可验证的热模型，再运行 Baseline；首次建模无需 Agent。设计与后续推进顺序见 [CAD 建模计划](./docs/CAD_MODEL_PREPARATION_PLAN.md)，参数修改与版本追溯见 [参数操作说明](./docs/PARAMETER_EDITING.md)。当前优先完成 Windows 真实案例验收，之后推进 3D 对象选择、几何预检查、参数化散热器模板和 Agent 辅助。
 
-本实验分支新增 STEP/STP 本地 3D 预览、显示部件拾取、用户确认的实体对应与配置联动。查看器无需启动 Icepak，支持隐藏/隔离和带版本身份的显示映射导出；对应关系仍待真实 Windows 工程核对。实验操作、上限和证据见 [CAD 对象交互实验](./docs/CAD_OBJECT_INTERACTION_EXPERIMENT.md)。HTML 手册仍是主线构建快照。
+本实验分支新增 STEP/STP 本地 3D 预览、显示部件拾取、用户确认的实体对应与配置联动。查看器无需启动 Icepak，支持隐藏/隔离和带版本身份的显示映射导出；对应关系仍待真实 Windows 工程核对。实验操作、上限和证据见 [CAD 对象交互实验](./docs/CAD_OBJECT_INTERACTION_EXPERIMENT.md)。HTML 手册已更新为当前实验分支的功能与 CAD Preview 试包操作快照。
 
 ## 当前迁移状态
 

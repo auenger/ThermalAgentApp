@@ -1,5 +1,6 @@
 import { ParameterWorkspace } from './ParameterWorkspace'
 import { ModelPreparationWorkspace } from './ModelPreparationWorkspace'
+import { TaskModelFiles } from './TaskModelFiles'
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
 import {
   Badge,
@@ -92,6 +93,7 @@ declare global {
   interface Window {
     thermalDesktop?: {
       platform: string
+      locateTaskModel(taskId: string, sha256?: string): Promise<void>
       setTitleBarTheme(dark: boolean): Promise<void>
       openDshSession(sessionId: string): Promise<void>
       openDshSettings(): Promise<void>
@@ -570,7 +572,8 @@ function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChan
     <div className={styles.intro}><div><h1 className={styles.title}>{current.title}</h1><p className={styles.subtitle}>{current.description || '尚未填写详细散热需求'}</p></div><div className={styles.headerActions}><Badge appearance="outline">{current.executionStatus}</Badge>{current.executionStatus === 'DRAFT' && <Button appearance="primary" icon={<Edit20Regular />} onClick={onEdit}>继续完善需求</Button>}</div></div>
     <div className="task-detail-layout">
       <div className="task-detail-main">
-        <nav className="task-detail-jumps" aria-label="任务详情导航">{cadTask && <a href="#cad-workspace">CAD 转换与建模</a>}{showParameters && <a href="#parameter-workspace">参数修改与追溯</a>}<a href="#task-results">求解结果</a><a href="#task-timeline">推进记录</a></nav>
+        <nav className="task-detail-jumps" aria-label="任务详情导航"><a href="#task-model-files">模型文件</a>{cadTask && <a href="#cad-workspace">CAD 转换与建模</a>}{showParameters && <a href="#parameter-workspace">参数修改与追溯</a>}<a href="#task-results">求解结果</a><a href="#task-timeline">推进记录</a></nav>
+        <TaskModelFiles key={current.id} taskId={current.id} />
         {showParameters && <ParameterWorkspace task={current} onChanged={onChanged} onOpenTask={onOpenTask} />}
         {(snapshot.modelKind === 'CAD' || Boolean(snapshot.sourceModel)) && <ModelPreparationWorkspace task={current} onChanged={onChanged} />}
         <section className="task-detail-section"><h2>需求输入</h2><div className="task-detail-fields">

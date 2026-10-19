@@ -11,6 +11,7 @@ import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundErro
 import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
 import { ParameterPlanManager } from './parameter-plans.js'
 import { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
+import { taskModelFiles } from './task-model-files.js'
 import { ModelPreparationStore } from '@thermal-agent/sqlite-store'
 import { lockIcepakOperations, IcepakOperationBusyError } from './icepak-operation-lock.js'
 import { IcepakExecutionManager } from './execution-manager.js'
@@ -411,6 +412,39 @@ async function route(
     if (!artifact) throw new RequestError(404, 'ATTEMPT_ARTIFACT_NOT_FOUND', '求解产物不存在')
     response.writeHead(200, { 'Content-Type': artifact.originalName.endsWith('.json') ? 'application/json' : 'application/octet-stream',
       'Content-Length': String(artifact.sizeBytes), 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(artifact.originalName)}`,
+      'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' })
+    await pipeline(createReadStream(artifacts.resolveArtifact(sha)), response); return
+  }
+  const taskFiles = url.pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/model-files(?:\/([a-f0-9]{64}))?(\/location)?$/u)
+  if (taskFiles && (request.method === 'GET' || request.method === 'POST')) {
+    const [, taskId, sha, location] = taskFiles
+    const task = database.getTask(taskId)
+    if (!task) throw new TaskNotFoundError(taskId)
+    if (location) {
+      if (request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '请使用 POST 定位文件')
+      if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', '文件定位仅限本机 App')
+      assertLocalWriteOrigin(request)
+      assertLocalOwner(database, taskId, nodeIdentity.nodeId)
+    } else if (request.method !== 'GET') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '请使用 GET 查看文件')
+    const listing = taskModelFiles(taskId, database, modelPreparations, taskWorkspace)
+    if (!sha) {
+      if (location) { writeJson(response, 200, { path: taskWorkspace.ensure(taskId), kind: 'directory' }); return }
+      const local = isLoopbackAddress(request.socket.remoteAddress)
+      writeJson(response, 200, { workspacePath: local ? listing.workspacePath : undefined,
+        files: listing.files.map(file => ({ ...file, path: local ? file.path : undefined })) }); return
+    }
+    const file = listing.files.find(file => file.sha256 === sha)
+    if (!file) throw new RequestError(404, 'TASK_MODEL_FILE_NOT_FOUND', '模型文件不属于当前任务')
+    if (location) {
+      try { await stat(file.path) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        await artifacts.materialize(sha, file.path)
+      }
+      writeJson(response, 200, { path: file.path, kind: 'file' }); return
+    }
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(file.sizeBytes),
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.name)}`,
       'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' })
     await pipeline(createReadStream(artifacts.resolveArtifact(sha)), response); return
   }

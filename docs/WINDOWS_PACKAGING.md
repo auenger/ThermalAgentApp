@@ -2,7 +2,17 @@
 
 当前已生成跨平台试包，但尚未完成真实 Windows 安装包验收。正式构建与运行验证仍应在 Windows x64 主机进行；macOS 的原生依赖不能直接充当 Windows 依赖。代码仓库 `https://github.com/auenger/ThermalAgentApp.git` 为公开仓库。用户已确认 `assets/icepak/Project1.aedt` 是可公开分发的测试工程，随源码提交并由安装包带入；这不代表客户模型也可公开。
 
-Windows 测试可直接打开 [离线 HTML 操作说明](./Thermal-Agent-功能进度与操作说明.html)，按 CAD 到 Baseline 步骤操作并保存或导出测试记录。2026-10-12 的说明和计划更新不代表安装包重新构建；当前试包身份仍以下列 SHA 为准。
+Windows 测试可直接打开 [离线 HTML 操作说明](./Thermal-Agent-功能进度与操作说明.html)，按 CAD 到 Baseline 步骤操作并保存或导出测试记录。离线说明已同步当前实验分支的 CAD Preview 试包，新增 3D 预览与人工对应步骤；主线与实验包身份以下列各自 SHA 为准。
+
+## 2026-10-13 CAD Preview 更新试包
+
+已重新生成 `release-cross/cad-preview/Thermal-Agent-0.1.0-CAD-Preview-Windows-x64.exe`，212,340,179 字节。SHA256：`afd183a8ec9eb535c18aa87c4faa8aa6392edb3507a8e5fd1ec70d3c701f84e5`。此包替换同路径的 2026-10-12 试包。
+
+包含 Task 详情的模型文件集中入口：原始 CAD、导入几何工程、热模型版本、参数方案工程与求解工程，可下载、复制路径，并在桌面 App 打开任务目录或定位文件。定位时从归档恢复保留文件名的副本，已有副本不覆盖。CAD 查看器的许可入口已移除，组件许可文件仍随包保留。
+
+TypeScript/Web 构建、10 项建模接口测试及浏览器建模流程测试通过；安装包必需资源检查通过，13 个包内桌面/Core/Web 文件与当前构建输出一致。`.exe.sha256` 和 `viewer-build-evidence.json` 已更新，构建证据注明包含尚未提交的工作区改动。
+
+构建使用现有 CAD Preview 配置及缓存的 Electron 38.8.6 Windows x64 压缩包，避免重复下载；仍为 macOS 跨平台试包，Windows 安装、资源管理器定位和真实 Icepak 求解尚待实机验证。应用身份和数据目录沿用 CAD Preview。
 
 ## 2026-10-12 CAD Preview 实验试包
 

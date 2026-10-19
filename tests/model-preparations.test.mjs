@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
+import { readFile, rm, writeFile } from 'node:fs/promises'
+import { createTask } from '@thermal-agent/domain'
 import { createThermalModelSpec, parseThermalModelSpec, validateThermalModelSpec } from '../packages/contracts/dist/index.js'
 import { ModelPreparationStore } from '@thermal-agent/sqlite-store'
 import { modelApp, waitModel, confirmSpec } from './fixtures/model-preparation-app.mjs'
@@ -54,6 +56,39 @@ test('CAD App workflow without Agent creates verified engineering input and runs
   assert.equal(attempt.parameters.modelSpecSha256, preparation.specSha256)
   assert.equal(attempt.inputArtifactSha256, preparation.projectSha256)
   assert.equal(f.controls.calls.at(-1).input.setup, 'ThermalBaseline')
+  const files = (await f.request('/model-files', undefined, 'GET')).body.files
+  assert.ok(files.some(file => file.sha256 === task.requirementSnapshot.sourceModel.sha256 && file.labels.includes('原始模型')))
+  assert.ok(files.some(file => file.sha256 === preparation.projectSha256 && file.labels.includes('当前求解输入')))
+  assert.ok(files.some(file => file.labels.some(label => label.includes('几何工程'))))
+  const solved = files.find(file => file.labels.some(label => label.includes('求解工程')))
+  assert.ok(solved)
+  assert.equal(await (await fetch(f.base + solved.downloadUrl)).text(), 'solved-project')
+})
+
+test('task model files recover named copies without overwriting edits and reject unrelated artifacts', async t => {
+  const f = await modelApp(); t.after(() => f.close())
+  const sha = f.task.requirementSnapshot.modelSha256
+  const listing = await f.request('/model-files', undefined, 'GET')
+  assert.equal(listing.response.status, 200)
+  assert.equal(listing.body.files[0].name, 'sample.step')
+  const located = await f.request(`/model-files/${sha}/location`, {})
+  assert.equal(located.response.status, 200)
+  assert.equal(await readFile(located.body.path, 'utf8'), 'STEP TEST DOUBLE')
+  await writeFile(located.body.path, 'manual edits')
+  await f.request(`/model-files/${sha}/location`, {})
+  assert.equal(await readFile(located.body.path, 'utf8'), 'manual edits')
+  assert.equal(await (await fetch(f.base + listing.body.files[0].downloadUrl)).text(), 'STEP TEST DOUBLE')
+  await rm(located.body.path)
+  await f.request(`/model-files/${sha}/location`, {})
+  assert.equal(await readFile(located.body.path, 'utf8'), 'STEP TEST DOUBLE')
+  const directory = await f.request('/model-files/location', {})
+  assert.equal(directory.body.kind, 'directory')
+  assert.equal(directory.body.path, listing.body.workspacePath)
+  const unrelated = f.app.database.createTask(createTask({ title: 'Unrelated', description: '', ownerNodeId: f.app.nodeIdentity.nodeId, requirementSnapshot: {} }))
+  assert.equal((await fetch(`${f.base}/api/tasks/${unrelated.id}/model-files/${sha}`)).status, 404)
+  assert.equal((await fetch(`${f.base}/api/tasks/${unrelated.id}/model-files/${sha}/location`, { method: 'POST' })).status, 404)
+  const denied = await fetch(`${f.base}${f.path}/model-files/${sha}/location`, { method: 'POST', headers: { Origin: 'http://unrelated.example' } })
+  assert.equal(denied.status, 403)
 })
 
 test('missing confirmations, stale objects, duplicate fields and unsupported inputs are rejected', async t => {

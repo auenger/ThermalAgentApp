@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, Select, Spinner } from '@fluentui/react-components'
 import type { CadInspection } from '@thermal-agent/contracts'
-import occtLicenseUrl from 'occt-import-js/dist/license.occt.txt?url'
-import importerLicenseUrl from 'occt-import-js/dist/license.occt-import-js.txt?url'
 import { CadViewport } from './CadViewport'
 import { DISPLAY_RUNTIME, MAX_STEP_BYTES, type DisplayBinding, type DisplayScene } from './types'
 
@@ -110,7 +108,6 @@ export function CadStepViewer({ taskId, sourceSha256, inspection, selectedObject
         <div className="cad-controls"><Button onClick={() => setHidden(new Set())}>显示全部部件</Button><Button onClick={exportBindings}>导出显示映射</Button></div>
       </>}
       <p className="cad-muted">预览不会修复或改写 STEP，也不会启动 Icepak。显示对应关系仅保留在当前页面，可导出记录；重新打开页面或切换导入版本后需重新确认。</p>
-      <details><summary>几何运行时许可</summary><a href={importerLicenseUrl} download>导入器许可</a><a href={occtLicenseUrl} download>Open CASCADE 许可</a></details>
     </>}
   </section>
 }

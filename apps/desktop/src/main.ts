@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, shell, Tray } from 'electron'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,6 +29,21 @@ async function dshFrame() {
 function assertDesktopSender(senderUrl: string): void {
   if (!senderUrl.startsWith(`${coreOrigin}/`)) throw new Error('桌面操作来源无效')
 }
+
+ipcMain.handle('thermal:locate-task-model', async (event, taskId: unknown, sha256: unknown) => {
+  assertDesktopSender(event.senderFrame?.url ?? '')
+  if (event.senderFrame !== window?.webContents.mainFrame) throw new Error('文件定位来源无效')
+  if (typeof taskId !== 'string' || !/^[0-9a-f-]{36}$/u.test(taskId) ||
+    (sha256 !== undefined && (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(sha256)))) throw new Error('模型文件身份无效')
+  const response = await fetch(`${coreOrigin}/api/tasks/${taskId}/model-files${sha256 ? `/${sha256}` : ''}/location`, { method: 'POST' })
+  const body = await response.json() as { path?: string; kind?: string; error?: { message?: string } }
+  if (!response.ok || !body.path) throw new Error(body.error?.message ?? '模型文件定位失败')
+  if (body.kind === 'file') shell.showItemInFolder(body.path)
+  else if (body.kind === 'directory') {
+    const error = await shell.openPath(body.path)
+    if (error) throw new Error(error)
+  } else throw new Error('文件定位结果无效')
+})
 
 ipcMain.handle('thermal:dsh-open-session', async (event, value: unknown) => {
   assertDesktopSender(event.senderFrame?.url ?? '')
