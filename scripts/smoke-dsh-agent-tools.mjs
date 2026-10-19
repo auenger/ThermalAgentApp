@@ -12,6 +12,7 @@ const previousHome = process.env.DSH_HOME
 process.env.DSH_HOME = home
 let ctx
 let handle
+let repairHandle
 
 try {
   const profileDir = join(home, 'profiles', 'spec')
@@ -78,8 +79,41 @@ try {
     'write',
   ]) assert.ok(names.includes(expected), `missing DSH tool: ${expected}`)
   assert.ok(!names.includes('thermal_start_baseline'), 'DSH must not bypass the human confirmation gate')
+  assert.ok(presets.some(preset => preset.id === 'thermal-plugin-repair'))
+  repairHandle = await ctx.agents.create({ sessionId: SessionId('thermal-repair-smoke'),
+    setup: agentContext => ctx.agentPresets.mount(agentContext, 'thermal-plugin-repair').then(() => undefined) })
+  const repairNames = ['thermal_plugin_status', 'thermal_plugin_repair_context', 'thermal_stage_plugin_repair'].sort()
+  assert.deepEqual(ctx.tools.schemas(repairHandle.agent).map(tool => tool.name).sort(), repairNames)
+  assert.deepEqual(ctx.tools.schemas(handle.agent).map(tool => tool.name).sort(), names, 'repair restrictions do not change the task assistant')
+  let sequence = 0, forbiddenExecutions = 0, allowedExecutions = 0
+  const invoke = name => ctx.tools.execute({ name, arguments: {}, agent: repairHandle.agent,
+    callId: `repair-policy-${sequence++}`, signal: new AbortController().signal })
+  for (const name of ['bash', 'pwsh', 'read', 'write', 'run_code', 'thermal_create_task', 'thermal_install_plugin_release', 'thermal_reconcile_plugins']) {
+    assert.equal((await invoke(name)).isError, true, `repair session must reject ${name}`)
+  }
+  // A late scoped registration is exempt from inherited schema filters. The execution guard must still deny it.
+  const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }
+  repairHandle.agent.ctx.tools.register({ name: 'fixture_forbidden', description: 'Test late registration', parameters: {}, output,
+    async execute() { forbiddenExecutions++; return 'unexpected' } })
+  repairHandle.agent.ctx.on('tools/pre-execute', async () => ({ kind: 'allow' }))
+  const forbidden = await invoke('fixture_forbidden')
+  assert.equal(forbidden.isError, true); assert.match(forbidden.error.message, /Repair sessions may only/)
+  assert.equal(forbiddenExecutions, 0, 'pre-execute allow cannot override the monotonic repair guard')
+  // Trusted test doubles replace bridge I/O only; calls still traverse the real DSH execution pipeline.
+  for (const name of repairNames) repairHandle.agent.ctx.tools.register({ name, description: 'Policy test fixture', parameters: {}, output,
+    async execute() { allowedExecutions++; return 'fixture' } })
+  for (let i = 0; i < 3; i++) assert.equal((await invoke('thermal_stage_plugin_repair')).isError, false)
+  const extraProposal = await invoke('thermal_stage_plugin_repair')
+  assert.equal(extraProposal.isError, true); assert.match(extraProposal.error.message, /3 proposal-attempt/)
+  for (let i = 0; i < 61; i++) assert.equal((await invoke('thermal_plugin_repair_context')).isError, false)
+  const exhausted = await invoke('thermal_plugin_status')
+  assert.equal(exhausted.isError, true); assert.match(exhausted.error.message, /64 tool-call/)
+  assert.equal(allowedExecutions, 64)
+  process.stdout.write('Repair preset: exactly 3 tools; forbidden dispatch and late registrations denied; 64 calls and 3 proposals bounded.\n')
+
   process.stdout.write(`Thermal Agent DSH preset exposes ${names.length} tools with ${names.filter(name => name.startsWith('thermal_')).length} controlled thermal tools.\n`)
 } finally {
+  await repairHandle?.dispose()
   await handle?.dispose()
   await ctx?.fiber.dispose()
   if (previousHome === undefined) delete process.env.DSH_HOME

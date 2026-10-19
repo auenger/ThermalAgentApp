@@ -43,6 +43,13 @@ export class DshRuntime {
     return created.sessionId
   }
 
+  async createRepairSession(): Promise<{ sessionId: string; agentPreset: string }> {
+    if (this.status.phase !== 'ready') throw new Error('DSH is not ready')
+    const created = await this.bridge.dshSessionRequest<{ sessionId: string; agentPreset?: string }>('create-repair')
+    if (created.agentPreset !== 'thermal-plugin-repair') throw new Error('DSH did not create the restricted repair preset')
+    return { sessionId: created.sessionId, agentPreset: created.agentPreset }
+  }
+
   async archiveSession(sessionId: string): Promise<void> {
     if (this.status.phase !== 'ready') throw new Error('DSH is not ready')
     await this.bridge.dshSessionRequest('archive', { sessionId })

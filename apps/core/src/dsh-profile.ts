@@ -43,6 +43,22 @@ export function prepareDshProfile(dshHome: string, pluginPath: string): string {
   const composition = join(presetDir, 'agent.cordis.yml')
   writeFileSync(composition, THERMAL_PRESET, { mode: 0o600 })
   chmodSync(composition, 0o600)
+  const repairDir = join(presetRoot, 'thermal-plugin-repair')
+  mkdirSync(repairDir, { recursive: true, mode: 0o700 })
+  const repairComposition = join(repairDir, 'agent.cordis.yml')
+  writeFileSync(repairComposition, [
+    '- id: persona',
+    "  name: '@deepseek-ai/dsh-persona'",
+    '  config:',
+    '    prefix: >-',
+    '      你是 Thermal Agent 的插件修复助手，仅依据宿主证据生成源码候选，等待独立隔离验证。候选存档不代表兼容性通过，也不代表版本已经启用。',
+    '    complete: true',
+    '    includeRuntimeContext: false',
+    '- id: thermal-repair-tool-policy',
+    `  name: ${JSON.stringify(resolve(pluginPath, '..', 'repair-policy.js'))}`,
+    '',
+  ].join('\n'), { mode: 0o600 })
+  chmodSync(repairComposition, 0o600)
   const patch = resolve(dshHome, 'thermal-agent.cordis.patch.yml')
   writeFileSync(patch, [
     '- id: agent-presets',

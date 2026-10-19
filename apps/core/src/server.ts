@@ -397,6 +397,12 @@ async function route(
     writeJson(response, 202, { agent: agentRuntime.getStatus() })
     return
   }
+  if (request.method === 'POST' && url.pathname === '/api/agent/repair-sessions') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'DSH repair sessions are local-only')
+    assertLocalWriteOrigin(request)
+    writeJson(response, 201, await agentRuntime.createRepairSession())
+    return
+  }
   if (url.pathname === '/api/agent/sessions') {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'DSH sessions are local-only')
     if (request.method === 'GET') { writeJson(response, 200, { sessions: await agentRuntime.listSessions() }); return }

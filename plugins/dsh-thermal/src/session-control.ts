@@ -21,7 +21,7 @@ export function apply(ctx: Context): void {
       const actual = Buffer.from(request.headers.authorization?.replace(/^Bearer /u, '') ?? '')
       const expected = Buffer.from(token)
       if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) { response.writeHead(401).end(); return }
-      if (request.method !== 'POST' || !['/v1/list', '/v1/create', '/v1/archive'].includes(request.url ?? '')) { response.writeHead(404).end(); return }
+      if (request.method !== 'POST' || !['/v1/list', '/v1/create', '/v1/create-repair', '/v1/archive'].includes(request.url ?? '')) { response.writeHead(404).end(); return }
       let body = ''
       request.setEncoding('utf8')
       request.on('data', (chunk: string) => { body += chunk; if (body.length > 4096) request.destroy() })
@@ -33,6 +33,8 @@ export function apply(ctx: Context): void {
             return { ...listed, archivedSessionIds: ctx.workspaceRegistry.archivedSessionIds }
           }
           if (request.url === '/v1/create') return ctx.sessionController.create({ workspaceId: workspaceId as NonNullable<SessionCreateRequest['workspaceId']> })
+          if (request.url === '/v1/create-repair') return ctx.sessionController.create({
+            workspaceId: workspaceId as NonNullable<SessionCreateRequest['workspaceId']>, agentPreset: 'thermal-plugin-repair' })
           if (typeof input.sessionId !== 'string' || !/^session-[0-9a-f-]{36}$/iu.test(input.sessionId)) throw new Error('Invalid session ID')
           const listed = await ctx.sessionController.list({}, new AbortController().signal)
           if (!listed.items.some(item => item.sessionId === input.sessionId && item.cwd === workspaceDir && item.origin !== 'subagent')) throw new Error('Session is not in the active workspace')
