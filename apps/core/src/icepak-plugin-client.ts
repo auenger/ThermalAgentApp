@@ -94,6 +94,8 @@ export class IcepakPluginClient {
     return this.call('probe_environment') as Promise<IcepakEnvironmentProbe>
   }
 
+  runtimeConfiguration(): { python: string; pluginRoot: string } { return { python: this.python, pluginRoot: this.pluginRoot } }
+
   async inspectCad(input: CadPluginInput, options: PluginCallOptions = {}): Promise<ModelPluginResult> {
     return this.call('inspect_cad', input, { timeoutMs: 20 * 60_000, ...options }) as Promise<ModelPluginResult>
   }

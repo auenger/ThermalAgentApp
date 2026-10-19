@@ -23,6 +23,9 @@ def main() -> None:
         try:
             request = json.loads(raw_line)
             request_id = str(request.get("id", ""))
+            if request.get("method") == "health":
+                print(json.dumps(_response(request_id, result={"pluginId": "report-reportlab", "pluginVersion": "0.1.0", "protocolVersion": "1.0.0", "status": "ok"})), flush=True)
+                continue
             if request.get("method") != "render_task_report":
                 raise ValueError(f"unsupported method: {request.get('method')}")
             params = request.get("params")

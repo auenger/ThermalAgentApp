@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "hostApi": 1,
+  "id": "report-reportlab",
+  "version": "0.1.0",
+  "kind": "report",
+  "entry": { "root": "python", "module": "thermal_report_plugin" },
+  "capabilities": ["health", "render-task-report"],
+  "permissions": ["report-write"],
+  "compatibility": { "platforms": ["win32", "darwin", "linux"], "architectures": ["x64", "arm64"], "versions": {} }
+}

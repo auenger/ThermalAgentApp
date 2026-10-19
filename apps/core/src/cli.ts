@@ -10,6 +10,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('THERM
 const home = resolve(process.env.THERMAL_AGENT_HOME ?? '.thermal-agent')
 
 const app = createCoreApp({ home })
+app.plugins.start()
 app.server.listen(port, host, () => {
   console.log(`thermal-agent-core listening on http://${host}:${port}`)
 })

@@ -8,7 +8,8 @@ import { ArtifactStore } from '@thermal-agent/artifact-store'
 import { parseCreateSkillRunInput, parseCreateTaskInput, parseExpectedVersionInput, parseIcepakCandidateInput, parseIcepakProjectOperationInput, parseOptimizationSkillInput, parseUpdateOptimizationSkillInput, parseSkillReviewInput, parseTaskApprovalDecisionInput, parseTaskTransitionInput } from '@thermal-agent/contracts'
 import { createTask, InvalidTaskTransitionError } from '@thermal-agent/domain'
 import { LocalDatabase, PeerConflictError, SkillConflictError, SkillNotFoundError, TaskApprovalConflictError, TaskNotFoundError, VersionConflictError } from '@thermal-agent/sqlite-store'
-import { IcepakPluginClient, type IcepakPluginPort } from './icepak-plugin-client.js'
+import { type IcepakPluginPort } from './icepak-plugin-client.js'
+import { PluginHost } from './plugin-host.js'
 import { ParameterPlanManager } from './parameter-plans.js'
 import { ModelPreparationManager, ModelPreparationConflict } from './model-preparations.js'
 import { taskModelFiles } from './task-model-files.js'
@@ -19,7 +20,7 @@ import { DshRuntime } from './dsh-runtime.js'
 import { SkillPublisher } from './skill-publisher.js'
 import { CoreEventStream } from './event-stream.js'
 import { LanPublisher } from './lan-publisher.js'
-import { ReportClient, type ReportPort } from './report-client.js'
+import { type ReportPort } from './report-client.js'
 import { ReportConflictError, ReportManager } from './report-manager.js'
 import { NodeIdentity } from './node-identity.js'
 import { PeerDiscovery, type PeerDiscoveryOptions } from './peer-discovery.js'
@@ -44,6 +45,7 @@ export interface CoreAppOptions {
   home: string
   sampleProjectPath?: string
   pluginClient?: IcepakPluginPort
+  pluginHost?: PluginHost
   webRoot?: string
   startAgentRuntime?: boolean
   reportClient?: ReportPort
@@ -56,6 +58,7 @@ export interface CoreApp {
   database: LocalDatabase
   artifacts: ArtifactStore
   nodeIdentity: NodeIdentity
+  plugins: PluginHost
   close(): Promise<void>
 }
 
@@ -85,7 +88,8 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const taskWorkspace = new TaskWorkspace(home)
   const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
-  const pluginClient = lockIcepakOperations(options.pluginClient ?? new IcepakPluginClient(), modelStore)
+  const plugins = options.pluginHost ?? new PluginHost(join(home, 'plugins'))
+  const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
     effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts)
@@ -134,10 +138,10 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const autoDispatcher = new PeerAutoDispatcher(nodeIdentity.nodeId, database, discovery, peerDispatcher)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient, modelStore)
   const parameterPlans = new ParameterPlanManager(home, database, artifacts, pluginClient, executions)
-  const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId)
+  const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId, plugins)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   const eventStream = new CoreEventStream(database)
-  const reports = new ReportManager(home, database, artifacts, options.reportClient ?? new ReportClient())
+  const reports = new ReportManager(home, database, artifacts, options.reportClient ?? plugins.report)
   remoteInput.start()
   if (options.startRemoteSolve !== false) remoteSolve.start()
   autoDispatcher.start()
@@ -146,7 +150,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, parameterPlans, modelPreparations, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, parameterPlans, modelPreparations, plugins, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -156,6 +160,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     database,
     artifacts,
     nodeIdentity,
+    plugins,
     async close() {
       clearInterval(leaseSweep)
       await remoteInput.close()
@@ -173,6 +178,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       await parameterPlans.close()
       await executions.close()
       await agentRuntime.close()
+      await plugins.close()
       modelStore.close()
       database.close()
     },
@@ -191,6 +197,7 @@ async function route(
   executions: IcepakExecutionManager,
   parameterPlans: ParameterPlanManager,
   modelPreparations: ModelPreparationManager,
+  plugins: PluginHost,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
   reports: ReportManager,
@@ -210,6 +217,27 @@ async function route(
   nodeIdentity: NodeIdentity,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  if (url.pathname === '/api/plugin-runtime' || url.pathname.startsWith('/api/plugin-runtime/')) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', '插件管理仅限本机 App')
+    if (request.method === 'GET' && url.pathname === '/api/plugin-runtime') {
+      writeJson(response, 200, plugins.status()); return
+    }
+    if (request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '请使用 POST 更新插件设置')
+    assertLocalWriteOrigin(request)
+    const body = await readJsonBody(request, 2048)
+    if (!isObject(body)) throw new RequestError(400, 'INVALID_SETTING', '插件设置必须是对象')
+    if (url.pathname === '/api/plugin-runtime/policy') {
+      if (typeof body.automaticUpdates !== 'boolean') throw new RequestError(400, 'INVALID_SETTING', 'automaticUpdates 必须是布尔值')
+      plugins.setAutomaticUpdates(body.automaticUpdates)
+    } else if (url.pathname === '/api/plugin-runtime/reconcile') {
+      await plugins.reconcile()
+    } else if (url.pathname === '/api/plugin-runtime/rollback' || url.pathname === '/api/plugin-runtime/resume') {
+      if (typeof body.id !== 'string') throw new RequestError(400, 'INVALID_SETTING', '插件 ID 不能为空')
+      if (url.pathname.endsWith('/rollback')) await plugins.rollback(body.id)
+      else plugins.resume(body.id)
+    } else throw new RequestError(404, 'NOT_FOUND', '未知插件操作')
+    writeJson(response, 200, plugins.status()); return
+  }
   if (request.method === 'GET' && url.pathname === '/api/health') {
     writeJson(response, 200, { status: 'ok', service: 'thermal-agent-core', version: '0.1.0' })
     return

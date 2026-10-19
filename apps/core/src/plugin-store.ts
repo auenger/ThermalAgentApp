@@ -17,7 +17,7 @@ export interface PluginValidation {
   checks: Array<{ name: string; passed: boolean; detail: string }>
   validatedAt: string
 }
-interface PluginActivation { current: string; previous?: string }
+export interface PluginActivation { current: string; previous?: string }
 interface PluginState {
   schemaVersion: 1
   revisions: Record<string, PluginRevision>

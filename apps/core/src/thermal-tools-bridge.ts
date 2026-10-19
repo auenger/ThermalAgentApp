@@ -12,6 +12,7 @@ import type { DshBridgeAddress } from './dsh-host.js'
 import { recommendOptimizationSkills } from './optimization-recommender.js'
 import { CAD_EXTENSIONS } from './model-capabilities.js'
 import { TaskWorkspace } from './task-workspace.js'
+import type { PluginHost } from './plugin-host.js'
 
 export class ThermalToolsBridge {
   private server?: Server
@@ -40,6 +41,7 @@ export class ThermalToolsBridge {
     private readonly database: LocalDatabase,
     private readonly icepak: IcepakPluginPort,
     private readonly nodeId: string,
+    private readonly plugins?: PluginHost,
   ) {
     this.artifacts = new ArtifactStore(join(home, 'artifacts'))
     this.workspace = new TaskWorkspace(home)
@@ -83,6 +85,15 @@ export class ThermalToolsBridge {
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if ((request.method === 'GET' && url.pathname === '/v1/plugins/status') ||
+      (request.method === 'POST' && url.pathname === '/v1/plugins/reconcile')) {
+      if (!this.plugins) throw new Error('Managed plugin host is unavailable')
+      const status = request.method === 'POST' ? await this.plugins.reconcile() : this.plugins.status()
+      writeJson(response, 200, { automaticUpdates: status.automaticUpdates, held: status.held, runtimes: status.runtimes,
+        active: status.active, revisions: status.revisions.map(revision => ({ digest: revision.digest, manifest: revision.manifest })),
+        validations: status.validations, scope: 'Trusted installed packages only; no engineering solve or new code execution authorization' })
+      return
+    }
     if (request.method === 'POST' && url.pathname === '/v1/dsh-control/register') {
       const input = await readJson(request, 256)
       if (!isObject(input) || !Number.isInteger(input.port) || Number(input.port) < 1 || Number(input.port) > 65535) throw new Error('Invalid DSH control port')

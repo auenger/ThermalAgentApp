@@ -69,11 +69,13 @@ try {
     'thermal_create_task',
     'thermal_probe_icepak',
     'thermal_inspect_project',
+    'thermal_plugin_status',
+    'thermal_reconcile_plugins',
     'read',
     'write',
   ]) assert.ok(names.includes(expected), `missing DSH tool: ${expected}`)
   assert.ok(!names.includes('thermal_start_baseline'), 'DSH must not bypass the human confirmation gate')
-  process.stdout.write(`Thermal Agent DSH preset exposes ${names.length} tools with nine controlled thermal tools.\n`)
+  process.stdout.write(`Thermal Agent DSH preset exposes ${names.length} tools with ${names.filter(name => name.startsWith('thermal_')).length} controlled thermal tools.\n`)
 } finally {
   await handle?.dispose()
   await ctx?.fiber.dispose()

@@ -4,6 +4,7 @@ import type { LocalDatabase } from '@thermal-agent/sqlite-store'
 import { DshHost, type DshStatus } from './dsh-host.js'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { ThermalToolsBridge } from './thermal-tools-bridge.js'
+import type { PluginHost } from './plugin-host.js'
 
 export class DshRuntime {
   private readonly bridge: ThermalToolsBridge
@@ -16,8 +17,9 @@ export class DshRuntime {
     database: LocalDatabase,
     icepak: IcepakPluginPort,
     nodeId: string,
+    plugins?: PluginHost,
   ) {
-    this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId)
+    this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId, plugins)
   }
 
   getStatus(): DshStatus { return { ...this.status } }

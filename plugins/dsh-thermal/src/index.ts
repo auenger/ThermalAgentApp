@@ -86,6 +86,18 @@ function assertAppWorkspace(exec: { agent?: { session: { header: { cwd?: string 
 }
 
 export function apply(ctx: Context): void {
+  ctx.tools.register(defineTool({
+    name: 'thermal_plugin_status',
+    description: 'Read local managed plugin versions, environment fingerprints, verification evidence and update diagnostics. Runtime readiness does not prove AEDT engineering compatibility or solver license availability.',
+    parameters: {}, output: textOutput(), isConcurrencySafe: () => true,
+    async execute(_args, exec) { return JSON.stringify(await bridgeRequest('/v1/plugins/status', exec.signal)) },
+  }))
+  ctx.tools.register(defineTool({
+    name: 'thermal_reconcile_plugins',
+    description: 'Inspect the local Python environment and reconcile already trusted installed plugins under the user’s saved update policy. Defers switching while engineering work is active. Does not install untrusted code, change policy or run an engineering solve.',
+    parameters: {}, output: textOutput(), isConcurrencySafe: () => false,
+    async execute(_args, exec) { return JSON.stringify(await bridgeRequest('/v1/plugins/reconcile', exec.signal, {})) },
+  }))
   ctx.systemPrompt.section({
     name: 'thermal-agent:engineering-boundary',
     order: 120,

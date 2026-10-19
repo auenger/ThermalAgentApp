@@ -57,6 +57,9 @@ export class ReportClient implements ReportPort {
     return result as ReportRenderResult
   }
 
+  health(): Promise<unknown> { return this.call('health', {}) }
+  runtimeConfiguration(): { python: string; pluginRoot: string } { return { python: this.python, pluginRoot: this.pluginRoot } }
+
   private async call(method: string, params: object): Promise<unknown> {
     const runtime = this.acquireRuntime?.()
     try { return await this.callWithRuntime(method, params, runtime) }
