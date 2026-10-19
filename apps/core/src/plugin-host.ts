@@ -234,7 +234,9 @@ export class PluginHost {
       if (!runtime.snapshot) throw new Error('Plugin runtime is busy before initialization')
       return
     }
-    if (!force && runtime.snapshot && !runtime.error && Date.now() - runtime.inspectedAt < this.refreshMs) return
+    // A deferred cycle may have sampled new facts without validating the retained version.
+    // Never cache it as ready: the next call must reconcile before acquiring a lease.
+    if (!force && runtime.snapshot && !runtime.error && runtime.result?.status !== 'busy' && Date.now() - runtime.inspectedAt < this.refreshMs) return
     const pending = this.refresh(kind)
     runtime.pending = pending
     try { await pending }

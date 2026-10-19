@@ -6,10 +6,13 @@ interface PluginStatus {
   held: Record<string, string>
   active: Record<string, { current: string; previous?: string }>
   revisions: Array<{ digest: string; manifest: { id: string; version: string } }>
+  validations: Array<{ packageDigest: string; environmentDigest: string; passed: boolean; validatedAt: string;
+    checks: Array<{ name: string; passed: boolean; detail: string }> }>
   releases: { releases: Array<{ digest: string; publisherId: string; id: string }>; errors: string[] }
   updates: { phase: string; checkedAt: string | null; downloaded: number; cached: number; error?: string;
     sources: Array<{ id: string; downloaded: number; cached: number; errors: string[] }> }
   runtimes: Array<{ id: string; phase: string; busy: boolean; error?: string; inspectedAt: number | null;
+    engineeringValidation?: { configured: boolean; diagnostic?: string; supportedCapabilities: string[] };
     environment?: { platform: string; architecture: string; versions: Record<string, string> };
     result?: { status: string; diagnostics: string[] } }>
 }
@@ -73,12 +76,15 @@ export function PluginSettings() {
       if (file.size > 48 * 1024 * 1024) { setError('插件包超过 48 MiB'); return }
       void file.text().then(text => action('install', JSON.parse(text))).catch(() => setError('无法读取插件包 JSON'))
     }} /></label>
-    <p>导入后点击检查进行验证。发布者须由本机管理员预先配置；仿真插件候选还需工程兼容性验证。</p>
+    <p>发布者须由本机管理员预先配置。导入后检查可触发已授权的工程样例求解验证；通过对应验证后才会启用候选。</p>
     {status?.releases.releases.map(release => <p key={release.digest}>受信发布者：{release.publisherId} · {release.id} · {status.active[release.id]?.current === release.digest ? '当前使用' : '已登记候选'}</p>)}
     {status?.releases.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}
     {status?.runtimes.map(runtime => {
       const active = status.active[runtime.id]
       const revision = status.revisions.find(item => item.digest === active?.current)
+      const digests = new Set(status.revisions.filter(item => item.manifest.id === runtime.id).map(item => item.digest))
+      const validations = (status.validations ?? []).filter(item => digests.has(item.packageDigest))
+        .sort((a, b) => b.validatedAt.localeCompare(a.validatedAt)).slice(0, 10)
       return <div key={runtime.id} className="task-detail-section">
         <h3>{names[runtime.id] ?? runtime.id} {revision ? `v${revision.manifest.version}` : ''}</h3>
         <p>{runtime.busy ? '正在执行，等待空闲后更新' : phases[runtime.phase] ?? runtime.phase}{status.held[runtime.id] ? ' · 已保持回退版本' : ''}</p>
@@ -86,7 +92,25 @@ export function PluginSettings() {
           {runtime.environment.versions.pyaedt && ` · PyAEDT ${runtime.environment.versions.pyaedt === 'missing' ? '未安装' : runtime.environment.versions.pyaedt}`}</p>}
         {runtime.inspectedAt && <p>最近检查：{new Date(runtime.inspectedAt).toLocaleString()}</p>}
         {runtime.error && <p role="alert">{runtime.error}</p>}
+        {runtime.engineeringValidation && <p>{runtime.engineeringValidation.configured
+          ? '工程升级验证已配置：检查参数发现、保存后读回及样例求解；不覆盖 CAD 导入和风扇变更。'
+          : '工程升级验证未配置或不可用：新的仿真候选暂不自动启用。'}</p>}
+        {runtime.engineeringValidation?.diagnostic && <p role="alert">{runtime.engineeringValidation.diagnostic}</p>}
         {runtime.result?.diagnostics.map((detail, index) => <p key={index}>{detail}</p>)}
+        {validations.length > 0 && <details>
+          <summary>最近验证记录（{validations.length}）</summary>
+          <p>记录仅适用于当时的插件与环境；历史通过不表示当前仍可用，也不代表任务工程通过。</p>
+          {validations.map(validation => {
+            const version = status.revisions.find(item => item.digest === validation.packageDigest)?.manifest.version
+            return <details key={`${validation.packageDigest}:${validation.environmentDigest}`}>
+              <summary>v{version} · {validation.passed ? '验证通过' : '验证失败'} · {new Date(validation.validatedAt).toLocaleString()}</summary>
+              <div style={{ overflowWrap: 'anywhere' }}>
+                <p>插件摘要：{validation.packageDigest}<br />环境摘要：{validation.environmentDigest}</p>
+                <ul>{validation.checks.map((check, index) => <li key={index}>{check.passed ? '通过' : '失败'} · {check.name}：{check.detail}</li>)}</ul>
+              </div>
+            </details>
+          })}
+        </details>}
         <div className="model-file-actions">
           <Button disabled={busy || runtime.busy || !active?.previous} onClick={() => void action('rollback', { id: runtime.id })}>回退并保持上一版本</Button>
           {status.held[runtime.id] && <Button disabled={busy} onClick={() => void action('resume', { id: runtime.id })}>恢复版本自动选择</Button>}
