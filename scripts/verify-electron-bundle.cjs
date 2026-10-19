@@ -1,4 +1,4 @@
-const { existsSync, readFileSync } = require('node:fs')
+const { existsSync, readFileSync, readdirSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const { join } = require('node:path')
@@ -25,6 +25,11 @@ function verifyBundle(appOutDir) {
     'Electron application': join(resources, 'app.asar'),
     'bundled Node.js': join(resources, 'node', 'node.exe'),
     'bundled Python': join(resources, 'python', 'python.exe'),
+    'Python venv': join(resources, 'python', 'Lib', 'venv', '__main__.py'),
+    'Python ensurepip': join(resources, 'python', 'Lib', 'ensurepip', '__main__.py'),
+    'installed runtime acceptance': join(resources, 'runtime-checks', 'accept-installed-runtime.mjs'),
+    'installed Python verifier': join(resources, 'runtime-checks', 'verify-windows-runtime.mjs'),
+    'Windows isolation preflight': join(resources, 'runtime-checks', 'probe-windows-plugin-isolation.mjs'),
     'DSH CLI': join(unpacked, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     'DSH package': join(unpacked, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
     'Windows node-pty': join(unpacked, 'node_modules', 'node-pty', 'prebuilds', 'win32-x64', 'conpty.node'),
@@ -56,6 +61,8 @@ function verifyBundle(appOutDir) {
   }
   const missing = Object.entries(required).filter(([, path]) => !existsSync(path)).map(([name]) => name)
   if (missing.length) throw new Error(`Packaged app is missing required resources: ${missing.join(', ')}`)
+  const pipWheels = join(resources, 'python', 'Lib', 'ensurepip', '_bundled')
+  if (!existsSync(pipWheels) || !readdirSync(pipWheels).some(name => /^pip-[\w.]+-py3-none-any\.whl$/u.test(name))) throw new Error('Packaged Python is missing the offline ensurepip wheel')
   const metadata = JSON.parse(readFileSync(required['CAD reference metadata'], 'utf8'))
   const actual = createHash('sha256').update(readFileSync(required['CAD reference STEP'])).digest('hex')
   if (metadata.sha256 !== actual || metadata.cadKernelRoundtrip?.passed !== true) throw new Error('Packaged CAD sample hash or geometry roundtrip metadata is invalid')

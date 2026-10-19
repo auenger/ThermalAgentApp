@@ -1,5 +1,9 @@
 # Windows 安装包构建与验收
 
+## 2026-10-19 第二轮自适应试包
+
+最新输出目录为 `release-cross/adaptive-repair-20261019-r2/`。包含首次启动故障、业务兼容性错误的模型修复入口，以及 `resources/runtime-checks/` 内的安装后运行时验收工具和 Windows 隔离预检工具。使用方法见 [手动验收清单](WINDOWS_ADAPTIVE_REPAIR_ACCEPTANCE.md)，提交、大小和 SHA256 以目录中的构建证据为准。`afterPack` 现在还检查这些工具、venv/ensurepip 模块及离线 pip wheel 入包；实际 Windows 执行仍由安装后工具检验。
+
 ## 2026-10-19 自适应插件手动验收包
 
 本轮源码 `b6d3cee`（`feat/plugin-adaptive-repair`）的独立输出目录为 `release-cross/adaptive-repair-b6d3cee/`，保留之前的试包。安装包、SHA256 与构建证据放在同一目录；操作步骤和能力边界见 [自适应插件验收清单](WINDOWS_ADAPTIVE_REPAIR_ACCEPTANCE.md)。本轮将旧精简 Python 替换为官方 NuGet CPython 3.12.10 x64，保留原有第三方依赖并补齐 venv、ensurepip 和离线 pip wheel；Windows 原生导入与环境创建仍须实机确认。

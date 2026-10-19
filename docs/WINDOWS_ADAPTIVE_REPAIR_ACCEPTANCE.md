@@ -1,6 +1,6 @@
 # Windows 自适应插件试包验收
 
-本轮应用源码：`b6d3cee2a9abf4182f78a8f884b290f6a97dcedc`，分支 `feat/plugin-adaptive-repair`。安装包位于 `release-cross/adaptive-repair-b6d3cee/Thermal-Agent-0.1.0-Windows-x64.exe`；以同目录的 `build-evidence.json` 和 `.exe.sha256` 核对交付身份。版本号仍为 0.1.0，请勿仅凭文件名识别旧包。
+最新试包位于 `release-cross/adaptive-repair-20261019-r2/Thermal-Agent-0.1.0-Windows-x64.exe`，分支 `feat/plugin-adaptive-repair`；以同目录 `build-evidence.json` 的 `sourceCommit` 和 `.exe.sha256` 核对交付身份。包含 `14b038a` 首次启动故障修复入口、`e225563` 业务兼容性故障入口及安装后验收工具。此前 `adaptive-repair-b6d3cee` 目录的试包保留。版本号仍为 0.1.0，请勿仅凭文件名识别新旧包。
 
 这是 macOS 交叉构建的 Windows x64 手动验收包，尚未完成 Windows 原生运行、真实 AEDT 启动及求解验收。应用身份沿用 Thermal Agent，可能使用已有安装的数据目录；CAD Preview 的独立数据目录不自动迁移。
 
@@ -9,7 +9,7 @@
 - 已实现：宿主插件管理、兼容版本选择、验证记录、回退机制、受管依赖环境重建、限定故障后的持久化 DSH 修复任务，以及 AEDT 标准安装目录的进程启动路径自动适配。
 - 修复任务默认关闭。开启后使用已配置模型的额度；每个插件版本与环境组合自动请求一次，五分钟后发起取消。生成的源码仅登记为候选。
 - **尚未接通：模型生成候选的隔离运行验证与自动激活。** 候选出现不代表故障已经修复，当前包不能验收“任意问题自动改代码并生效”的完整目标。
-- 目前自动模型修复要求活动的受信插件存在对应环境下的宿主失败记录；普通业务错误、许可证不足、参数不合法不保证触发任务。不要人为损坏生产插件来测试。
+- 首次启动尚未激活的受信插件验证失败也可触发修复；已激活插件返回导入、属性或类型错误时，设置页可查看业务兼容性故障。它们是错误线索而非已确认根因，不会自动重试原业务。许可证不足、参数不合法等普通错误不保证触发任务。不要人为损坏生产插件来测试。
 
 ## 建议手动验证顺序
 
@@ -25,7 +25,26 @@
 
 路径适配支持 `Program Files/AnsysEM/vnnn` 与 `Program Files/ANSYS Inc/vnnn/AnsysEM`，包括主程序在 `Win64` 子目录的情况。同版本多个可选目录时应报告歧义。自定义安装路径、学生版、所有注册表与 AWP_ROOT 路径未纳入完整自动修复范围。不需要为了测试去改系统环境变量。
 
-## 内置 Python 独立环境检查（可选，建议执行）
+## 安装后的运行时验收（建议执行）
+
+无需克隆仓库或安装开发工具。在 PowerShell 将首行改为实际安装目录，再运行随包工具：
+
+```powershell
+$resources = 'C:\实际安装目录\resources'
+& "$resources\node\node.exe" "$resources\runtime-checks\accept-installed-runtime.mjs" --output "$env:USERPROFILE\Desktop\thermal-runtime-report.json"
+```
+
+报告逐项检查包内 Node 版本、DSH CLI 启动、Python 依赖导入来源、真实独立环境创建及离线 pip 可用性。退出码 0 表示本次检查通过，1 表示失败，2 表示平台不支持；请保留桌面 JSON。运行途中会写入 `running` 状态，只有最后 `passed` 才表示检查结束通过。工具不调用模型、不安装网络依赖、不启动 AEDT，也不验证候选或修改升级策略。
+
+若当前 Windows 支持 Sandbox CLI，可另外执行固定边界预检。`--wsb` 指向已安装的真实可执行文件；不启用系统功能、不自动提权：
+
+```powershell
+& "$resources\node\node.exe" "$resources\runtime-checks\probe-windows-plugin-isolation.mjs" --wsb 'C:\实际路径\wsb.exe' --output "$env:USERPROFILE\Desktop\thermal-isolation-report.json"
+```
+
+预检会创建并停止自己的一次性 Sandbox；不映射 App 数据或工程。完整适用条件和结果边界见 [隔离预检说明](WINDOWS_PLUGIN_ISOLATION_PREFLIGHT.md)。这份报告通过也不能自动启用任何修复候选。
+
+## 内置 Python 独立环境检查（备用手动命令）
 
 旧试包使用精简 Python，缺少 `venv/ensurepip`。本轮更换为官方 NuGet 的同版本 CPython 3.12.10 x64，保留既有 PyAEDT、ReportLab、pypdf 依赖，补齐标准库、venv 启动器与离线 pip wheel。其来源与摘要见构建记录。[Python 官方 Windows 文档](https://docs.python.org/3.12/using/windows.html#the-nuget-org-packages)介绍了该分发渠道。
 

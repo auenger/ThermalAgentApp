@@ -81,6 +81,10 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   const dshPlugin = paths.dshPlugin
   const icepakMain = join(paths.icepakPluginRoot, 'thermal_icepak_plugin', '__main__.py')
   const reportMain = join(paths.reportPluginRoot, 'thermal_report_plugin', '__main__.py')
+  const acceptanceFiles = [
+    ...['accept-installed-runtime.mjs', 'verify-windows-runtime.mjs', 'probe-windows-plugin-isolation.mjs'].map(name => join(resources, 'runtime-checks', name)),
+    join(resources, 'python', 'Lib', 'venv', '__main__.py'), join(resources, 'python', 'Lib', 'ensurepip', '__main__.py'),
+  ]
   const nativeModules = [
     join(unpacked, 'node_modules', 'node-pty', 'prebuilds', 'win32-x64', 'conpty.node'),
     join(unpacked, 'node_modules', '@img', 'sharp-win32-x64', 'lib', 'sharp-win32-x64-0.35.4.node'),
@@ -92,7 +96,7 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   const runtimePackages = Object.keys(manifest.dependencies)
     .filter(name => name.startsWith('@deepseek-ai/'))
     .map(name => join(unpacked, 'node_modules', name, 'package.json'))
-  for (const path of [python, dshPlugin, icepakMain, reportMain, paths.sampleProjectPath, paths.windowIconPath, paths.trayIconPath, ...nativeModules, ...runtimePackages]) {
+  for (const path of [python, dshPlugin, icepakMain, reportMain, paths.sampleProjectPath, paths.windowIconPath, paths.trayIconPath, ...nativeModules, ...runtimePackages, ...acceptanceFiles]) {
     await mkdir(join(path, '..'), { recursive: true })
     await writeFile(path, '')
   }
@@ -120,6 +124,9 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   const archivedWeb = join(archiveInput, 'apps', 'web', 'dist')
   await cp(resolve('apps/web/dist'), archivedWeb, { recursive: true })
   await createPackage(archiveInput, join(resources, 'app.asar'))
+  assert.throws(() => verifyBundle(root), /offline ensurepip wheel/u)
+  const wheel = join(resources, 'python', 'Lib', 'ensurepip', '_bundled', 'pip-25.0.1-py3-none-any.whl')
+  await mkdir(join(wheel, '..'), { recursive: true }); await writeFile(wheel, 'fixture wheel; static presence check only')
   assert.doesNotThrow(() => verifyBundle(root))
   const wasm = (await readdir(join(archivedWeb, 'assets'))).find(name => name.endsWith('.wasm'))
   await rm(join(archivedWeb, 'assets', wasm))

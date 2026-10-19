@@ -18,6 +18,12 @@ files:
   - plugins/report-reportlab/python/**
   - node_modules/**
 extraResources:
+  - from: scripts
+    to: runtime-checks
+    filter:
+      - accept-installed-runtime.mjs
+      - verify-windows-runtime.mjs
+      - probe-windows-plugin-isolation.mjs
   - from: assets/cad
     to: cad-samples
   - from: scripts/accept-cad-model.mjs
