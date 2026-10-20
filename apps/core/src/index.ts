@@ -33,3 +33,5 @@ export { lockIcepakOperations, IcepakOperationBusyError } from './icepak-operati
 export { PluginStore, pluginEnvironmentDigest } from './plugin-store.js'
 export { PluginAdaptationController } from './plugin-adaptation.js'
 export { managedPythonRuntime } from './plugin-python-runtime.js'
+export { DynamicScriptLibrary, parseScriptDefinition, resolveScriptParameters } from './dynamic-script-library.js'
+export { DynamicScriptManager } from './dynamic-script-manager.js'
