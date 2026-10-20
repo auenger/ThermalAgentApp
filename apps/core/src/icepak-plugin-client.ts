@@ -12,6 +12,8 @@ import type {
   ModelPluginInput,
   ModelPluginResult,
   PluginExecutionIdentity,
+  DynamicScriptInput,
+  DynamicScriptResult,
 } from '@thermal-agent/contracts'
 
 export interface IcepakPluginClientOptions {
@@ -44,6 +46,7 @@ export interface PluginCallOptions {
 }
 
 export interface IcepakPluginPort {
+  executeScript?(input: DynamicScriptInput, options?: PluginCallOptions): Promise<DynamicScriptResult>
   /** Warm managed runtime selection before acquiring the shared engineering-process gate. */
   prepareRuntime?(): Promise<void>
   pinRuntime?(expected?: PluginExecutionIdentity): Promise<PinnedIcepakPlugin>
@@ -158,6 +161,10 @@ export class IcepakPluginClient {
     return this.call('fan_solve', input, { timeoutMs: 4 * 60 * 60_000, ...options }) as Promise<IcepakProjectOperationResult>
   }
 
+  async executeScript(input: DynamicScriptInput, options: PluginCallOptions = {}): Promise<DynamicScriptResult> {
+    return this.call('execute_script', input, { timeoutMs: 20 * 60_000, ...options }) as Promise<DynamicScriptResult>
+  }
+
   async call(method: string, params: object = {}, options: PluginCallOptions = {}): Promise<unknown> {
     const runtime = this.acquireRuntime?.()
     try {
@@ -187,6 +194,7 @@ export class IcepakPluginClient {
 
   private async callWithRuntime(method: string, params: object, options: PluginCallOptions, runtime?: PythonPluginLease): Promise<unknown> {
     const capabilities: Record<string, string[]> = {
+      execute_script: ['dynamic_script'],
       probe_environment: ['environment_probe'], probe_launchability: ['environment_probe'],
       inspect_cad: ['cad_inspect'], prepare_model: ['model_prepare'], validate_model: ['model_validate'],
       inspect_project: ['project_inspect'], check_changes: ['parameter_check'],

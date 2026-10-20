@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "hostApi": 1,
   "id": "icepak-pyaedt",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "kind": "icepak",
   "entry": { "root": "python", "module": "thermal_icepak_plugin" },
-  "capabilities": ["environment_probe", "health", "cad_inspect", "model_prepare", "model_validate", "project_inspect", "parameter_check", "baseline_solve", "fan_solve"],
+  "capabilities": ["environment_probe", "health", "cad_inspect", "model_prepare", "model_validate", "project_inspect", "parameter_check", "baseline_solve", "fan_solve", "dynamic_script"],
   "permissions": ["engineering-copy-write", "aedt-launch"],
   "compatibility": { "platforms": ["win32", "darwin", "linux"], "architectures": ["x64", "arm64"], "versions": {} }
 }

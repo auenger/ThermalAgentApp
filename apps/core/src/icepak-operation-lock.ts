@@ -24,7 +24,7 @@ export async function withIcepakOperation<T>(store: ModelPreparationStore, metho
 
 /** Wrap once at Core creation, so every local/remote/Agent consumer shares this gate. */
 export function lockIcepakOperations(port: IcepakPluginPort, store: ModelPreparationStore): IcepakPluginPort {
-  const protectedMethods = new Set(['inspectCad', 'prepareModel', 'validateModel', 'probeLaunchability', 'inspectProject', 'checkChanges', 'fanCheck', 'solveProject', 'fanSolve'])
+  const protectedMethods = new Set(['executeScript', 'inspectCad', 'prepareModel', 'validateModel', 'probeLaunchability', 'inspectProject', 'checkChanges', 'fanCheck', 'solveProject', 'fanSolve'])
   return new Proxy(port, {
     get(target, key) {
       const value = Reflect.get(target, key)

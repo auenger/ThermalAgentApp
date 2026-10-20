@@ -1,4 +1,5 @@
 export * from './parameters.js'
+export * from './dynamic-scripts.js'
 export * from './plugins.js'
 export * from './model-preparation.js'
 import type { IcepakEditableParameter, IcepakParameterChange, IcepakActionResult } from './parameters.js'

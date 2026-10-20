@@ -15,11 +15,11 @@ test('one persisted gate covers CAD, existing project inspection, parameter edit
   t.after(async () => { store.close(); database.close(); await rm(root, { recursive: true, force: true }) })
   let finish
   const port = lockIcepakOperations({ inspectCad: () => new Promise(resolve => { finish = resolve }),
-    inspectProject: async () => ({ ok: true }), checkChanges: async () => ({ ok: true }), solveProject: async () => ({ ok: true }),
+    executeScript: async () => ({ ok: true }), inspectProject: async () => ({ ok: true }), checkChanges: async () => ({ ok: true }), solveProject: async () => ({ ok: true }),
     probeEnvironment: async () => ({ status: 'DETECTED' }), fanCheck: async () => ({}), fanSolve: async () => ({}) }, store)
   const active = port.inspectCad({})
   assert.equal(store.operation().method, 'inspectCad')
-  for (const method of ['inspectProject', 'checkChanges', 'solveProject', 'fanCheck', 'fanSolve']) await assert.rejects(port[method]({}), error => error.code === 'ICEPAK_BUSY')
+  for (const method of ['executeScript', 'inspectProject', 'checkChanges', 'solveProject', 'fanCheck', 'fanSolve']) await assert.rejects(port[method]({}), error => error.code === 'ICEPAK_BUSY')
   assert.equal((await port.probeEnvironment()).status, 'DETECTED')
   finish({ status: 'ok' }); await active
   assert.equal(store.operation(), null)

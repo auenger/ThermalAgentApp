@@ -123,6 +123,7 @@ test('managed clients reject undeclared engineering capabilities before executin
   await f.install('1.0.0'); await f.controller.reconcile(f.id, environment, f.policy(), f.validate)
   const client = new IcepakPluginClient({ acquireRuntime: managedPythonRuntime(f.store, f.id, 'icepak', python, () => environment) })
   await assert.rejects(client.checkChanges({}), /does not declare capability/)
+  await assert.rejects(client.executeScript({}), /does not declare capability/)
   await assert.rejects(client.prepareModel({}), /does not declare capability/)
   assert.equal(f.store.isBusy(f.id), false)
   assert.equal((await client.probeEnvironment()).pluginVersion, '1.0.0')

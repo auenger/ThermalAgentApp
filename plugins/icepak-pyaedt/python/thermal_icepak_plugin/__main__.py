@@ -14,6 +14,7 @@ from .cad import inspect_cad, ModelPreparationError
 from .model_preparation import prepare_model
 from .model_validation import validate_model
 from .managed import start_managed, finish_managed, read_managed_request
+from .dynamic_script import run_dynamic_script, DynamicScriptError
 
 
 def _success(request_id: str, result: object) -> dict[str, object]:
@@ -81,6 +82,13 @@ def handle_request(value: Any, progress: Callable[[str], None] | None = None) ->
         if not isinstance(params, dict) or (params.get("version") is not None and not isinstance(params["version"], str)):
             return _failure(request_id, "INVALID_REQUEST", "version must be a string")
         return _success(request_id, probe_launchability(params.get("version")))
+    if method == "execute_script":
+        try:
+            return _success(request_id, run_dynamic_script(value.get("params"), progress=progress))
+        except DynamicScriptError as exc:
+            return _failure(request_id, exc.code, str(exc)[:500])
+        except Exception as exc:
+            return _failure(request_id, type(exc).__name__.upper(), str(exc)[:500])
     if method in {"prepare_model", "validate_model"}:
         try:
             params = value.get("params")
@@ -137,6 +145,7 @@ def main() -> int:
     """Read requests until stdin closes and emit exactly one response per input line."""
     managed = os.environ.get("THERMAL_ICEPAK_MANAGED_ONESHOT") == "1"
     control = None
+    protocol_output = sys.stdout
     if managed:
         raw_line, control = read_managed_request(sys.stdin)
         requests = [raw_line]
@@ -152,9 +161,9 @@ def main() -> int:
             try:
                 if managed:
                     lifecycle = start_managed(int(os.environ["THERMAL_ICEPAK_PARENT_PID"]),
-                        lambda pid, created: print(json.dumps({"id": request_id, "event": "managed_process", "pid": pid, "creationTime": created}), flush=True), control)
+                        lambda pid, created: print(json.dumps({"id": request_id, "event": "managed_process", "pid": pid, "creationTime": created}), file=protocol_output, flush=True), control)
                 response = handle_request(request, progress=lambda stage: print(
-                    json.dumps({"id": request_id, "event": "progress", "stage": stage}, ensure_ascii=False), flush=True))
+                    json.dumps({"id": request_id, "event": "progress", "stage": stage}, ensure_ascii=False), file=protocol_output, flush=True))
             finally:
                 if lifecycle is not None: finish_managed(lifecycle)
         except json.JSONDecodeError:
