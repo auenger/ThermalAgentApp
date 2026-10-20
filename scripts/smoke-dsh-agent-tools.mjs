@@ -75,6 +75,8 @@ try {
     'thermal_stage_plugin_repair',
     'thermal_reconcile_plugins',
     'thermal_install_plugin_release',
+    'thermal_script_library', 'thermal_stage_script', 'thermal_script_task_context',
+    'thermal_run_script', 'thermal_script_runs', 'thermal_cancel_script',
     'read',
     'write',
   ]) assert.ok(names.includes(expected), `missing DSH tool: ${expected}`)

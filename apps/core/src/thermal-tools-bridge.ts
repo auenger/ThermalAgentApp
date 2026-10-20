@@ -1,3 +1,4 @@
+import type { DynamicScriptService } from './dynamic-script-service.js'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { realpath, stat, open } from 'node:fs/promises'
@@ -44,6 +45,7 @@ export class ThermalToolsBridge {
     private readonly icepak: IcepakPluginPort,
     private readonly nodeId: string,
     private readonly plugins?: PluginHost,
+    private readonly dynamicScripts?: DynamicScriptService,
   ) {
     this.artifacts = new ArtifactStore(join(home, 'artifacts'))
     this.workspace = new TaskWorkspace(home)
@@ -87,6 +89,14 @@ export class ThermalToolsBridge {
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/v1/dynamic-scripts' || url.pathname.startsWith('/v1/dynamic-scripts/') ||
+      /^\/v1\/tasks\/[^/]+\/(?:script-context|script-runs)(?:\/|$)/u.test(url.pathname)) {
+      if (!this.dynamicScripts) throw new Error('Dynamic script service is unavailable')
+      if (request.method !== 'GET' && request.method !== 'POST') throw new Error('Unsupported dynamic script method')
+      const result = await this.dynamicScripts.dispatch(request.method, url.pathname.slice(3), request.method === 'POST' ? await readJson(request, 256 * 1024) : undefined, url.searchParams.get('query') ?? '')
+      writeJson(response, result.status, result.body)
+      return
+    }
     if ((request.method === 'GET' && url.pathname === '/v1/plugins/status') ||
       (request.method === 'POST' && url.pathname === '/v1/plugins/reconcile')) {
       if (!this.plugins) throw new Error('Managed plugin host is unavailable')

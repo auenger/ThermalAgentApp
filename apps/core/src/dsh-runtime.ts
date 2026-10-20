@@ -1,3 +1,4 @@
+import type { DynamicScriptService } from './dynamic-script-service.js'
 import { resolve } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
@@ -30,8 +31,9 @@ export class DshRuntime {
     icepak: IcepakPluginPort,
     nodeId: string,
     private readonly plugins?: PluginHost,
+    dynamicScripts?: DynamicScriptService,
   ) {
-    this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId, plugins)
+    this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId, plugins, dynamicScripts)
   }
 
   getStatus(): DshStatus { return { ...this.status } }

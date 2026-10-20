@@ -1,3 +1,4 @@
+import { DynamicScriptWorkspace } from './DynamicScriptWorkspace'
 import { PluginSettings } from './PluginSettings'
 import { ParameterWorkspace } from './ParameterWorkspace'
 import { ModelPreparationWorkspace } from './ModelPreparationWorkspace'
@@ -575,6 +576,7 @@ function TaskDetail({ styles, taskId, task, autoDispatch, onBack, onEdit, onChan
       <div className="task-detail-main">
         <nav className="task-detail-jumps" aria-label="任务详情导航"><a href="#task-model-files">模型文件</a>{cadTask && <a href="#cad-workspace">CAD 转换与建模</a>}{showParameters && <a href="#parameter-workspace">参数修改与追溯</a>}<a href="#task-results">求解结果</a><a href="#task-timeline">推进记录</a></nav>
         <TaskModelFiles key={current.id} taskId={current.id} />
+        <DynamicScriptWorkspace key={`scripts-${current.id}`} taskId={current.id} />
         {showParameters && <ParameterWorkspace task={current} onChanged={onChanged} onOpenTask={onOpenTask} />}
         {(snapshot.modelKind === 'CAD' || Boolean(snapshot.sourceModel)) && <ModelPreparationWorkspace task={current} onChanged={onChanged} />}
         <section className="task-detail-section"><h2>需求输入</h2><div className="task-detail-fields">

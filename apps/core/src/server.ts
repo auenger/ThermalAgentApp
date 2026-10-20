@@ -1,3 +1,4 @@
+import { DynamicScriptService } from './dynamic-script-service.js'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { createReadStream, mkdirSync } from 'node:fs'
@@ -61,6 +62,7 @@ export interface CoreApp {
   artifacts: ArtifactStore
   nodeIdentity: NodeIdentity
   plugins: PluginHost
+  dynamicScripts: DynamicScriptService
   close(): Promise<void>
 }
 
@@ -95,8 +97,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const sampleProjectPath = resolve(options.sampleProjectPath ?? process.env.THERMAL_ICEPAK_SAMPLE_PROJECT ?? 'assets/icepak/Project1.aedt')
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
   plugins.attachEngineeringStore(modelStore)
-  plugins.attachRuntimeReferences(() => pluginRuntimeReferences(database, modelStore, artifacts))
   const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
+  const dynamicScripts = new DynamicScriptService(home, database, artifacts, pluginClient, nodeIdentity.nodeId, modelStore)
+  plugins.attachRuntimeReferences(async () => [...await pluginRuntimeReferences(database, modelStore, artifacts), ...dynamicScripts.library.runs().map(run => run.runtime)])
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
     effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts)
@@ -146,7 +149,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   const autoDispatcher = new PeerAutoDispatcher(nodeIdentity.nodeId, database, discovery, peerDispatcher)
   const executions = new IcepakExecutionManager(home, database, artifacts, pluginClient, modelStore)
   const parameterPlans = new ParameterPlanManager(home, database, artifacts, pluginClient, executions)
-  const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId, plugins)
+  const agentRuntime = new DshRuntime(home, database, pluginClient, nodeIdentity.nodeId, plugins, dynamicScripts)
   const skillPublisher = new SkillPublisher(join(home, 'workspace'))
   const eventStream = new CoreEventStream(database)
   const reports = new ReportManager(home, database, artifacts, options.reportClient ?? plugins.report)
@@ -158,7 +161,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
 
   let lanPublisher: LanPublisher
   const handler = (request: IncomingMessage, response: ServerResponse) => {
-    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, parameterPlans, modelPreparations, plugins, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
+    void route(request, response, database, artifacts, taskWorkspace, pluginClient, launchProbe, sampleProjectPath, executions, parameterPlans, modelPreparations, dynamicScripts, plugins, agentRuntime, skillPublisher, reports, eventStream, lanPublisher, discovery, peerAuth, peerSecure, peerArtifacts, peerLeases, remoteRuns, peerTasks, peerDispatcher, autoDispatcher, webRoot, home, nodeIdentity).catch(error => writeError(response, error))
   }
   const server = createServer(handler)
   lanPublisher = new LanPublisher(handler)
@@ -169,6 +172,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     artifacts,
     nodeIdentity,
     plugins,
+    dynamicScripts,
     async close() {
       clearInterval(leaseSweep)
       await remoteInput.close()
@@ -186,7 +190,9 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       await parameterPlans.close()
       await executions.close()
       await agentRuntime.close()
+      await dynamicScripts.manager.close()
       await plugins.close()
+      await dynamicScripts.close()
       modelStore.close()
       database.close()
     },
@@ -205,6 +211,7 @@ async function route(
   executions: IcepakExecutionManager,
   parameterPlans: ParameterPlanManager,
   modelPreparations: ModelPreparationManager,
+  dynamicScripts: DynamicScriptService,
   plugins: PluginHost,
   agentRuntime: DshRuntime,
   skillPublisher: SkillPublisher,
@@ -225,6 +232,17 @@ async function route(
   nodeIdentity: NodeIdentity,
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  if (url.pathname === '/api/dynamic-scripts' || url.pathname.startsWith('/api/dynamic-scripts/') ||
+    /^\/api\/tasks\/[^/]+\/(?:script-context|script-runs)(?:\/|$)/u.test(url.pathname)) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', '动态脚本仅限本机 App')
+    assertLocalWriteOrigin(request)
+    if (request.method !== 'GET' && request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '仅支持 GET 和 POST')
+    try {
+      const result = await dynamicScripts.dispatch(request.method, url.pathname.slice(4), request.method === 'POST' ? await readJsonBody(request, 256 * 1024) : undefined, url.searchParams.get('query') ?? '')
+      writeJson(response, result.status, result.body)
+    } catch (error) { throw new RequestError(409, 'DYNAMIC_SCRIPT_FAILED', error instanceof Error ? error.message : '动态脚本操作失败') }
+    return
+  }
   if (url.pathname === '/api/plugin-runtime' || url.pathname.startsWith('/api/plugin-runtime/')) {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', '插件管理仅限本机 App')
     if (request.method === 'GET' && url.pathname === '/api/plugin-runtime') {

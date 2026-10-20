@@ -210,3 +210,12 @@ button, input, textarea { font: inherit; }
 .cad-viewport { height: 360px; width: 100%; overflow: hidden; border: 1px solid #d7dfe5; border-radius: 8px; touch-action: none; }
 .cad-mesh-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .cad-step-viewer select { max-width: 100%; }
+
+.dynamic-script-workspace { margin: 24px 0; padding: 20px; border: 1px solid #d9e1e7; border-radius: 8px; }
+.dynamic-script-workspace > p { color: #52616d; }
+.dynamic-script-workspace pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; padding: 12px; background: #f4f6f8; }
+.dynamic-script-workspace code { overflow-wrap: anywhere; }
+.dynamic-script-workspace > button { margin-top: 16px; }
+.dynamic-script-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 16px 0; }
+.dynamic-script-run { padding: 16px 0; border-top: 1px solid #d9e1e7; }
+.dynamic-script-run > span { display: block; color: #647480; font-size: 12px; margin-top: 4px; }

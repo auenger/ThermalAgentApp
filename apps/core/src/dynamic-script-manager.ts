@@ -1,7 +1,7 @@
 import { basename, join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { DynamicScriptResult } from '@thermal-agent/contracts'
+import type { ArtifactRecord, DynamicScriptResult } from '@thermal-agent/contracts'
 import { pinIcepakPlugin, type IcepakPluginPort, type PinnedIcepakPlugin } from './icepak-plugin-client.js'
 import { DynamicScriptLibrary, resolveScriptParameters, type ScriptRun } from './dynamic-script-library.js'
 import { TaskWorkspace } from './task-workspace.js'
@@ -21,7 +21,7 @@ export class DynamicScriptManager {
   private closing = false
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>()
   constructor(home: string, private readonly library: DynamicScriptLibrary,
-    private readonly artifacts: ArtifactStore, private readonly plugin: IcepakPluginPort) {
+    private readonly artifacts: ArtifactStore, private readonly plugin: IcepakPluginPort, private readonly recordArtifact?: (artifact: ArtifactRecord) => void) {
     this.workspace = new TaskWorkspace(home)
   }
   get busy(): boolean { return this.starting || this.active.size > 0 }
@@ -105,6 +105,8 @@ export class DynamicScriptManager {
     const evidence = await this.artifacts.putBytes(Buffer.from(JSON.stringify({ schemaVersion: 1, runId: run.id,
       taskId: run.taskId, scriptId: run.scriptId, runtime: run.runtime, parameters: run.parameters,
       inputSha256: run.projectSha256, project, result })), 'dynamic-script-receipt.json', 'application/json')
+    this.recordArtifact?.(project)
+    this.recordArtifact?.(evidence)
     if (signal.aborted) throw new Error('Script run cancelled')
     this.library.finish(run.id, { status: 'SUCCEEDED', evidence: { kind: result.executionKind,
       level: 'script-reported-readback', projectSha256: project.sha256, artifactSha256: evidence.sha256 } })

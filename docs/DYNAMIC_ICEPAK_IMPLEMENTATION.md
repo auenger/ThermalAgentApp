@@ -49,7 +49,7 @@ def verify(ipk, parameters):
 
 每次运行保存源码、参数、脚本日志和 `execution.json`。报告区分 `scriptExecuted` 与 `persistedReadback`，记录脚本及工程摘要。异常记录错误类别；保存失败、读回不符或清理失败均不报告成功。硬终止时报告可能停留在 running，后续 Core 任务恢复须将其识别为中断。
 
-该入口不主动调用求解，`solve` 仅记录 `hostRequested: false, status: not-verified`。动态 Python 本身具有当前执行进程权限，可能调用其他 API；这不是 Python 沙箱，工程副本也不构成文件系统访问限制。尚未对 HTTP 或 DSH 暴露执行入口，任务授权与代码执行边界需在接入时一并实现。
+该入口不主动调用求解，`solve` 仅记录 `hostRequested: false, status: not-verified`。动态 Python 本身具有当前执行进程权限，可能调用其他 API；这不是 Python 沙箱，工程副本也不构成文件系统访问限制。HTTP、DSH 及任务入口的后续接入见第三批实现。
 
 ## 当前验证
 
@@ -69,15 +69,44 @@ def verify(ipk, parameters):
 
 新增 9 项 Node 测试覆盖重启保留、版本去重、参数校验、环境关联、终态保护、任务产物、不同参数重复调用、对象缺失、错误路径/摘要和执行中取消。成功回执过滤测试中的原生记录是合成数据，仅验证过滤规则，不代表真实 AEDT 验收。
 
-这一批尚未接入 Core 启动、HTTP、DSH 或界面；它是后续任务入口要调用的内部组件，不宣称用户已能通过 App 发起完整流程。
+第二批提供内部组件；第三批开始将其接入 App。完整仿真迭代仍需继续实现。
+
+## 第三批实现：Core、DSH 与任务界面
+
+`DynamicScriptService` 已在 Core 启动时创建，并与普通 HTTP 和带 Bearer Token 的 DSH Bridge 共用。退出时先关闭 Agent、取消动态任务，再关闭插件和脚本库。脚本运行引用的插件版本加入运行时保留清单；仅在没有活跃动态任务或待清理工程进程时，把遗留 running 记录改为 interrupted。
+
+新增本机 API：
+
+| 路径 | 用途 |
+| --- | --- |
+| `GET /api/dynamic-scripts?query=...` | 检索脚本 |
+| `POST /api/dynamic-scripts` | 保存不可变脚本定义 |
+| `GET /api/dynamic-scripts/:id` | 查看具体版本 |
+| `POST /api/dynamic-scripts/:id/disable` | 停用或恢复版本 |
+| `GET /api/tasks/:taskId/script-context` | 读取工程、AEDT 版本、计划确认状态和执行记录 |
+| `GET /api/tasks/:taskId/script-runs` | 查询任务运行记录 |
+| `POST /api/tasks/:taskId/script-runs` | 提交 scriptId、parameters 及可选 projectSha256 |
+| `POST /api/tasks/:taskId/script-runs/:runId/cancel` | 请求取消，等待终态 |
+
+上述入口限定 loopback 并检查请求 Origin。任务操作检查本机归属，执行沿用任务 `planConfirmed` 状态；输入仅限已绑定 AEDT 工程或同一任务的成功脚本产物。调用者不能传入任意工程路径、运行时身份或成功回执。输出工程和 Core 构建的执行回执会登记到产物数据库。
+
+新增 DSH 工具：`thermal_script_library`、`thermal_stage_script`、`thermal_script_task_context`、`thermal_run_script`、`thermal_script_runs`、`thermal_cancel_script`。普通助手能够检索、生成、登记和调用操作。故障修复专用预设仍保持原有三工具边界。提示词要求仅在用户授权的调整范围内运行脚本，不得通过脚本绕过求解授权；该要求并非对任意 Python 代码的操作系统级执行限制。
+
+任务页新增“可复用 Python 操作”区域，支持脚本选择、源码查看、按参数定义填写输入、选择任务工程或历史产物、执行和取消，以及查看参数、状态、错误和产物摘要。版本不匹配、缺少工程或计划未确认时不能从界面执行。脚本通过记录不显示为求解成功或热设计通过。
+
+验证记录：
+
+- TypeScript 与 Web 生产构建通过。
+- Core、DSH Runtime、脚本 API、脚本库及管理器共 27 项集成测试通过。
+- 真实 DSH 工具注册与专用修复预设限制检查通过，新增六工具可见。
+- 浏览器调用真实 Core API，在工程接口替身上复用同一脚本，以两组不同参数运行并显示持久记录；浏览器无页面异常。
+- 这些测试未调用真实 AEDT，也未调用模型供应商生成代码，不替代真实 Windows/Icepak 或模型生成流程验收。
 
 ## 接下来需要完成
 
-1. 将本地脚本库与任务管理器接入 Core 生命周期，补齐前次任务恢复与产物数据库登记。
-2. 接入任务所有权与执行授权，并显示脚本的当前验证范围及复用状态。
-3. 本机 API 与 DSH 工具：查询工程和脚本、生成并执行脚本、根据真实结果修正；沿用任务授权。
-4. 持久工程读回与求解证据整合，成功后登记可复用能力。
-5. 有界参数迭代，以及可查看每轮指标与停止原因的任务界面。
-6. 真实 Windows/Icepak 验收、跨会话复用与无需重新打包的演示记录。
+1. 将动态脚本产物接入明确授权的真实求解流程，关联求解与指标证据。
+2. 实现有界参数迭代，以及可查看每轮指标与停止原因的任务界面。
+3. 完善脚本适用性与成功证据的跨任务展示，核查版本变化及任务调整范围。
+4. 真实 Windows/Icepak 和实际模型生成流程验收、跨会话复用与无需重新打包的演示记录。
 
-当前完成底层执行入口、能力盘点、内部脚本库和任务编排，不能据此宣称 App 已完成动态脚本复用或自主仿真闭环。
+当前已接通动态脚本的 App/DSH 调用与参数复用路径，尚不能宣称自主求解迭代已完成，或已经通过真实 Icepak 验收。
