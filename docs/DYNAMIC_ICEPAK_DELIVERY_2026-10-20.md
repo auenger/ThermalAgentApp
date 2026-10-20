@@ -25,3 +25,12 @@
 - 尚未在真实 Windows 上安装、调用模型生成操作或运行真实 Icepak 求解。覆盖安装与含空格安装路径问题仍待实机确认。
 
 请按 [Windows 实机验收说明](DYNAMIC_ICEPAK_WINDOWS_ACCEPTANCE.md) 完成非 fan 操作、重启后不同参数复用、实际求解、多轮停止与取消，并保留导出记录。计划仍在推进中，本试包不代表全计划已验收。
+
+## r2 最新重打包
+
+- 更新时间：2026-10-20；构建提交：`a0df6e34a7c4286033d851397957923dbc5ac9ef`。
+- 重新执行 TypeScript/Web 构建和 NSIS 打包，279 个应用构建文件与 Python 源文件核对一致。运行代码未变化，沿用已记录的回归结果。
+- 安装包：`release-cross/dynamic-icepak-20261020-r2/Thermal-Agent-0.1.0-Windows-x64.exe`。
+- 大小：215,404,297 字节。SHA256：`86b273daaefeb7b85d7828512744b0d2b467382695a212ef7fe6d29790f77d6a`。
+- [HTML 更新报告](ADAPTIVE_EVOLUTION_UPDATE_2026-10-19.html) 已按动态 Python、脚本复用和参数迭代重新编写；桌面与手机宽度均无横向溢出。
+- Windows/Icepak 实机验收状态不变，仍待完成。
