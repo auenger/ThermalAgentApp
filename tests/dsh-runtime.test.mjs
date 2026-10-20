@@ -18,7 +18,7 @@ import { LocalDatabase } from '@thermal-agent/sqlite-store'
 function unused() { throw new Error('not used') }
 
 test('pinned DSH profile loads the Thermal Agent preset and controlled tool plugin', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-profile-'))
+  const root = await mkdtemp(join(tmpdir(), 'Thermal Agent profile '))
   t.after(() => rm(root, { recursive: true, force: true }))
   const cli = resolveDshCli()
   assert.match(cli ?? '', /@deepseek-ai[\\/]dsh[\\/]lib[\\/]bin\.js$/u)
@@ -43,7 +43,7 @@ test('DSH Host keeps only the authenticated loopback launch URL and reaps its ch
     parseDshReadyUrl('dsh web: http://127.0.0.1:4567/?token=secret (LAN: http://10.0.0.2:4567/?token=secret)\n', 4567),
     'http://127.0.0.1:4567/?token=secret',
   )
-  const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-host-'))
+  const root = await mkdtemp(join(tmpdir(), 'Thermal Agent host '))
   const workspace = join(root, 'workspace')
   const cli = join(root, 'fake-dsh.mjs')
   const plugin = join(root, 'fake-plugin.mjs')
@@ -80,7 +80,7 @@ setInterval(() => {}, 1000)
 })
 
 test('pinned DSH web Host reaches ready with its live profile', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'thermal-dsh-live-host-'))
+  const root = await mkdtemp(join(tmpdir(), 'Thermal Agent live host '))
   const plugin = resolve('plugins/dsh-thermal/dist/index.js')
   const statuses = []
   const database = new LocalDatabase(join(root, 'thermal.db'))

@@ -8,9 +8,9 @@ import { IcepakPluginClient } from '../apps/core/dist/icepak-plugin-client.js'
 import { pythonPluginArgs, pythonPluginEnv } from '../apps/core/dist/python-plugin-launch.js'
 
 test('Python plugin launcher ignores a conflicting host PYTHONPATH', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'thermal-python-plugin-'))
+  const root = await mkdtemp(join(tmpdir(), 'Thermal Agent Python '))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const bundled = join(root, 'bundled')
+  const bundled = join(root, 'bundled plugin')
   const external = join(root, 'external')
   for (const [path, marker] of [[bundled, 'bundled'], [external, 'external']]) {
     await mkdir(join(path, 'testplugin'), { recursive: true })

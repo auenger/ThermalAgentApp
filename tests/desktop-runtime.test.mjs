@@ -49,7 +49,7 @@ test('desktop development paths resolve from the workspace instead of process cw
 })
 
 test('packaged desktop points plain Node and Python at unpacked resources', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'thermal-agent-packaged-'))
+  const root = await mkdtemp(join(tmpdir(), 'Thermal Agent packaged '))
   t.after(() => rm(root, { recursive: true, force: true }))
   const resources = join(root, 'resources')
   const unpacked = join(resources, 'app.asar.unpacked')

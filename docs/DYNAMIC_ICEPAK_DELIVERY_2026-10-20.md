@@ -19,6 +19,7 @@
 ## 已验证与待验证
 
 - 全量 Node 回归：244 项，242 通过、2 跳过、0 失败。跳过的是需要带 psutil 的独立 Python 环境的两个真实进程测试。
+- 后续为跳过项准备独立 CPython 3.12.10 / psutil 7.2.2 环境，指定 `THERMAL_MANAGED_TEST_PYTHON` 补跑 `tests/icepak-managed-process.test.mjs`：2 项通过、0 跳过。验证真实 Python 请求正常退出，以及取消后受管 worker 和子进程均退出并释放工程锁；执行平台为 macOS，未运行 AEDT。日志另存试包目录 `managed-process-validation.log`。
 - TypeScript/Web 构建、DSH 工具检查、浏览器脚本复用与导出测试通过。浏览器中的工程执行使用测试替身。
 - 安装包内 279 个应用构建文件与 Python 源文件逐文件比对一致。比对排除打包器默认不包含的 `.d.ts` 声明及 Python 缓存。
 - 尚未在真实 Windows 上安装、调用模型生成操作或运行真实 Icepak 求解。覆盖安装与含空格安装路径问题仍待实机确认。
