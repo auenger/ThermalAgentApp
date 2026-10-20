@@ -1,7 +1,7 @@
 import { basename, join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
-import type { ArtifactRecord, DynamicScriptResult } from '@thermal-agent/contracts'
+import type { ArtifactRecord, DynamicScriptResult, PluginExecutionIdentity } from '@thermal-agent/contracts'
 import { pinIcepakPlugin, type IcepakPluginPort, type PinnedIcepakPlugin } from './icepak-plugin-client.js'
 import { DynamicScriptLibrary, resolveScriptParameters, type ScriptRun } from './dynamic-script-library.js'
 import { TaskWorkspace } from './task-workspace.js'
@@ -25,7 +25,7 @@ export class DynamicScriptManager {
     this.workspace = new TaskWorkspace(home)
   }
   get busy(): boolean { return this.starting || this.active.size > 0 }
-  async start(input: DynamicScriptTaskInput): Promise<ScriptRun> {
+  async start(input: DynamicScriptTaskInput, options: { expectedRuntime?: PluginExecutionIdentity; signal?: AbortSignal } = {}): Promise<ScriptRun> {
     if (this.closing || this.busy) throw new Error('Dynamic script execution is busy or closing')
     this.starting = true
     let pinned: PinnedIcepakPlugin | undefined
@@ -35,14 +35,18 @@ export class DynamicScriptManager {
       const script = this.library.get(request.scriptId)
       resolveScriptParameters(script, request.parameters)
       // Pin before recording, so receipts and all calls refer to the same runtime revision.
-      pinned = await pinIcepakPlugin(this.plugin)
+      if (options.signal?.aborted) throw new Error('Dynamic script was cancelled before launch')
+      pinned = await pinIcepakPlugin(this.plugin, options.expectedRuntime)
       if (this.closing) throw new Error('Dynamic script manager is closing')
       if (!pinned.port.executeScript) throw new Error('Icepak plugin does not support dynamic scripts')
       const run = this.library.beginRun({ ...request, runtime: pinned.identity })
       const controller = new AbortController()
+      const cancel = () => controller.abort()
+      options.signal?.addEventListener('abort', cancel, { once: true })
+      if (options.signal?.aborted) cancel()
       const lease = pinned
       pinned = undefined
-      const promise = this.execute(run, request.design, lease, controller).finally(() => this.active.delete(run.id))
+      const promise = this.execute(run, request.design, lease, controller).finally(() => { this.active.delete(run.id); options.signal?.removeEventListener('abort', cancel) })
       this.active.set(run.id, { controller, promise })
       void promise.catch(() => undefined) // wait/close observe persistence failures; never create an unhandled rejection
       return run

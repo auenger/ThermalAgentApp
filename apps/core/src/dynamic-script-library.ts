@@ -1,3 +1,4 @@
+import type { ScriptIteration } from './dynamic-script-search.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -119,7 +120,8 @@ export class DynamicScriptLibrary {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS dynamic_scripts(id TEXT PRIMARY KEY, definition TEXT NOT NULL, created_at TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS dynamic_script_runs(id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES dynamic_scripts(id), task_id TEXT NOT NULL, status TEXT NOT NULL, record TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS dynamic_script_run_task ON dynamic_script_runs(task_id);`)
+      CREATE INDEX IF NOT EXISTS dynamic_script_run_task ON dynamic_script_runs(task_id);
+      CREATE TABLE IF NOT EXISTS dynamic_script_iterations(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL);`)
   }
   close(): void { this.db.close() }
   stage(value: unknown): ScriptRevision {
@@ -187,6 +189,32 @@ export class DynamicScriptLibrary {
       this.finish(run.id, { status: 'INTERRUPTED', error: 'Core stopped before a terminal execution receipt was saved' }); count++
     }
     return count
+  }
+  createIteration(value: Omit<ScriptIteration, 'id' | 'createdAt' | 'revision' | 'status' | 'rounds'>): ScriptIteration {
+    this.get(value.plan.scriptId)
+    const iteration: ScriptIteration = { ...structuredClone(value), id: randomUUID(), createdAt: new Date().toISOString(), revision: 1, status: 'DRAFT', rounds: [] }
+    this.db.prepare('INSERT INTO dynamic_script_iterations VALUES (?, ?, ?, ?)').run(iteration.id, iteration.taskId, 1, JSON.stringify(iteration))
+    return iteration
+  }
+  iteration(id: string): ScriptIteration {
+    const row = this.db.prepare('SELECT record FROM dynamic_script_iterations WHERE id = ?').get(id)
+    if (!row) throw new Error('Iteration not found')
+    return JSON.parse(String(row.record)) as ScriptIteration
+  }
+  iterations(taskId?: string): ScriptIteration[] {
+    const rows = taskId === undefined ? this.db.prepare('SELECT record FROM dynamic_script_iterations ORDER BY rowid').all()
+      : this.db.prepare('SELECT record FROM dynamic_script_iterations WHERE task_id = ? ORDER BY rowid').all(taskId)
+    return rows.map(row => JSON.parse(String(row.record)) as ScriptIteration)
+  }
+  saveIteration(value: ScriptIteration): ScriptIteration {
+    const saved = this.iteration(value.id)
+    if (saved.status === 'STOPPED' || value.taskId !== saved.taskId || value.projectSha256 !== saved.projectSha256 ||
+      value.aedtVersion !== saved.aedtVersion || JSON.stringify(value.plan) !== JSON.stringify(saved.plan)) throw new Error('Iteration definition is immutable or already terminal')
+    const next = { ...structuredClone(value), revision: value.revision + 1 }
+    const change = this.db.prepare('UPDATE dynamic_script_iterations SET revision = ?, record = ? WHERE id = ? AND revision = ?')
+      .run(next.revision, JSON.stringify(next), value.id, value.revision)
+    if (change.changes !== 1) throw new Error('Iteration revision conflict')
+    return next
   }
   reusableEvidence(id: string, runtime: PluginExecutionIdentity, aedtVersion: string): ScriptRun[] {
     if (this.get(id).disabled || !runtime.packageDigest || !runtime.environmentDigest) return []

@@ -1,3 +1,4 @@
+import { DynamicScriptIterations } from './dynamic-script-iterations.js'
 import { constants } from 'node:fs'
 import { copyFile, mkdir } from 'node:fs/promises'
 import { TaskWorkspace } from './task-workspace.js'
@@ -16,16 +17,22 @@ function object(value: unknown): Record<string, unknown> {
 export class DynamicScriptService {
   readonly library: DynamicScriptLibrary
   readonly manager: DynamicScriptManager
+  readonly iterations: DynamicScriptIterations
+  get busy(): boolean { return this.manager.busy || this.iterations.busy }
   private readonly workspace: TaskWorkspace
   constructor(home: string, private readonly database: LocalDatabase, private readonly artifacts: ArtifactStore,
     plugin: IcepakPluginPort, private readonly nodeId: string, private readonly operations: ModelPreparationStore) {
     this.workspace = new TaskWorkspace(home)
     this.library = new DynamicScriptLibrary(join(home, 'data', 'dynamic-scripts.sqlite'))
     this.manager = new DynamicScriptManager(home, this.library, artifacts, plugin, artifact => database.upsertArtifact(artifact))
+    this.iterations = new DynamicScriptIterations(home, this.library, this.manager, artifacts, plugin, artifact => database.upsertArtifact(artifact), job => {
+      const task = this.task(job.taskId)
+      if (task.version !== job.approvedTaskVersion || task.requirementSnapshot.planConfirmed !== true) throw new Error('任务已变化，自动迭代授权不再匹配')
+    })
     this.recover()
   }
   private recover(): void {
-    if (!this.manager.busy && !this.operations.reconcileRecoveredOperation()) this.library.recoverInterrupted()
+    if (!this.busy && !this.operations.reconcileRecoveredOperation()) { this.library.recoverInterrupted(); this.iterations.recoverInterrupted() }
   }
   private task(taskId: string) {
     const task = this.database.getTask(taskId)
@@ -46,13 +53,13 @@ export class DynamicScriptService {
     const snapshot = task.requirementSnapshot
     const sourceSha256 = typeof snapshot.modelSha256 === 'string' ? snapshot.modelSha256 : undefined
     const artifact = sourceSha256 ? this.database.getArtifact(sourceSha256) : undefined
-    return { taskId, planConfirmed: snapshot.planConfirmed === true,
+    return { taskId, taskVersion: task.version, planConfirmed: snapshot.planConfirmed === true,
       aedtVersion: typeof snapshot.aedtVersion === 'string' ? snapshot.aedtVersion : undefined,
       source: artifact && artifact.originalName.toLowerCase().endsWith('.aedt') ? {
         sha256: artifact.sha256, originalName: artifact.originalName,
         projectPath: await this.sourcePath(taskId, artifact.sha256),
       } : null,
-      runs: this.library.runs(taskId), busy: this.manager.busy,
+      runs: this.library.runs(taskId), iterations: this.library.iterations(taskId), busy: this.busy,
       pendingEngineeringCleanup: !!this.operations.reconcileRecoveredOperation(),
       scriptContract: { entrypoints: ['apply(ipk, parameters)', 'verify(ipk, parameters)'],
         readback: 'verify returns {passed: boolean, checks: nonempty array}; checks must read the saved and reopened project',
@@ -61,7 +68,7 @@ export class DynamicScriptService {
         parameterTypes: ['number', 'integer', 'string', 'boolean'],
         applicability: '{aedtVersions: string[], requiredObjects: string[]}' } }
   }
-  async dispatch(method: string, path: string, body?: unknown, query = ''): Promise<{ status: number; body: unknown }> {
+  async dispatch(method: string, path: string, body?: unknown, query = '', channel: 'app' | 'agent' = 'app'): Promise<{ status: number; body: unknown }> {
     this.recover()
     if (path === '/dynamic-scripts') {
       if (method === 'GET') return { status: 200, body: { scripts: this.library.list(query) } }
@@ -76,6 +83,31 @@ export class DynamicScriptService {
         return { status: 200, body: { script: this.library.disable(scriptMatch[1], value.disabled) } }
       }
     }
+    const iterationMatch = path.match(/^\/tasks\/([a-f0-9-]{36})\/script-iterations(?:\/([a-f0-9-]{36})\/(start|cancel))?$/u)
+    if (iterationMatch) {
+      const task = this.task(iterationMatch[1])
+      if (method === 'GET' && !iterationMatch[2]) return { status: 200, body: { iterations: this.library.iterations(task.id) } }
+      if (method === 'POST') {
+        if (!iterationMatch[2]) {
+          const context = await this.context(task.id)
+          if (!context.source || !context.aedtVersion) throw new Error('需要已登记的 AEDT 工程和明确版本')
+          return { status: 201, body: { iteration: this.iterations.draft(task.id, context.source.sha256, context.aedtVersion, body) } }
+        }
+        const iteration = this.library.iteration(iterationMatch[2])
+        if (iteration.taskId !== task.id) throw new Error('迭代不属于当前任务')
+        if (iterationMatch[3] === 'cancel') {
+          this.iterations.cancel(iteration.id)
+          return { status: 202, body: { iteration: this.library.iteration(iteration.id), cancellationRequested: true } }
+        }
+        if (channel !== 'app') throw new Error('AI 只能准备迭代计划，启动求解需用户在 App 确认预算和参数范围')
+        const value = object(body)
+        if (value.expectedTaskVersion !== task.version || task.requirementSnapshot.planConfirmed !== true) throw new Error('任务或确认状态已变化，请刷新后确认')
+        if (task.requirementSnapshot.modelSha256 !== iteration.projectSha256 || task.requirementSnapshot.aedtVersion !== iteration.aedtVersion) throw new Error('迭代输入工程或环境已变化，请重新准备计划')
+        if (this.database.listActiveAttempts().length || this.operations.reconcileRecoveredOperation()) throw new Error('本机有工程任务或进程待清理')
+        return { status: 202, body: { iteration: await this.iterations.start(iteration.id, task.version) } }
+      }
+      throw new Error('未知迭代操作')
+    }
     const match = path.match(/^\/tasks\/([a-f0-9-]{36})\/(script-context|script-runs)(?:\/([a-f0-9-]{36})\/(cancel))?$/u)
     if (match) {
       const task = this.task(match[1])
@@ -84,7 +116,9 @@ export class DynamicScriptService {
         if (match[3]) {
           const run = this.library.getRun(match[3])
           if (run.taskId !== task.id) throw new Error('脚本执行不属于当前任务')
-          this.manager.cancel(run.id)
+          const iteration = this.library.iterations(task.id).find(item => item.status === 'RUNNING' && item.rounds.some(round => round.scriptRunId === run.id))
+          if (iteration) this.iterations.cancel(iteration.id)
+          else this.manager.cancel(run.id)
           return { status: 202, body: { run: this.library.getRun(run.id), cancellationRequested: true } }
         }
         const value = object(body)
@@ -96,6 +130,7 @@ export class DynamicScriptService {
         const allowed = new Set([context.source.sha256, ...context.runs.filter(run => run.status === 'SUCCEEDED').map(run => run.evidence?.projectSha256)])
         if (typeof selected !== 'string' || !allowed.has(selected)) throw new Error('工程不属于当前任务的输入或成功脚本产物')
         if (this.database.listActiveAttempts().length) throw new Error('本机有求解运行，请等待或取消后执行脚本')
+        if (this.iterations.busy) throw new Error('自动迭代进行中，请等待或取消')
         const run = await this.manager.start({ taskId: task.id, scriptId: value.scriptId, parameters: object(value.parameters),
           projectSha256: selected, aedtVersion: context.aedtVersion })
         return { status: 202, body: { run } }
@@ -103,5 +138,5 @@ export class DynamicScriptService {
     }
     throw new Error('未知动态脚本操作')
   }
-  async close(): Promise<void> { await this.manager.close(); this.library.close() }
+  async close(): Promise<void> { await this.iterations.close(); await this.manager.close(); this.library.close() }
 }

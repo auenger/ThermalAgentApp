@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createCoreApp, ThermalToolsBridge } from '@thermal-agent/core'
@@ -15,6 +15,15 @@ async function fixture(t) {
   let original
   const port = { async probeEnvironment() { return { pluginId: 'test', pluginVersion: '1' } },
     async inspectProject(input) { return { status: 'ok', inputSha256: original.sha256, project: { aedtVersion: input.version, objects: ['Chip'] } } },
+    async solveProject(input) {
+      const bytes = await readFile(input.projectPath), power = Number(bytes.toString().split('=')[1])
+      const dir = join(input.outputDir, 'artifacts'); await mkdir(dir, { recursive: true })
+      const projectPath = join(dir, 'project.aedt'), convergencePath = join(dir, 'convergence.json')
+      await writeFile(projectPath, bytes)
+      await writeFile(convergencePath, JSON.stringify({ schemaVersion: 'icepak-convergence-v1', setup: input.setup, evidence: { verified: true }, nativeEvidencePaths: {}, rawFileSha256: {} }))
+      return { status: 'ok', mode: 'solve', inputSha256: sha(bytes), project: { aedtVersion: '2024.2', activeDesign: 'Icepak' }, validation: { verified: true },
+        solve: { succeeded: true, setup: input.setup }, metrics: { solverNormalCompletion: true, converged: true, tmaxC: 40 + power }, artifacts: { projectPath, outputSha256: sha(bytes), convergencePath } }
+    },
     async executeScript(input) {
       const path = join(input.outputDir, 'verified', 'project.aedt'), data = Buffer.from(`power=${input.parameters.power}`)
       await mkdir(join(input.outputDir, 'verified'), { recursive: true }); await writeFile(path, data)
@@ -77,4 +86,27 @@ test('authenticated DSH bridge uses the same dynamic service and cannot supply e
   assert.equal(run.status, 202)
   assert.equal((await f.app.dynamicScripts.manager.wait(run.body.run.id)).status, 'SUCCEEDED')
   assert.equal((await call(`/v1/tasks/${task.id}/script-runs`, { scriptId: staged.body.script.id, parameters: { power: 30 }, evidence: { status: 'SUCCEEDED' } })).status, 409)
+})
+
+test('iteration draft cannot be started through DSH; App approval binds the task version and budget', async t => {
+  const f = await fixture(t), task = f.task()
+  const staged = await f.request('/api/dynamic-scripts', definition)
+  const plan = { scriptId: staged.data.script.id, parameters: { power: 20 }, adjustable: [{ name: 'power', minimum: 0, maximum: 40, step: 10, minimumStep: 1 }],
+    targetTmaxC: 45, setup: 'Setup1', maxRounds: 5, maxDurationMs: 10_000 }
+  const created = await f.request(`/api/tasks/${task.id}/script-iterations`, plan)
+  assert.equal(created.status, 201); assert.equal(created.data.iteration.status, 'DRAFT')
+  const id = created.data.iteration.id
+  const bridge = new ThermalToolsBridge(f.home, f.app.database, f.port, f.app.nodeIdentity.nodeId, undefined, f.app.dynamicScripts)
+  const address = await bridge.start(); t.after(() => bridge.stop())
+  const denied = await fetch(`${address.url}/v1/tasks/${task.id}/script-iterations/${id}/start`, { method: 'POST', headers: { Authorization: `Bearer ${address.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedTaskVersion: task.version }) })
+  assert.equal(denied.status, 409)
+  assert.equal(f.app.dynamicScripts.library.iteration(id).status, 'DRAFT')
+  assert.equal((await f.request(`/api/tasks/${task.id}/script-iterations/${id}/start`, { expectedTaskVersion: task.version + 1 })).status, 409)
+  const started = await f.request(`/api/tasks/${task.id}/script-iterations/${id}/start`, { expectedTaskVersion: task.version })
+  assert.equal(started.status, 202)
+  const done = await f.app.dynamicScripts.iterations.wait(id)
+  assert.equal(done.stopReason, 'TARGET_REACHED')
+  assert.deepEqual(done.rounds.map(round => round.parameters.power), [20, 30, 10, 0])
+  assert.equal(done.approvedTaskVersion, task.version)
+  assert.ok(f.app.database.getArtifact(done.rounds.at(-1).resultSha256))
 })

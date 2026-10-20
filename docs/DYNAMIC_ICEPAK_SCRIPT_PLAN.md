@@ -2,7 +2,7 @@
 
 记录日期：2026-10-20  
 目标分支：`feat/plugin-adaptive-repair`  
-状态：需求与实施计划，本文不代表功能已经实现。
+状态：推进中。代码与替身测试进展见 [实现记录](DYNAMIC_ICEPAK_IMPLEMENTATION.md)，真实 Windows/Icepak 验收尚未完成。
 
 ## 1. 已确认的目标
 

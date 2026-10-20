@@ -99,7 +99,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   plugins.attachEngineeringStore(modelStore)
   const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
   const dynamicScripts = new DynamicScriptService(home, database, artifacts, pluginClient, nodeIdentity.nodeId, modelStore)
-  plugins.attachRuntimeReferences(async () => [...await pluginRuntimeReferences(database, modelStore, artifacts), ...dynamicScripts.library.runs().map(run => run.runtime)])
+  plugins.attachRuntimeReferences(async () => [...await pluginRuntimeReferences(database, modelStore, artifacts), ...dynamicScripts.library.runs().map(run => run.runtime), ...dynamicScripts.library.iterations().flatMap(job => job.runtime ? [job.runtime] : [])])
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
     effectiveIcepakProbe(await pluginClient.probeEnvironment(), database, artifacts)
@@ -127,7 +127,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
     try { freeDiskBytes = heartbeatFreeDiskBytes(await localFreeDiskBytes(dirname(database.path))) }
     catch { /* fail closed: do not advertise capacity when disk cannot be measured */ }
     const operation = modelStore.reconcileRecoveredOperation()
-    const status = freeDiskBytes > 0 ? (operation ? 'BUSY' : effective?.status ?? 'DEGRADED') : 'DEGRADED'
+    const status = freeDiskBytes > 0 ? (operation || dynamicScripts.busy ? 'BUSY' : effective?.status ?? 'DEGRADED') : 'DEGRADED'
     return {
       pluginStatus: status,
       aedtVersions: effective?.aedtVersions ?? [],
@@ -190,6 +190,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
       await parameterPlans.close()
       await executions.close()
       await agentRuntime.close()
+      await dynamicScripts.iterations.close()
       await dynamicScripts.manager.close()
       await plugins.close()
       await dynamicScripts.close()
@@ -233,7 +234,7 @@ async function route(
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (url.pathname === '/api/dynamic-scripts' || url.pathname.startsWith('/api/dynamic-scripts/') ||
-    /^\/api\/tasks\/[^/]+\/(?:script-context|script-runs)(?:\/|$)/u.test(url.pathname)) {
+    /^\/api\/tasks\/[^/]+\/(?:script-context|script-runs|script-iterations)(?:\/|$)/u.test(url.pathname)) {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', '动态脚本仅限本机 App')
     assertLocalWriteOrigin(request)
     if (request.method !== 'GET' && request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '仅支持 GET 和 POST')
@@ -858,7 +859,7 @@ async function route(
       throw new RequestError(409, 'AUTO_DISPATCH_PENDING', 'cancel automatic dispatch before starting a local Baseline')
     }
     if (modelPreparations.busy) throw new IcepakOperationBusyError()
-    if (parameterPlans.busy) throw new RequestError(409, 'PARAMETERS_BUSY', '参数验证进行中，请稍后启动求解')
+    if (parameterPlans.busy || dynamicScripts.busy) throw new RequestError(409, 'PARAMETERS_BUSY', '参数验证进行中，请稍后启动求解')
     const input = parseIcepakProjectOperationInput(await readJsonBody(request))
     const started = await executions.startBaseline(baselineMatch[1], input)
     database.updateSkillRunStep(baselineMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id })
@@ -966,7 +967,7 @@ async function route(
   if (request.method === 'POST' && candidateMatch) {
     assertLocalOwner(database, candidateMatch[1], nodeIdentity.nodeId)
     if (modelPreparations.busy) throw new IcepakOperationBusyError()
-    if (parameterPlans.busy) throw new RequestError(409, 'PARAMETERS_BUSY', '参数验证进行中，请稍后启动求解')
+    if (parameterPlans.busy || dynamicScripts.busy) throw new RequestError(409, 'PARAMETERS_BUSY', '参数验证进行中，请稍后启动求解')
     const input = parseIcepakCandidateInput(await readJsonBody(request))
     const started = await executions.startCandidate(candidateMatch[1], input)
     database.updateSkillRunStep(candidateMatch[1], 'solve', 'RUNNING', { runId: started.run.id, attemptId: started.attempt.id, kind: 'CANDIDATE' })

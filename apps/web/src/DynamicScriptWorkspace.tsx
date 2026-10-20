@@ -1,8 +1,9 @@
+import { ScriptIterationPanel } from './ScriptIterationPanel'
 import { useEffect, useState } from 'react'
 import { Button, Field, Input, Select } from '@fluentui/react-components'
 
 type Parameter = { type: 'number' | 'integer' | 'string' | 'boolean'; description: string; required?: boolean; unit?: string; default?: string | number | boolean; minimum?: number; maximum?: number; enum?: Array<string | number | boolean> }
-type Script = { id: string; name: string; version: string; description: string; source: string; disabled: boolean; parameters: Record<string, Parameter>; applicability: { aedtVersions: string[]; requiredObjects: string[] } }
+export type Script = { id: string; name: string; version: string; description: string; source: string; disabled: boolean; parameters: Record<string, Parameter>; applicability: { aedtVersions: string[]; requiredObjects: string[] } }
 type Run = { id: string; scriptId: string; status: string; parameters: Record<string, unknown>; error?: string; startedAt: string; evidence?: { kind: string; projectSha256: string; artifactSha256: string } }
 type Context = { source: { sha256: string; originalName: string } | null; planConfirmed: boolean; aedtVersion?: string; runs: Run[]; busy: boolean; pendingEngineeringCleanup: boolean }
 async function api<T>(path: string, value?: unknown): Promise<T> {
@@ -12,6 +13,17 @@ async function api<T>(path: string, value?: unknown): Promise<T> {
   return body
 }
 const statusName: Record<string, string> = { RUNNING: '执行中', SUCCEEDED: '持久工程读回通过', FAILED: '失败', CANCELLED: '已取消', INTERRUPTED: '执行中断' }
+export function scriptParameterValues(script: Script, values: Record<string, string>): Record<string, unknown> {
+  const parameters: Record<string, unknown> = {}
+  for (const [name, spec] of Object.entries(script.parameters)) {
+    const value = values[name] ?? (spec.default === undefined ? '' : String(spec.default))
+    if (value === '' && !spec.required) continue
+    if (value === '' && spec.type !== 'string') throw new Error(`请填写 ${name}`)
+    parameters[name] = spec.type === 'boolean' ? value === 'true' : spec.type === 'string' ? value : Number(value)
+    if (typeof parameters[name] === 'number' && !Number.isFinite(parameters[name])) throw new Error(`${name} 必须为有限数字`)
+  }
+  return parameters
+}
 export function DynamicScriptWorkspace({ taskId }: { taskId: string }) {
   const [context, setContext] = useState<Context | null>(null)
   const [scripts, setScripts] = useState<Script[]>([])
@@ -38,14 +50,7 @@ export function DynamicScriptWorkspace({ taskId }: { taskId: string }) {
     if (!script) return
     setPending(true); setError('')
     try {
-      const parameters: Record<string, unknown> = {}
-      for (const [name, spec] of Object.entries(script.parameters)) {
-        const value = values[name] ?? (spec.default === undefined ? '' : String(spec.default))
-        if (value === '' && !spec.required) continue
-        if (value === '' && spec.type !== 'string') throw new Error(`请填写 ${name}`)
-        parameters[name] = spec.type === 'boolean' ? value === 'true' : spec.type === 'string' ? value : Number(value)
-        if (typeof parameters[name] === 'number' && !Number.isFinite(parameters[name])) throw new Error(`${name} 必须为有限数字`)
-      }
+      const parameters = scriptParameterValues(script, values)
       const response = await api<{ run: Run }>(`/api/tasks/${taskId}/script-runs`, { scriptId: script.id, parameters, ...(source ? { projectSha256: source } : {}) })
       setContext(current => current ? { ...current, busy: true, runs: [...current.runs, response.run] } : current)
     } catch (err) { setError(String(err)) } finally { setPending(false) }
@@ -81,6 +86,7 @@ export function DynamicScriptWorkspace({ taskId }: { taskId: string }) {
       {context?.aedtVersion && !compatible && <p>当前任务 AEDT 版本与该脚本声明不匹配。</p>}
     </>}
     {error && <p role="alert">{error}</p>}
+    <ScriptIterationPanel taskId={taskId} script={script} values={values} />
     <h3>执行记录</h3>
     {!context?.runs.length && <p>尚无动态脚本执行记录。</p>}
     {context?.runs.slice().reverse().map(run => <article className="dynamic-script-run" key={run.id}>

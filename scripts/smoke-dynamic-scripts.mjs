@@ -1,7 +1,7 @@
 // Browser + real Core routes, fake engineering port. Never native AEDT evidence.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createCoreApp } from '../apps/core/dist/server.js'
@@ -12,6 +12,16 @@ let artifact
 const plugin = {
   async probeEnvironment() { return { pluginId: 'ui-fixture', pluginVersion: '1', status: 'NOT_INSTALLED', aedtVersions: [], checks: [], diagnostics: [], platform: process.platform } },
   async inspectProject(input) { return { status: 'ok', inputSha256: artifact.sha256, project: { aedtVersion: input.version, objects: ['Chip'] } } },
+  async solveProject(input) {
+    const bytes = await readFile(input.projectPath), power = Number(bytes.toString().split('=')[1])
+    const dir = join(input.outputDir, 'artifacts'); await mkdir(dir, { recursive: true })
+    const projectPath = join(dir, 'project.aedt'), convergencePath = join(dir, 'convergence.json')
+    await writeFile(projectPath, bytes)
+    await writeFile(convergencePath, JSON.stringify({ schemaVersion: 'icepak-convergence-v1', setup: input.setup, evidence: { verified: true }, nativeEvidencePaths: {}, rawFileSha256: {} }))
+    return { status: 'ok', mode: 'solve', inputSha256: createHash('sha256').update(bytes).digest('hex'), project: { aedtVersion: input.version, activeDesign: 'Icepak' },
+      validation: { verified: true }, solve: { succeeded: true, setup: input.setup }, metrics: { solverNormalCompletion: true, converged: true, tmaxC: 40 + power },
+      artifacts: { projectPath, outputSha256: createHash('sha256').update(bytes).digest('hex'), convergencePath } }
+  },
   async executeScript(input) {
     const verifiedProjectPath = join(input.outputDir, 'verified', 'project.aedt'), bytes = Buffer.from(`power=${input.parameters.power}`)
     await mkdir(join(input.outputDir, 'verified'), { recursive: true }); await writeFile(verifiedProjectPath, bytes)
@@ -47,6 +57,24 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll('.dynamic-script-run strong')].filter(node => node.textContent.includes('持久工程读回通过')).length === 2)
   assert.deepEqual(app.dynamicScripts.library.runs(task.id).map(run => run.parameters.power), [28, 32])
   assert.equal(app.dynamicScripts.library.list().length, 1)
+  const iteration = panel.locator('.script-iteration-panel')
+  await iteration.getByText('设置参数范围与运行预算', { exact: true }).click()
+  await iteration.getByLabel('自动调整 power', { exact: true }).check()
+  await iteration.getByLabel('power 下限', { exact: true }).fill('0')
+  await iteration.getByLabel('power 上限', { exact: true }).fill('60')
+  await iteration.getByLabel('power 初始步长', { exact: true }).fill('10')
+  await iteration.getByLabel('power 最小步长', { exact: true }).fill('1')
+  await iteration.getByLabel('目标最高温度 (°C)', { exact: true }).fill('65')
+  await iteration.getByLabel('求解 setup', { exact: true }).fill('Setup1')
+  await iteration.getByRole('button', { name: '保存迭代计划', exact: true }).click()
+  await iteration.getByText('待确认计划', { exact: true }).waitFor()
+  assert.equal(app.dynamicScripts.library.iterations(task.id)[0].rounds.length, 0)
+  await iteration.getByRole('button', { name: '确认范围与预算并启动求解', exact: true }).click()
+  await iteration.getByText('达到设定目标', { exact: true }).waitFor()
+  const completed = app.dynamicScripts.library.iterations(task.id)[0]
+  assert.deepEqual(completed.rounds.map(round => round.parameters.power), [32, 42, 22])
+  assert.equal(completed.bestRound, 3)
+  await iteration.getByText('包含测试替身结果，不代表真实 Icepak 收敛。', { exact: true }).waitFor()
   assert.deepEqual(errors, [])
-  console.log('Dynamic script UI: task context, parameter entry, two executions and persisted test-double results passed.')
+  console.log('Dynamic script UI: task context, parameter entry, two executions, explicit bounded iteration approval, three solved rounds and persisted test-double results passed.')
 } finally { await browser?.close(); await app.close(); await rm(home, { recursive: true, force: true }) }
