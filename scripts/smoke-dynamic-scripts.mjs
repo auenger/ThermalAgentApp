@@ -75,6 +75,12 @@ try {
   assert.deepEqual(completed.rounds.map(round => round.parameters.power), [32, 42, 22])
   assert.equal(completed.bestRound, 3)
   await iteration.getByText('包含测试替身结果，不代表真实 Icepak 收敛。', { exact: true }).waitFor()
+  const [download] = await Promise.all([page.waitForEvent('download'), panel.getByRole('button', { name: '校验并导出验收记录', exact: true }).click()])
+  const exported = JSON.parse(await readFile(await download.path(), 'utf8'))
+  assert.equal(exported.acceptance, 'manual-review-required')
+  assert.equal(exported.observations.nativeReadbacks, 0)
+  assert.equal(exported.observations.testDoubleReadbacks, 5)
+  assert.ok(exported.artifactChecks.every(item => item.verified))
   assert.deepEqual(errors, [])
   console.log('Dynamic script UI: task context, parameter entry, two executions, explicit bounded iteration approval, three solved rounds and persisted test-double results passed.')
 } finally { await browser?.close(); await app.close(); await rm(home, { recursive: true, force: true }) }

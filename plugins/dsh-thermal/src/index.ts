@@ -132,7 +132,7 @@ export function apply(ctx: Context): void {
     description: 'Save a versioned Python Icepak operation for task execution. Read task context and inspect actual objects first. Definition JSON includes name, version, description, source, parameters, applicability {aedtVersions, requiredObjects}, tags. Each parameter has type, description, optional unit, required, default, minimum, maximum, enum. Python defines apply(ipk, parameters) and verify(ipk, parameters); verify reads the saved/reopened project and returns {passed, checks}. Does not execute or grant success.',
     parameters: { definition: { type: 'string', required: true, description: 'Complete script definition as JSON.' } },
     output: textOutput(), isConcurrencySafe: () => false,
-    async execute(args, exec) { return JSON.stringify(await bridgeRequest('/v1/dynamic-scripts', exec.signal, JSON.parse(String(args.definition)))) },
+    async execute(args, exec) { assertAppWorkspace(exec); return JSON.stringify(await bridgeRequest('/v1/dynamic-scripts', exec.signal, { ...JSON.parse(String(args.definition)), sourceSessionId: exec.agent?.id })) },
   }))
   ctx.tools.register(defineTool({
     name: 'thermal_script_task_context',

@@ -98,7 +98,7 @@ export function createCoreApp(options: CoreAppOptions): CoreApp {
   for (const task of database.listTasks(500)) taskWorkspace.ensure(task.id)
   plugins.attachEngineeringStore(modelStore)
   const pluginClient = lockIcepakOperations(options.pluginClient ?? plugins.icepak, modelStore)
-  const dynamicScripts = new DynamicScriptService(home, database, artifacts, pluginClient, nodeIdentity.nodeId, modelStore)
+  const dynamicScripts = new DynamicScriptService(home, database, artifacts, pluginClient, nodeIdentity.nodeId, modelStore, identity => !options.pluginClient && plugins.isCurrentIcepakRuntime(identity))
   plugins.attachRuntimeReferences(async () => [...await pluginRuntimeReferences(database, modelStore, artifacts), ...dynamicScripts.library.runs().map(run => run.runtime), ...dynamicScripts.library.iterations().flatMap(job => job.runtime ? [job.runtime] : [])])
   const modelPreparations = new ModelPreparationManager(home, database, artifacts, modelStore, pluginClient)
   const readinessProbe = async (): Promise<IcepakEnvironmentProbe> =>
@@ -234,7 +234,7 @@ async function route(
 ): Promise<void> {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1')
   if (url.pathname === '/api/dynamic-scripts' || url.pathname.startsWith('/api/dynamic-scripts/') ||
-    /^\/api\/tasks\/[^/]+\/(?:script-context|script-runs|script-iterations)(?:\/|$)/u.test(url.pathname)) {
+    /^\/api\/tasks\/[^/]+\/(?:script-context|script-runs|script-iterations|script-evidence)(?:\/|$)/u.test(url.pathname)) {
     if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', '动态脚本仅限本机 App')
     assertLocalWriteOrigin(request)
     if (request.method !== 'GET' && request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '仅支持 GET 和 POST')

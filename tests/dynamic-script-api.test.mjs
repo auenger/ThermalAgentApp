@@ -31,10 +31,10 @@ async function fixture(t) {
         scriptExecuted: true, persistedReadback: true, readbackEvidenceSource: 'script-reported-after-reopen',
         readback: { passed: true, checks: [{ actual: input.parameters.power }] }, executionKind: 'test-double', verifiedProjectPath: path, verifiedProjectSha256: sha(data) }
     } }
-  const app = createCoreApp({ home, pluginClient: port, startAgentRuntime: false, startRemoteSolve: false })
+  let app = createCoreApp({ home, pluginClient: port, startAgentRuntime: false, startRemoteSolve: false })
   original = await app.artifacts.putBytes(Buffer.from('original'), 'project.aedt'); app.database.upsertArtifact(original)
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve))
-  const base = `http://127.0.0.1:${app.server.address().port}`
+  let base = `http://127.0.0.1:${app.server.address().port}`
   t.after(async () => { await app.close(); await rm(home, { recursive: true, force: true }) })
   const task = (snapshot = {}, ownerNodeId = app.nodeIdentity.nodeId) => app.database.createTask(createTask({ title: 'Dynamic test', description: 'Dynamic test fixture', ownerNodeId,
     requirementSnapshot: { modelSha256: original.sha256, aedtVersion: '2024.2', planConfirmed: true, ...snapshot } }))
@@ -42,7 +42,14 @@ async function fixture(t) {
     const response = await fetch(base + path, { ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }), headers: { 'Content-Type': 'application/json', ...headers } })
     return { status: response.status, data: await response.json() }
   }
-  return { home, app, original, task, request, port }
+  return { home, get app() { return app }, original, task, request, port,
+    async restart() {
+      await app.close()
+      app = createCoreApp({ home, pluginClient: port, startAgentRuntime: false, startRemoteSolve: false })
+      await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve))
+      base = `http://127.0.0.1:${app.server.address().port}`
+    } }
+
 }
 test('HTTP stages a script and executes through task ownership with durable registered artifacts', async t => {
   const f = await fixture(t), task = f.task()
@@ -109,4 +116,46 @@ test('iteration draft cannot be started through DSH; App approval binds the task
   assert.deepEqual(done.rounds.map(round => round.parameters.power), [20, 30, 10, 0])
   assert.equal(done.approvedTaskVersion, task.version)
   assert.ok(f.app.database.getArtifact(done.rounds.at(-1).resultSha256))
+})
+
+test('evidence export hashes real artifacts and never upgrades test-double receipts to acceptance', async t => {
+  const f = await fixture(t), task = f.task()
+  const staged = await f.request('/api/dynamic-scripts', definition)
+  const started = await f.request(`/api/tasks/${task.id}/script-runs`, { scriptId: staged.data.script.id, parameters: { power: 18 } })
+  const done = await f.app.dynamicScripts.manager.wait(started.data.run.id)
+  assert.equal(done.status, 'SUCCEEDED')
+  const exported = await f.request(`/api/tasks/${task.id}/script-evidence`)
+  assert.equal(exported.status, 200)
+  assert.equal(exported.data.status, 'collected')
+  assert.equal(exported.data.acceptance, 'manual-review-required')
+  assert.equal(exported.data.observations.nativeReadbacks, 0)
+  assert.equal(exported.data.observations.testDoubleReadbacks, 1)
+  assert.ok(exported.data.runs[0].coreInstanceId)
+  assert.ok(exported.data.artifactChecks.every(check => check.verified))
+  assert.equal(exported.data.scripts[0].submissions[0].channel, 'app')
+  await writeFile(f.app.artifacts.resolveArtifact(done.evidence.projectSha256), 'tampered')
+  const damaged = await f.request(`/api/tasks/${task.id}/script-evidence`)
+  assert.equal(damaged.data.status, 'artifact-errors')
+  assert.ok(damaged.data.artifactChecks.some(check => !check.verified && /mismatch/.test(check.error)))
+  assert.equal((await f.request(`/api/tasks/${f.task({}, 'foreign-node').id}/script-evidence`)).status, 409)
+})
+
+test('Core restart reuses the saved script with different parameters without restaging code', async t => {
+  const f = await fixture(t), task = f.task()
+  const staged = await f.request('/api/dynamic-scripts', definition), scriptId = staged.data.script.id
+  const first = await f.request(`/api/tasks/${task.id}/script-runs`, { scriptId, parameters: { power: 15 } })
+  const original = await f.app.dynamicScripts.manager.wait(first.data.run.id)
+  assert.equal(original.status, 'SUCCEEDED')
+  await f.restart()
+  const scripts = (await f.request('/api/dynamic-scripts')).data.scripts
+  assert.equal(scripts.length, 1); assert.equal(scripts[0].id, scriptId)
+  assert.equal(scripts[0].source, definition.source)
+  assert.equal(scripts[0].validation.state, 'unverified')
+  const second = await f.request(`/api/tasks/${task.id}/script-runs`, { scriptId, parameters: { power: 35 } })
+  const reused = await f.app.dynamicScripts.manager.wait(second.data.run.id)
+  assert.equal(reused.status, 'SUCCEEDED')
+  assert.notEqual(reused.coreInstanceId, original.coreInstanceId)
+  const report = (await f.request(`/api/tasks/${task.id}/script-evidence`)).data
+  assert.deepEqual(report.runs.map(run => run.parameters.power), [15, 35])
+  assert.equal(report.observations.nativeReadbacks, 0)
 })

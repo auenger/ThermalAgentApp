@@ -33,6 +33,7 @@ export interface ScriptRevision extends ScriptDefinition {
 export interface ScriptRun {
   id: string
   taskId: string
+  coreInstanceId?: string
   scriptId: string
   parameters: Record<string, unknown>
   projectSha256: string
@@ -121,14 +122,17 @@ export class DynamicScriptLibrary {
       CREATE TABLE IF NOT EXISTS dynamic_scripts(id TEXT PRIMARY KEY, definition TEXT NOT NULL, created_at TEXT NOT NULL, disabled INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS dynamic_script_runs(id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES dynamic_scripts(id), task_id TEXT NOT NULL, status TEXT NOT NULL, record TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS dynamic_script_run_task ON dynamic_script_runs(task_id);
+      CREATE TABLE IF NOT EXISTS dynamic_script_submissions(script_id TEXT NOT NULL REFERENCES dynamic_scripts(id), channel TEXT NOT NULL, session_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(script_id, channel, session_id));
       CREATE TABLE IF NOT EXISTS dynamic_script_iterations(id TEXT PRIMARY KEY, task_id TEXT NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL);`)
   }
   close(): void { this.db.close() }
-  stage(value: unknown): ScriptRevision {
+  stage(value: unknown, provenance: { channel: 'app' | 'agent' | 'internal'; sessionId?: string } = { channel: 'internal' }): ScriptRevision {
+    if (!['app', 'agent', 'internal'].includes(provenance.channel) || provenance.sessionId !== undefined && !/^[a-z0-9_-]{1,200}$/iu.test(provenance.sessionId)) throw new Error('Invalid script submission provenance')
     const definition = parseScriptDefinition(value)
     const json = JSON.stringify(definition)
     const id = hash(json)
     this.db.prepare('INSERT OR IGNORE INTO dynamic_scripts(id, definition, created_at) VALUES (?, ?, ?)').run(id, json, new Date().toISOString())
+    this.db.prepare('INSERT OR IGNORE INTO dynamic_script_submissions VALUES (?, ?, ?, ?)').run(id, provenance.channel, provenance.sessionId ?? '', new Date().toISOString())
     return this.get(id)
   }
   get(id: string): ScriptRevision {
@@ -149,12 +153,12 @@ export class DynamicScriptLibrary {
     this.db.prepare('UPDATE dynamic_scripts SET disabled = ? WHERE id = ?').run(disabled ? 1 : 0, id)
     return this.get(id)
   }
-  beginRun(input: { taskId: string; scriptId: string; parameters: unknown; projectSha256: string; aedtVersion: string; runtime: PluginExecutionIdentity }): ScriptRun {
+  beginRun(input: { taskId: string; coreInstanceId?: string; scriptId: string; parameters: unknown; projectSha256: string; aedtVersion: string; runtime: PluginExecutionIdentity }): ScriptRun {
     const script = this.get(input.scriptId)
     if (script.disabled) throw new Error('Script revision is disabled')
     if (!digest.test(input.projectSha256)) throw new Error('Invalid project digest')
     if (!script.applicability.aedtVersions.includes(input.aedtVersion)) throw new Error('Script does not support requested AEDT version')
-    const run: ScriptRun = { id: randomUUID(), taskId: text(input.taskId, 'task id'), scriptId: script.id,
+    const run: ScriptRun = { id: randomUUID(), taskId: text(input.taskId, 'task id'), ...(input.coreInstanceId ? { coreInstanceId: text(input.coreInstanceId, 'Core instance') } : {}), scriptId: script.id,
       parameters: resolveScriptParameters(script, input.parameters), projectSha256: input.projectSha256, aedtVersion: input.aedtVersion,
       runtime: parsePluginExecutionIdentity(input.runtime) ?? (() => { throw new Error('Missing runtime identity') })(), status: 'RUNNING', startedAt: new Date().toISOString() }
     this.db.prepare('INSERT INTO dynamic_script_runs(id, script_id, task_id, status, record) VALUES (?, ?, ?, ?, ?)')
@@ -215,6 +219,27 @@ export class DynamicScriptLibrary {
       .run(next.revision, JSON.stringify(next), value.id, value.revision)
     if (change.changes !== 1) throw new Error('Iteration revision conflict')
     return next
+  }
+  submissions(id: string): Array<{ channel: string; sessionId?: string; recordedAt: string }> {
+    this.get(id)
+    return this.db.prepare('SELECT * FROM dynamic_script_submissions WHERE script_id = ? ORDER BY created_at').all(id)
+      .map(row => ({ channel: String(row.channel), ...(row.session_id ? { sessionId: String(row.session_id) } : {}), recordedAt: String(row.created_at) }))
+  }
+  validationSummary(id: string, matchesCurrent: (identity: PluginExecutionIdentity) => boolean = () => false) {
+    const script = this.get(id), runs = this.runs().filter(run => run.scriptId === id)
+    const readbacks = runs.filter(run => run.status === 'SUCCEEDED' && run.evidence?.kind === 'native-aedt')
+    const solves = this.iterations().filter(job => job.plan.scriptId === id).flatMap(job => job.rounds
+      .filter(round => round.status === 'SUCCEEDED' && round.executionKind === 'native-aedt' && round.resultSha256 && round.solvedProjectSha256)
+      .map(round => ({ iterationId: job.id, round: round.number, taskId: job.taskId, aedtVersion: job.aedtVersion, runtime: job.runtime, resultSha256: round.resultSha256 })))
+    return { state: script.disabled ? 'disabled' : solves.length ? 'solve-recorded' : readbacks.length ? 'readback-recorded' : 'unverified',
+      nativeReadbacks: readbacks.length, nativeSolves: solves.length,
+      currentRuntimeReadbacks: readbacks.filter(run => matchesCurrent(run.runtime)).length,
+      currentRuntimeSolves: solves.filter(run => run.runtime && matchesCurrent(run.runtime)).length,
+      simulatedRuns: runs.filter(run => run.evidence?.kind === 'test-double').length,
+      scopes: [...new Set(readbacks.map(run => run.aedtVersion))].sort(),
+      submissions: this.submissions(id),
+      latestFailure: runs.filter(run => run.status === 'FAILED').at(-1)?.error,
+      evidenceScope: 'Historical receipts only; current project objects, parameters and engineering behavior still require checking' }
   }
   reusableEvidence(id: string, runtime: PluginExecutionIdentity, aedtVersion: string): ScriptRun[] {
     if (this.get(id).disabled || !runtime.packageDigest || !runtime.environmentDigest) return []

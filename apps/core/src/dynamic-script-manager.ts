@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { basename, join, resolve } from 'node:path'
 import { lstat, realpath } from 'node:fs/promises'
 import type { ArtifactStore } from '@thermal-agent/artifact-store'
@@ -16,6 +17,7 @@ export interface DynamicScriptTaskInput {
   design?: string
 }
 export class DynamicScriptManager {
+  private readonly coreInstanceId = randomUUID()
   private readonly workspace: TaskWorkspace
   private starting = false
   private closing = false
@@ -39,7 +41,7 @@ export class DynamicScriptManager {
       pinned = await pinIcepakPlugin(this.plugin, options.expectedRuntime)
       if (this.closing) throw new Error('Dynamic script manager is closing')
       if (!pinned.port.executeScript) throw new Error('Icepak plugin does not support dynamic scripts')
-      const run = this.library.beginRun({ ...request, runtime: pinned.identity })
+      const run = this.library.beginRun({ ...request, coreInstanceId: this.coreInstanceId, runtime: pinned.identity })
       const controller = new AbortController()
       const cancel = () => controller.abort()
       options.signal?.addEventListener('abort', cancel, { once: true })
@@ -107,7 +109,7 @@ export class DynamicScriptManager {
     if (project.sha256 !== result.verifiedProjectSha256) throw new Error('Verified project digest mismatch')
     // Receipt is constructed by Core and stored content-addressed. Script self-reports remain labelled.
     const evidence = await this.artifacts.putBytes(Buffer.from(JSON.stringify({ schemaVersion: 1, runId: run.id,
-      taskId: run.taskId, scriptId: run.scriptId, runtime: run.runtime, parameters: run.parameters,
+      taskId: run.taskId, coreInstanceId: run.coreInstanceId, scriptId: run.scriptId, runtime: run.runtime, parameters: run.parameters,
       inputSha256: run.projectSha256, project, result })), 'dynamic-script-receipt.json', 'application/json')
     this.recordArtifact?.(project)
     this.recordArtifact?.(evidence)

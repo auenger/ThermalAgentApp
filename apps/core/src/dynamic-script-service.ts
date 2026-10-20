@@ -1,3 +1,5 @@
+import { collectDynamicScriptEvidence } from './dynamic-script-evidence.js'
+import type { PluginExecutionIdentity } from '@thermal-agent/contracts'
 import { DynamicScriptIterations } from './dynamic-script-iterations.js'
 import { constants } from 'node:fs'
 import { copyFile, mkdir } from 'node:fs/promises'
@@ -21,7 +23,7 @@ export class DynamicScriptService {
   get busy(): boolean { return this.manager.busy || this.iterations.busy }
   private readonly workspace: TaskWorkspace
   constructor(home: string, private readonly database: LocalDatabase, private readonly artifacts: ArtifactStore,
-    plugin: IcepakPluginPort, private readonly nodeId: string, private readonly operations: ModelPreparationStore) {
+    plugin: IcepakPluginPort, private readonly nodeId: string, private readonly operations: ModelPreparationStore, private readonly matchesCurrentRuntime: (identity: PluginExecutionIdentity) => boolean = () => false) {
     this.workspace = new TaskWorkspace(home)
     this.library = new DynamicScriptLibrary(join(home, 'data', 'dynamic-scripts.sqlite'))
     this.manager = new DynamicScriptManager(home, this.library, artifacts, plugin, artifact => database.upsertArtifact(artifact))
@@ -39,6 +41,7 @@ export class DynamicScriptService {
     if (!task || task.ownerNodeId !== this.nodeId) throw new Error('动态脚本仅能操作本机拥有的任务')
     return task
   }
+  private describe(id: string) { return { ...this.library.get(id), validation: this.library.validationSummary(id, this.matchesCurrentRuntime) } }
   private async sourcePath(taskId: string, sha256: string): Promise<string> {
     const directory = join(this.workspace.ensure(taskId), 'dynamic-inputs', sha256)
     await mkdir(directory, { recursive: true })
@@ -71,12 +74,16 @@ export class DynamicScriptService {
   async dispatch(method: string, path: string, body?: unknown, query = '', channel: 'app' | 'agent' = 'app'): Promise<{ status: number; body: unknown }> {
     this.recover()
     if (path === '/dynamic-scripts') {
-      if (method === 'GET') return { status: 200, body: { scripts: this.library.list(query) } }
-      if (method === 'POST') return { status: 201, body: { script: this.library.stage(body) } }
+      if (method === 'GET') return { status: 200, body: { scripts: this.library.list(query).map(script => this.describe(script.id)) } }
+      if (method === 'POST') {
+        const value = object(body)
+        const script = this.library.stage(body, { channel, ...(channel === 'agent' && typeof value.sourceSessionId === 'string' ? { sessionId: value.sourceSessionId } : {}) })
+        return { status: 201, body: { script: this.describe(script.id) } }
+      }
     }
     const scriptMatch = path.match(/^\/dynamic-scripts\/([a-f0-9]{64})(\/disable)?$/u)
     if (scriptMatch) {
-      if (method === 'GET' && !scriptMatch[2]) return { status: 200, body: { script: this.library.get(scriptMatch[1]) } }
+      if (method === 'GET' && !scriptMatch[2]) return { status: 200, body: { script: this.describe(scriptMatch[1]) } }
       if (method === 'POST' && scriptMatch[2]) {
         const value = object(body)
         if (typeof value.disabled !== 'boolean') throw new Error('disabled 必须为布尔值')
@@ -108,9 +115,10 @@ export class DynamicScriptService {
       }
       throw new Error('未知迭代操作')
     }
-    const match = path.match(/^\/tasks\/([a-f0-9-]{36})\/(script-context|script-runs)(?:\/([a-f0-9-]{36})\/(cancel))?$/u)
+    const match = path.match(/^\/tasks\/([a-f0-9-]{36})\/(script-context|script-runs|script-evidence)(?:\/([a-f0-9-]{36})\/(cancel))?$/u)
     if (match) {
       const task = this.task(match[1])
+      if (method === 'GET' && match[2] === 'script-evidence' && !match[3]) return { status: 200, body: await collectDynamicScriptEvidence(task.id, this.library, this.artifacts) }
       if (method === 'GET' && !match[3]) return { status: 200, body: match[2] === 'script-context' ? await this.context(task.id) : { runs: this.library.runs(task.id) } }
       if (method === 'POST' && match[2] === 'script-runs') {
         if (match[3]) {

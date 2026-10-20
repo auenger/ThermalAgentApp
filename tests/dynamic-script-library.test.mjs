@@ -59,3 +59,23 @@ test('run receipts are terminal and recovery does not invent success', async t =
   assert.throws(() => f.library.finish(run.id, { status: 'SUCCEEDED', evidence: evidence('native-aedt') }), /terminal/)
   assert.throws(() => begin(f.library, script.id, { aedtVersion: '2025.1' }), /AEDT version/)
 })
+
+test('submission provenance and historical validation scopes survive restart without promoting test doubles', async t => {
+  const f = await fixture(t)
+  const script = f.library.stage(definition, { channel: 'agent', sessionId: 'session-123' })
+  f.library.stage(definition, { channel: 'agent', sessionId: 'session-123' })
+  assert.equal(f.library.submissions(script.id).length, 1)
+  assert.throws(() => f.library.stage(definition, { channel: 'agent', sessionId: '../invalid' }), /provenance/)
+  const fake = begin(f.library, script.id)
+  f.library.finish(fake.id, { status: 'SUCCEEDED', evidence: evidence('test-double') })
+  assert.equal(f.library.validationSummary(script.id).state, 'unverified')
+  const actual = begin(f.library, script.id)
+  f.library.finish(actual.id, { status: 'SUCCEEDED', evidence: evidence('native-aedt') }) // synthetic metadata, not native execution
+  f.restart()
+  const summary = f.library.validationSummary(script.id, identity => identity.environmentDigest === runtime.environmentDigest)
+  assert.equal(summary.state, 'readback-recorded'); assert.equal(summary.nativeReadbacks, 1)
+  assert.equal(summary.nativeSolves, 0); assert.equal(summary.currentRuntimeReadbacks, 1)
+  assert.equal(f.library.validationSummary(script.id, () => false).currentRuntimeReadbacks, 0)
+  assert.equal(summary.submissions[0].sessionId, 'session-123')
+  assert.equal(summary.simulatedRuns, 1)
+})

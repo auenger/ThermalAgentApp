@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { Button, Field, Input, Select } from '@fluentui/react-components'
 
 type Parameter = { type: 'number' | 'integer' | 'string' | 'boolean'; description: string; required?: boolean; unit?: string; default?: string | number | boolean; minimum?: number; maximum?: number; enum?: Array<string | number | boolean> }
-export type Script = { id: string; name: string; version: string; description: string; source: string; disabled: boolean; parameters: Record<string, Parameter>; applicability: { aedtVersions: string[]; requiredObjects: string[] } }
+export type Script = { id: string; name: string; version: string; description: string; source: string; disabled: boolean; validation?: { state: string; nativeReadbacks: number; nativeSolves: number; simulatedRuns: number; currentRuntimeReadbacks: number; currentRuntimeSolves: number; scopes: string[]; submissions: Array<{ channel: string; sessionId?: string; recordedAt: string }> }; parameters: Record<string, Parameter>; applicability: { aedtVersions: string[]; requiredObjects: string[] } }
 type Run = { id: string; scriptId: string; status: string; parameters: Record<string, unknown>; error?: string; startedAt: string; evidence?: { kind: string; projectSha256: string; artifactSha256: string } }
 type Context = { source: { sha256: string; originalName: string } | null; planConfirmed: boolean; aedtVersion?: string; runs: Run[]; busy: boolean; pendingEngineeringCleanup: boolean }
 async function api<T>(path: string, value?: unknown): Promise<T> {
@@ -12,6 +12,7 @@ async function api<T>(path: string, value?: unknown): Promise<T> {
   if (!response.ok) throw new Error(body.error?.message ?? '脚本操作失败')
   return body
 }
+const validationName: Record<string, string> = { unverified: '待实机验证', 'readback-recorded': '有原生读回记录', 'solve-recorded': '有原生求解记录', disabled: '已停用' }
 const statusName: Record<string, string> = { RUNNING: '执行中', SUCCEEDED: '持久工程读回通过', FAILED: '失败', CANCELLED: '已取消', INTERRUPTED: '执行中断' }
 export function scriptParameterValues(script: Script, values: Record<string, string>): Record<string, unknown> {
   const parameters: Record<string, unknown> = {}
@@ -55,6 +56,15 @@ export function DynamicScriptWorkspace({ taskId }: { taskId: string }) {
       setContext(current => current ? { ...current, busy: true, runs: [...current.runs, response.run] } : current)
     } catch (err) { setError(String(err)) } finally { setPending(false) }
   }
+  async function exportEvidence() {
+    setPending(true); setError('')
+    try {
+      const report = await api(`/api/tasks/${taskId}/script-evidence`)
+      const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }))
+      const link = document.createElement('a'); link.href = url; link.download = `dynamic-icepak-${taskId}.json`; link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) { setError(String(err)) } finally { setPending(false) }
+  }
   async function cancel(runId: string) {
     setPending(true); setError('')
     try { await api(`/api/tasks/${taskId}/script-runs/${runId}/cancel`, {}); setError('已请求取消，正在等待执行退出。') }
@@ -69,10 +79,17 @@ export function DynamicScriptWorkspace({ taskId }: { taskId: string }) {
     {context && !context.planConfirmed && <p>执行前请先在任务中确认仿真计划。</p>}
     {context?.pendingEngineeringCleanup && <p>前次工程进程尚未完成清理，暂时不能开始新操作。</p>}
     <Field label="选择已保存脚本"><Select value={selected} onChange={(_, data) => { setSelected(data.value); setValues({}) }}>
-      <option value="">选择脚本</option>{scripts.filter(item => !item.disabled).map(item => <option key={item.id} value={item.id}>{item.name} · {item.version} · {item.id.slice(0, 8)}</option>)}
+      <option value="">选择脚本</option>{scripts.filter(item => !item.disabled).map(item => <option key={item.id} value={item.id}>{item.name} · {item.version} · {validationName[item.validation?.state ?? 'unverified']} · {item.id.slice(0, 8)}</option>)}
     </Select></Field>
     {!scripts.length && <p>还没有保存的脚本。可在 AI 对话中说明需要调整的对象和参数。</p>}
     {script && <>
+      {script.validation && <div>
+        <p>{validationName[script.validation.state]} · 原生读回 {script.validation.nativeReadbacks} 次 · 原生求解 {script.validation.nativeSolves} 轮</p>
+        <p>最近环境检查匹配：读回 {script.validation.currentRuntimeReadbacks} 次、求解 {script.validation.currentRuntimeSolves} 轮。历史记录不能替代当前工程检查。</p>
+        {script.validation.scopes.length > 0 && <p>历史 AEDT 版本：{script.validation.scopes.join('、')}</p>}
+        {script.validation.simulatedRuns > 0 && <p>另有 {script.validation.simulatedRuns} 次测试替身记录。</p>}
+        <details><summary>查看脚本提交来源</summary>{script.validation.submissions.map((item, i) => <p key={i}>{item.channel === 'agent' ? 'DSH 工具提交' : item.channel === 'app' ? 'App 提交' : '内部登记'} · {new Date(item.recordedAt).toLocaleString()}{item.sessionId ? ` · 会话 ${item.sessionId}` : ''}</p>)}</details>
+      </div>}
       <p>{script.description} · 适用 AEDT：{script.applicability.aedtVersions.join('、')}</p>
       {script.applicability.requiredObjects.length > 0 && <p>执行前检查对象：{script.applicability.requiredObjects.join('、')}</p>}
       <details><summary>查看 Python 源码</summary><pre>{script.source}</pre></details>
@@ -88,6 +105,7 @@ export function DynamicScriptWorkspace({ taskId }: { taskId: string }) {
     {error && <p role="alert">{error}</p>}
     <ScriptIterationPanel taskId={taskId} script={script} values={values} />
     <h3>执行记录</h3>
+    <Button disabled={pending || context?.busy} onClick={() => void exportEvidence()}>校验并导出验收记录</Button>
     {!context?.runs.length && <p>尚无动态脚本执行记录。</p>}
     {context?.runs.slice().reverse().map(run => <article className="dynamic-script-run" key={run.id}>
       <strong>{scripts.find(item => item.id === run.scriptId)?.name ?? run.scriptId.slice(0, 12)} · {statusName[run.status] ?? run.status}</strong>

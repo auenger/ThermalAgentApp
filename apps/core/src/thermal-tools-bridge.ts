@@ -90,7 +90,7 @@ export class ThermalToolsBridge {
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     if (url.pathname === '/v1/dynamic-scripts' || url.pathname.startsWith('/v1/dynamic-scripts/') ||
-      /^\/v1\/tasks\/[^/]+\/(?:script-context|script-runs|script-iterations)(?:\/|$)/u.test(url.pathname)) {
+      /^\/v1\/tasks\/[^/]+\/(?:script-context|script-runs|script-iterations|script-evidence)(?:\/|$)/u.test(url.pathname)) {
       if (!this.dynamicScripts) throw new Error('Dynamic script service is unavailable')
       if (request.method !== 'GET' && request.method !== 'POST') throw new Error('Unsupported dynamic script method')
       const result = await this.dynamicScripts.dispatch(request.method, url.pathname.slice(3), request.method === 'POST' ? await readJson(request, 256 * 1024) : undefined, url.searchParams.get('query') ?? '', 'agent')
