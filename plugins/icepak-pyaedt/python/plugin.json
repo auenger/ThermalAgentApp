@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "hostApi": 1,
   "id": "icepak-pyaedt",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "kind": "icepak",
   "entry": { "root": "python", "module": "thermal_icepak_plugin" },
   "capabilities": ["environment_probe", "health", "cad_inspect", "model_prepare", "model_validate", "project_inspect", "parameter_check", "baseline_solve", "fan_solve", "dynamic_script"],

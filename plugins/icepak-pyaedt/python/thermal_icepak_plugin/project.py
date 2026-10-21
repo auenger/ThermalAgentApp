@@ -114,7 +114,7 @@ def _project_metadata(ipk: Any) -> dict[str, Any]:
     modeler = getattr(ipk, "modeler", None)
     return {
         "name": str(getattr(ipk, "project_name", "")),
-        "aedtVersion": str(version or ""),
+        "aedtVersion": _normalize_aedt_version(version),
         "activeDesign": str(getattr(ipk, "design_name", "")),
         "designs": [str(name) for name in getattr(ipk, "design_list", [])],
         "setups": [str(name) for name in getattr(ipk, "setup_names", [])],

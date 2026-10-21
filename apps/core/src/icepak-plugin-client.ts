@@ -211,6 +211,7 @@ export class IcepakPluginClient {
     let lineBuffer = ''
     let responseLine = ''
     let stderr = ''
+    let lastStage: string | undefined
     let stdoutBytes = 0
     let stdoutOverflow = false
     child.stdin.on('error', () => { /* EPIPE during cancellation/exit is handled by the process close event. */ })
@@ -233,6 +234,7 @@ export class IcepakPluginClient {
           try {
             const event = JSON.parse(line) as { id?: string; event?: string; stage?: string; pid?: number; creationTime?: number }
             if (event.id === id && event.event === 'progress' && typeof event.stage === 'string') {
+              lastStage = event.stage.slice(0, 160)
               options.onProgress?.(event.stage)
             } else if (event.id === id && event.event === 'managed_process' && Number.isInteger(event.pid) && typeof event.creationTime === 'number') {
               options.onManagedResource?.(event.pid!, event.creationTime)
@@ -284,7 +286,11 @@ export class IcepakPluginClient {
         if (forceTimer) clearTimeout(forceTimer)
         options.signal?.removeEventListener('abort', abort)
         if (timedOut) {
-          reject(Object.assign(new Error(`Icepak plugin ${method} timed out`), { code: 'PLUGIN_TIMEOUT' }))
+          if (lastStage === 'pyaedt_preloading') {
+            reject(new PluginResponseError('PYAEDT_IMPORT_TIMEOUT', `PyAEDT import did not finish before the ${timeoutMs} ms request deadline; method=${method}; last stage=${lastStage}`))
+            return
+          }
+          reject(Object.assign(new Error(`Icepak plugin ${method} timed out${lastStage ? ` (last stage: ${lastStage})` : ''}`), { code: 'PLUGIN_TIMEOUT' }))
           return
         }
         if (aborted) {

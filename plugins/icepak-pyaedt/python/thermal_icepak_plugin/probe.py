@@ -74,6 +74,7 @@ def probe_environment() -> dict[str, object]:
             "fan_solve",
             "convergence_evidence",
             "parameter_check",
+            "dynamic_script",
         ],
         "diagnostics": diagnostics,
     }

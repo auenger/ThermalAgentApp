@@ -114,7 +114,7 @@ export class DshRuntime {
       await this.host.start()
       if (this.plugins && !this.closing && !this.repairTimer) {
         this.repairTimer = setInterval(() => {
-          if (this.status.phase === 'ready' && !this.closing && !this.repairSuspended) void this.plugins!.repairJobs.reconcile(() => this.plugins!.repairJobInputs(), this.repairTransport)
+          if (this.status.phase === 'ready' && !this.closing && !this.repairSuspended) void this.plugins!.repairJobs.reconcile(() => this.plugins!.repairJobInputs(), this.repairTransport).then(() => this.plugins!.applyReadyRepairs()).catch(() => { /* Application failure stays in host evidence; no business replay. */ })
         }, 5_000)
         this.repairTimer.unref()
       }

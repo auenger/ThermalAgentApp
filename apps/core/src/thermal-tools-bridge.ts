@@ -103,7 +103,7 @@ export class ThermalToolsBridge {
       const status = request.method === 'POST' ? await this.plugins.reconcile() : this.plugins.status()
       writeJson(response, 200, { automaticUpdates: status.automaticUpdates, held: status.held, runtimes: status.runtimes,
         active: status.active, revisions: status.revisions.map(revision => ({ digest: revision.digest, manifest: revision.manifest })),
-        validations: status.validations, releases: status.releases, updates: status.updates, repairCandidates: status.repairCandidates,
+        validations: status.validations, releases: status.releases, updates: status.updates, repairCandidates: status.repairCandidates, repairApplications: status.repairApplications, automaticRepairApply: status.automaticRepairApply,
         scope: 'Configured update sources and trusted packages only; repair candidates cannot execute before isolated validation' })
       return
     }

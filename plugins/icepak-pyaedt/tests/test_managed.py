@@ -126,6 +126,17 @@ class WindowsJobAdapterTests(unittest.TestCase):
         kernel = Kernel(config_ok=False)
         with self.assertRaisesRegex(RuntimeError, 'kill-on-close'): WindowsJob(kernel)
         self.assertEqual(kernel.assigned, []); self.assertEqual(kernel.closed, [17])
+    def test_float_epoch_rounding_accepts_same_process_but_rejects_reuse(self):
+        birth = 1792521335.3703525
+        kernel = Kernel(member=False, birth=birth)
+        WindowsJob(kernel).include_process(22, birth)
+        self.assertEqual(kernel.assigned[-1], (17, 8))
+        for different in (birth + 0.001, birth + 0.5, float('nan'), float('inf')):
+            kernel = Kernel(member=False, birth=birth)
+            with self.assertRaisesRegex(RuntimeError, 'birth identity changed'):
+                WindowsJob(kernel).include_process(22, different)
+            self.assertEqual(kernel.assigned, [(17, 7)])
+
     def test_pid_birth_mismatch_prevents_assignment(self):
         kernel = Kernel(member=False, birth=200.0); job = WindowsJob(kernel)
         with self.assertRaisesRegex(RuntimeError, 'birth identity changed'): job.include_process(22, 100.0)

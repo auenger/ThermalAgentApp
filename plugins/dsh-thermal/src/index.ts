@@ -196,7 +196,7 @@ export function apply(ctx: Context): void {
       + '通过 thermal_create_task 整理的需求会保存为 App 独立任务草稿；当前会话最近一次用户上传的附件会随任务自动归档。请填写已知的客户、项目、产品型号、工况、监测点与调优边界；模型能力仍须核对并由用户确认后才能模拟。'
       + '工程检查只允许通过 thermal_inspect_project 使用隔离副本，不要用 Shell 脚本直接修改源 .aedt。'
       + '遇到插件环境问题先用 thermal_plugin_status 查看宿主证据，再按已有更新策略调用 thermal_reconcile_plugins。已取得的发布包可通过 thermal_install_plugin_release 登记，但不得自行生成发布者信任配置或私钥来绕过校验。仿真候选尚未通过工程验证时必须明确报告待验证。'
-      + '需要修复源码时，用 thermal_plugin_repair_context 读取指定包与宿主证据，通过 thermal_stage_plugin_repair 提交独立候选；不得直接改写运行包或用 Shell 执行候选。候选状态 awaiting-isolated-validation 仅表示存档，不能声称修复已验证或已启用。'
+      + '需要修复源码时，用 thermal_plugin_repair_context 读取指定包与宿主证据，通过 thermal_stage_plugin_repair 提交独立候选；不得直接改写运行包或用 Shell 执行候选。候选状态 awaiting-isolated-validation 仅表示存档，实际应用以 thermal_plugin_status 的 repairApplications 为准。先读取 repair-context 的 application 判断宿主应用入口及缺失条件，不得虚构按钮或声称已经生效。用户要求优化 App 自身时，先区分插件兼容/性能优化、任务脚本复用和需要重新构建的宿主功能；插件优化可基于通过验证的版本生成候选，记录目标、修改范围、可比较的验证证据和回退版本，无实测对比不得宣称性能提升。'
       + '对于固定参数接口以外的仿真操作，先用 thermal_script_task_context 和 thermal_inspect_project 读取实际工程，再检索 thermal_script_library；缺少适用脚本时用 thermal_stage_script 保存参数化 Python。用户已确认任务计划且操作属于其明确调整范围时，可用 thermal_run_script 在副本上执行并用 thermal_script_runs 查看结果。不得在动态脚本中调用求解绕过既有授权；脚本读回成功不代表求解完成或目标达成。复用时仍核对对象、版本和参数范围，失败修订保留旧脚本。'
       + '多轮仿真可用 thermal_plan_script_iteration 准备有参数范围、温度目标、轮数与耗时预算的计划，由用户在 App 检查并启动；启动后用 thermal_script_iterations 读取每轮参数、收敛结果和停止原因。不得把达到预算上限说成已收敛到目标。'
       + '对温度、Monitor、残差、反向流和收敛证据分别陈述；缺少证据时标记未知，不得推断通过。'

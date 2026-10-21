@@ -7,6 +7,8 @@ interface PluginStatus {
   runtimeStorage?: { checkedAt?: string; removed: string[]; retained: Array<{ directory: string; reason: string }>; error?: string }
   runtimeRepairs?: Array<{ key: string; packageDigest: string; detectedAt: string; status: string; reason: string; error?: string }>
   automaticUpdates: boolean
+  automaticRepairApply?: boolean
+  repairApplications?: Array<{ candidateId: string; state: string; admitted: boolean; receipts: Array<{ passed: boolean; checks: Array<{ name: string; passed: boolean; detail: string }> }> }>
   automaticRepair?: boolean
   executionEvidenceError?: string
   executionFailures?: Array<{ packageDigest: string; environmentDigest: string; method: string; code: string; detail: string; observedAt: string }>
@@ -67,7 +69,7 @@ export function PluginSettings() {
   }, [])
 
   async function action(operation: string, value: object = {}) {
-    const setPending = operation === 'policy' ? setPolicyBusy : setBusy
+    const setPending = (operation === 'policy' || operation === 'repair-application-policy') ? setPolicyBusy : setBusy
     setPending(true); setError('')
     try {
       const response = await fetch(`/api/plugin-runtime/${operation}`, { method: 'POST',
@@ -87,9 +89,17 @@ export function PluginSettings() {
         onChange={(_, data) => void action('policy', { automaticUpdates: data.checked })} />
       <Switch label="故障后自动请求模型生成修复候选" checked={status?.automaticRepair ?? false} disabled={policyBusy || !status}
         onChange={(_, data) => void action('policy', { automaticRepair: data.checked })} />
+      <Switch label="候选通过宿主验证后自动应用" checked={status?.automaticRepairApply ?? false} disabled={policyBusy || !status}
+        onChange={(_, data) => void action('repair-application-policy', { enabled: data.checked })} />
       <Button disabled={busy} onClick={() => void action('reconcile')}>{busy ? '正在处理…' : '立即检查环境与插件'}</Button>
     </div>
     <p>模型修复需同时开启自动升级，会消耗已配置模型的额度。每个版本与环境组合自动投递一次，五分钟后发起取消；候选仍需隔离验证后才能启用。</p>
+    <label>导入工程验证配置（样例、允许的参数变化与求解预算）：<input type="file" accept=".json,application/json" disabled={busy} onChange={event => {
+      const file = event.target.files?.[0]; event.target.value = ''
+      if (!file) return
+      if (file.size > 32 * 1024) { setError('工程验证配置超过 32 KiB'); return }
+      void file.text().then(text => action('engineering-policy', JSON.parse(text))).catch(() => setError('无法读取工程验证配置 JSON'))
+    }} /></label>
     {status?.executionEvidenceError && <p role="alert">业务故障记录失败，自动模型修复已暂停：{status.executionEvidenceError}</p>}
     {!!status?.executionFailures?.length && <details>
       <summary>业务兼容性故障（{status.executionFailures.length}）</summary>
@@ -126,11 +136,13 @@ export function PluginSettings() {
     {status?.releases.errors.map((detail, index) => <p key={index} role="alert">{detail}</p>)}
     {!!status?.repairCandidates?.candidates.length && <details>
       <summary>修复候选（{status.repairCandidates.candidates.length}）</summary>
-      <p>以下候选仅已存档，尚未执行隔离验证，也未启用。当前插件继续按已有策略运行。</p>
+      <p>候选应用前会核对基础版本与环境，并执行宿主验证；Icepak 需要已配置的 Windows 工程样例和求解预算。验证失败不会作为可用版本启用。</p>
       {status.repairCandidates.candidates.map(candidate => <details key={candidate.id}>
-        <summary>{names[candidate.pluginId] ?? candidate.pluginId} v{candidate.version} · 等待隔离验证</summary>
+        <summary>{names[candidate.pluginId] ?? candidate.pluginId} v{candidate.version} · {({ active: '已启用', pending: '待应用', failed: '验证失败', 'awaiting-validation': '等待宿主验证' } as Record<string, string>)[status.repairApplications?.find(item => item.candidateId === candidate.id)?.state ?? 'pending']}</summary>
         <div style={{ overflowWrap: 'anywhere' }}>
           <p>{candidate.reason}</p>
+          <Button disabled={busy || !status.automaticUpdates || status.repairApplications?.some(item => item.candidateId === candidate.id && item.admitted)} onClick={() => void action('apply-repair', { candidateId: candidate.id })}>验证并应用此修复</Button>
+          {status.repairApplications?.find(item => item.candidateId === candidate.id)?.receipts.map((receipt, index) => <div key={index}>{receipt.checks.map(check => <p key={check.name}>{check.passed ? '通过' : '失败'} · {check.name}：{check.detail}</p>)}</div>)}
           <p>提交时间：{new Date(candidate.createdAt).toLocaleString()}<br />基础插件：{candidate.basePackageDigest}<br />证据环境：{candidate.environmentDigest}</p>
           <ul>{candidate.changes.map(change => <li key={change.path}>{change.sha256 ? '修改或新增' : '删除'}：{change.path}</li>)}</ul>
         </div>

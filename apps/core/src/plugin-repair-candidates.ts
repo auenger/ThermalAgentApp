@@ -53,7 +53,8 @@ export class PluginRepairCandidates {
     return result
   }
 
-  private read(id: string): RepairCandidate {
+  read(id: string): RepairCandidate {
+    if (!digestPattern.test(id)) throw new Error('Invalid repair candidate ID')
     const directory = join(this.home, id), path = join(directory, 'candidate.json')
     if (!lstatSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink()) throw new Error('Invalid candidate directory')
     const stat = lstatSync(path)
@@ -63,6 +64,21 @@ export class PluginRepairCandidates {
       !digestPattern.test(value.basePackageDigest) || !digestPattern.test(value.environmentDigest) || !value.evidence ||
       value.evidence.packageDigest !== value.basePackageDigest || value.evidence.environmentDigest !== value.environmentDigest || !Array.isArray(value.changes)) throw new Error('Invalid candidate evidence')
     return value
+  }
+
+  admit(id: string, target: PluginStore): RepairCandidate {
+    const candidate = this.read(id)
+    const registry = new PluginStore(join(this.home, id, 'registry'))
+    const revision = registry.verify(candidate.packageDigest)
+    const base = target.verify(candidate.basePackageDigest)
+    const next = candidate.version.split('.').map(Number), previous = base.manifest.version.split('.').map(Number)
+    const difference = next.map((part, index) => part - previous[index]).find(value => value !== 0)
+    if (!/^\d+\.\d+\.\d+$/u.test(candidate.version) || !difference || difference < 0) throw new Error('Repair application requires a newer stable version')
+    const expected = { ...base.manifest, version: candidate.version }
+    if (JSON.stringify(revision.manifest) !== JSON.stringify(parseManagedPluginManifest(expected)) || revision.manifest.id !== candidate.pluginId) throw new Error('Repair candidate changed its inherited execution contract')
+    const installed = target.install(join(this.home, id, 'registry', 'packages', candidate.packageDigest))
+    if (installed.digest !== candidate.packageDigest) throw new Error('Repair candidate digest mismatch')
+    return candidate
   }
 
   stage(proposal: RepairProposal, base: PluginRevision, baseRoot: string, evidence: PluginValidation, executionFailures: PluginExecutionFailure[] = []): RepairCandidate {

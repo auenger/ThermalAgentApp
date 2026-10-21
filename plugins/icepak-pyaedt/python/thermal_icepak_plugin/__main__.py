@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+from contextlib import redirect_stdout
 import json
 import os
 import sys
@@ -141,6 +143,22 @@ def handle_request(value: Any, progress: Callable[[str], None] | None = None) ->
     return _failure(request_id, "METHOD_NOT_FOUND", f"unsupported method: {method}")
 
 
+def preload_engineering(request, progress):
+    """Windows extension loading must precede managed watcher threads.
+
+    Keep health/environment probes independent of PyAEDT imports. Fail explicitly
+    on import errors; the host timeout still bounds a stalled native loader.
+    """
+    methods = {"probe_launchability", "inspect_project", "check_changes", "fan_check",
+               "solve_project", "fan_solve", "inspect_cad", "prepare_model", "validate_model", "execute_script"}
+    if sys.platform != "win32" or not isinstance(request, dict) or request.get("method") not in methods:
+        return
+    progress("pyaedt_preloading")
+    with redirect_stdout(sys.stderr):
+        importlib.import_module("ansys.aedt.core")
+    progress("pyaedt_preloaded")
+
+
 def main() -> int:
     """Read requests until stdin closes and emit exactly one response per input line."""
     managed = os.environ.get("THERMAL_ICEPAK_MANAGED_ONESHOT") == "1"
@@ -160,6 +178,7 @@ def main() -> int:
             lifecycle = None
             try:
                 if managed:
+                    preload_engineering(request, lambda stage: print(json.dumps({"id": request_id, "event": "progress", "stage": stage}), file=protocol_output, flush=True))
                     lifecycle = start_managed(int(os.environ["THERMAL_ICEPAK_PARENT_PID"]),
                         lambda pid, created: print(json.dumps({"id": request_id, "event": "managed_process", "pid": pid, "creationTime": created}), file=protocol_output, flush=True), control)
                 response = handle_request(request, progress=lambda stage: print(

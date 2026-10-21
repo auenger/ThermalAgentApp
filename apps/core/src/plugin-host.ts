@@ -24,7 +24,7 @@ import { PluginRepairCandidates, parseRepairProposal } from './plugin-repair-can
 import { PluginRepairJobs, type RepairJobInputs } from './plugin-repair-jobs.js'
 
 type Kind = 'icepak' | 'report'
-interface Policy { automaticUpdates: boolean; automaticRepair?: boolean; builtinDigests: string[]; held: Record<string, string> }
+interface Policy { automaticUpdates: boolean; automaticRepair?: boolean; automaticRepairApply?: boolean; admittedRepairs?: string[]; builtinDigests: string[]; held: Record<string, string> }
 interface Runtime {
   id: string
   python: string
@@ -69,6 +69,7 @@ export class PluginHost {
   private readonly pythonEnvironments: PluginPythonEnvironments
   private readonly runtimeStorage: PluginRuntimeStorage
   private readonly repairCandidates: PluginRepairCandidates
+  private applyingRepair?: Promise<void>
   private executionEvidenceError?: string
   readonly repairJobs: PluginRepairJobs
   private runtimeReferences?: () => Promise<PluginExecutionIdentity[]>
@@ -232,7 +233,9 @@ export class PluginHost {
 
   private readPolicy(): Policy {
     const value = JSON.parse(readFileSync(this.policyPath, 'utf8')) as Policy
-    if (typeof value.automaticUpdates !== 'boolean' || value.automaticRepair !== undefined && typeof value.automaticRepair !== 'boolean' || !Array.isArray(value.builtinDigests) ||
+    if (typeof value.automaticUpdates !== 'boolean' || value.automaticRepair !== undefined && typeof value.automaticRepair !== 'boolean' ||
+      value.automaticRepairApply !== undefined && typeof value.automaticRepairApply !== 'boolean' ||
+      value.admittedRepairs !== undefined && (!Array.isArray(value.admittedRepairs) || value.admittedRepairs.length > 32 || value.admittedRepairs.some(id => !/^[a-f0-9]{64}$/u.test(id))) || !Array.isArray(value.builtinDigests) ||
       value.builtinDigests.some(digest => typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) ||
       !value.held || typeof value.held !== 'object' || Array.isArray(value.held) ||
       Object.entries(value.held).some(([id, digest]) => !['icepak-pyaedt', 'report-reportlab'].includes(id) || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest))) throw new Error('Invalid plugin update policy')
@@ -259,6 +262,66 @@ export class PluginHost {
 
   setAutomaticRepair(enabled: boolean): void { this.savePolicy({ ...this.policy, automaticRepair: enabled }) }
 
+  async configureEngineeringValidation(value: unknown): Promise<void> {
+    const policy = parseEngineeringValidationPolicy(value)
+    if (this.closed || this.store.isBusy('icepak-pyaedt') || this.runtimes.icepak.pending || this.engineeringStore?.reconcileRecoveredOperation()) throw new Error('请等待当前工程操作结束后更新验证配置')
+    const path = join(this.home, 'engineering-validation.json'), temporary = `${path}.${randomUUID()}.tmp`
+    try { writeFileSync(temporary, JSON.stringify(policy), { flag: 'wx', mode: 0o600 }); renameSync(temporary, path) }
+    finally { rmSync(temporary, { force: true }) }
+    this.invalidateRetry(this.runtimes.icepak)
+    await this.ensure('icepak', true)
+    if (!this.runtimes.icepak.engineeringPolicy) throw new Error(this.runtimes.icepak.engineeringDiagnostic ?? '工程验证配置未就绪')
+  }
+
+  setAutomaticRepairApply(enabled: boolean): void { this.savePolicy({ ...this.policy, automaticRepairApply: enabled }) }
+
+  private repairApplications() {
+    return this.repairCandidates.list().candidates.map(candidate => {
+      const admitted = this.policy.admittedRepairs?.includes(candidate.id) === true
+      const registry = this.store.list()
+      const current = registry.active[candidate.pluginId]?.current === candidate.packageDigest
+      const receipts = registry.validations.filter(v => v.packageDigest === candidate.packageDigest)
+      return { candidateId: candidate.id, admitted, state: current ? 'active' : !admitted ? 'pending' : receipts.some(v => !v.passed) ? 'failed' : 'awaiting-validation', receipts }
+    })
+  }
+
+  async applyRepairCandidate(id: string): Promise<void> {
+    if (this.applyingRepair) throw new Error('已有修复应用任务正在进行')
+    const work = async () => {
+      if (this.closed || !this.policy.automaticUpdates) throw new Error('请先开启插件自动更新')
+      const candidate = this.repairCandidates.read(id)
+      const kind = candidate.pluginId === 'icepak-pyaedt' ? 'icepak' : candidate.pluginId === 'report-reportlab' ? 'report' : undefined
+      if (!kind) throw new Error('Unsupported repair plugin')
+      const runtime = this.runtimes[kind]
+      if (this.policy.held[runtime.id]) throw new Error('插件处于固定版本状态，请先恢复版本选择')
+      if (runtime.pending) await runtime.pending.catch(() => {})
+      if (this.store.isBusy(runtime.id) || this.engineeringStore?.reconcileRecoveredOperation()) throw new Error('请等待当前工程操作结束后应用修复')
+      if (!this.trustedDigests().includes(candidate.basePackageDigest)) throw new Error('修复基础版本已不受信任')
+      const current = this.store.list().active[runtime.id]?.current
+      if (current && current !== candidate.basePackageDigest && current !== candidate.packageDigest) throw new Error('当前插件版本已变化，请基于新版本生成修复')
+      const snapshot = runtime.snapshots.get(candidate.basePackageDigest) ?? runtime.snapshot
+      if (!snapshot || pluginEnvironmentDigest(snapshot.environment) !== candidate.environmentDigest) throw new Error('修复环境已变化，请重新检查并生成候选')
+      if (kind === 'icepak' && (!runtime.engineeringPolicy || !this.engineeringStore)) throw new Error('尚未配置 Windows 工程验证样例与求解预算，不能将候选标为可用；请先配置 engineering-validation.json')
+      this.repairCandidates.admit(id, this.store)
+      const admittedRepairs = [...new Set([...(this.policy.admittedRepairs ?? []), id])]
+      this.savePolicy({ ...this.policy, admittedRepairs })
+      this.invalidateRetry(runtime)
+      await this.ensure(kind, true)
+      if (this.store.list().active[runtime.id]?.current !== candidate.packageDigest) throw new Error('修复尚未启用，请查看候选验证记录；当前版本保持原有选择策略')
+    }
+    this.applyingRepair = work()
+    try { await this.applyingRepair } finally { this.applyingRepair = undefined }
+  }
+
+  async applyReadyRepairs(): Promise<void> {
+    if (!this.policy.automaticRepairApply || !this.policy.automaticRepair || !this.policy.automaticUpdates || this.closed || this.applyingRepair) return
+    const candidate = this.repairCandidates.list().candidates.find(item => !this.policy.admittedRepairs?.includes(item.id) && !this.policy.held[item.pluginId] &&
+      Object.values(this.runtimes).some(runtime => runtime.id === item.pluginId && !runtime.pending && !!runtime.snapshot && pluginEnvironmentDigest(runtime.snapshot.environment) === item.environmentDigest) &&
+      (item.pluginId === 'report-reportlab' || !!this.runtimes.icepak.engineeringPolicy) &&
+      this.store.list().active[item.pluginId]?.current === item.basePackageDigest)
+    if (candidate) await this.applyRepairCandidate(candidate.id)
+  }
+
   repairJobInputs(): RepairJobInputs {
     const registry = this.store.list(), trusted = this.trustedDigests()
     const targets = Object.values(this.runtimes).flatMap(runtime => {
@@ -284,6 +347,7 @@ export class PluginHost {
   status() {
     const registry = this.store.list()
     return { automaticUpdates: this.policy.automaticUpdates, automaticRepair: this.policy.automaticRepair === true,
+      automaticRepairApply: this.policy.automaticRepairApply === true, repairApplications: this.repairApplications(),
       repairJobs: this.repairJobs.status(), held: { ...this.policy.held }, releases: this.releaseStatus, updates: this.updates.status(),
       executionEvidenceError: this.executionEvidenceError,
       runtimeRepairs: this.pythonEnvironments.status(),
@@ -358,6 +422,8 @@ export class PluginHost {
       evidenceNote: 'Execution failures are plugin-reported compatibility symptoms captured by the host, not independent proof of the cause or failed engineering validation. No automatic replay of business operations.',
       proposalFormat: { schemaVersion: 1, basePackageDigest: digest, environmentDigest: 'Use an existing host validation environmentDigest',
         version: 'A distinct candidate version', reason: 'Describe the observed fault and proposed change', files: [{ path: `${base.manifest.entry.root}/module.py`, content: 'Replacement UTF-8 source; null removes an existing file' }] },
+      selfImprovement: { scope: ['plugin Python compatibility and behavior', 'reusable parameterized task scripts'], evidenceRequired: ['observed issue or explicit optimization target', 'current package and environment', 'host validation results'], note: 'Optimization may use a previously passing base. Do not claim performance improvement without comparable measurements; desktop host and installer changes require a build.' },
+      application: { endpoint: '/api/plugin-runtime/apply-repair', requires: 'Local App approval or explicit automaticRepairApply policy; current base/environment; configured engineering validation for Icepak', automaticEnabled: this.policy.automaticRepairApply === true, engineeringConfigured: !!this.runtimes.icepak.engineeringPolicy },
       execution: 'disabled-until-isolated-validation', constraints: 'Source-only candidate; existing permissions, capabilities, entry point and dependency lock remain fixed. Staging does not validate, trust or activate code.' }
   }
 
@@ -372,7 +438,14 @@ export class PluginHost {
 
   private trustedDigests(): string[] {
     const revisions = this.store.list().revisions
-    return [...this.policy.builtinDigests, ...this.releaseStatus.releases.filter(release => {
+    const local = (this.policy.admittedRepairs ?? []).flatMap(id => {
+      try {
+        const candidate = this.repairCandidates.read(id)
+        this.store.verify(candidate.packageDigest)
+        return [candidate.packageDigest]
+      } catch { return [] } // A corrupt local repair must not disable the shipped fallback.
+    })
+    return [...this.policy.builtinDigests, ...local, ...this.releaseStatus.releases.filter(release => {
       if (release.id === 'report-reportlab') return true
       if (release.id !== 'icepak-pyaedt' || !this.runtimes.icepak.engineeringPolicy || !this.engineeringStore) return false
       const manifest = revisions.find(revision => revision.digest === release.digest)?.manifest
@@ -428,6 +501,7 @@ export class PluginHost {
     await Promise.allSettled(Object.values(this.runtimes).flatMap(runtime => runtime.pending ? [runtime.pending] : []))
     await Promise.allSettled([...this.preparationTasks.values()])
     await this.maintenance
+    if (this.applyingRepair) await this.applyingRepair.catch(() => {})
     await this.store.drain()
     this.owner.release()
   }

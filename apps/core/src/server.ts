@@ -251,10 +251,18 @@ async function route(
     }
     if (request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', '请使用 POST 更新插件设置')
     assertLocalWriteOrigin(request)
-    const body = await readJsonBody(request, url.pathname === '/api/plugin-runtime/install' ? MAX_PLUGIN_RELEASE_BYTES : 2048)
+    const body = await readJsonBody(request, url.pathname === '/api/plugin-runtime/install' ? MAX_PLUGIN_RELEASE_BYTES : url.pathname === '/api/plugin-runtime/engineering-policy' ? 32 * 1024 : 2048)
     if (!isObject(body)) throw new RequestError(400, 'INVALID_SETTING', '插件设置必须是对象')
     if (url.pathname === '/api/plugin-runtime/install') {
       plugins.installRelease(Buffer.from(JSON.stringify(body)))
+    } else if (url.pathname === '/api/plugin-runtime/engineering-policy') {
+      await plugins.configureEngineeringValidation(body)
+    } else if (url.pathname === '/api/plugin-runtime/apply-repair') {
+      if (typeof body.candidateId !== 'string') throw new RequestError(400, 'INVALID_SETTING', '缺少修复候选 ID')
+      await plugins.applyRepairCandidate(body.candidateId)
+    } else if (url.pathname === '/api/plugin-runtime/repair-application-policy') {
+      if (typeof body.enabled !== 'boolean') throw new RequestError(400, 'INVALID_SETTING', '策略必须为布尔值')
+      plugins.setAutomaticRepairApply(body.enabled)
     } else if (url.pathname === '/api/plugin-runtime/policy') {
       if (body.automaticUpdates === undefined && body.automaticRepair === undefined ||
         body.automaticUpdates !== undefined && typeof body.automaticUpdates !== 'boolean' ||

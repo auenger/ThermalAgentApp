@@ -6,6 +6,7 @@ then applies even when the worker is forcibly terminated before Python cleanup.
 """
 from __future__ import annotations
 
+import math
 import ctypes
 from ctypes import c_int32, c_uint32, c_uint64, c_size_t, c_void_p, c_wchar_p
 
@@ -64,8 +65,12 @@ class WindowsJob:
             created, exited, kernel, user = FileTime(), FileTime(), FileTime(), FileTime()
             if not self.kernel.GetProcessTimes(process, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
                 raise RuntimeError("MANAGED_JOB_UNAVAILABLE: AEDT process birth identity unavailable")
-            birth = ((created.high << 32) | created.low) / 10000000 - 11644473600
-            if birth != expected_creation_time:
+            # Subtract the FILETIME epoch as integers before converting to seconds.
+            # A few float ULPs cover psutil's alternate arithmetic (~1 us at
+            # contemporary epochs), without accepting a one-second PID mismatch.
+            birth = (((created.high << 32) | created.low) - 116444736000000000) / 10000000
+            tolerance = 4 * max(math.ulp(birth), math.ulp(expected_creation_time))
+            if not math.isfinite(expected_creation_time) or abs(birth - expected_creation_time) > tolerance:
                 raise RuntimeError("MANAGED_JOB_UNAVAILABLE: AEDT PID birth identity changed")
             in_job = c_int32()
             if not self.kernel.IsProcessInJob(process, self.handle, ctypes.byref(in_job)):

@@ -21,7 +21,7 @@ export interface PluginActivation { current: string; previous?: string }
 export interface PluginExecutionFailure {
   packageDigest: string; environmentDigest: string; method: string; code: string; detail: string; observedAt: string
 }
-const repairableErrors = new Set(['MODULENOTFOUNDERROR', 'IMPORTERROR', 'ATTRIBUTEERROR', 'TYPEERROR'])
+const repairableErrors = new Set(['MODULENOTFOUNDERROR', 'IMPORTERROR', 'ATTRIBUTEERROR', 'TYPEERROR', 'PYAEDT_IMPORT_TIMEOUT'])
 interface PluginState {
   schemaVersion: 1
   revisions: Record<string, PluginRevision>

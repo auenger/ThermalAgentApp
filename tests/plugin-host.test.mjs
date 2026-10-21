@@ -658,3 +658,105 @@ test('DSH repair proposals archive untrusted source with host evidence and never
   assert.equal(host.status().repairCandidates.candidates.length, 32)
   assert.throws(() => host.stageRepairCandidate({ ...proposal, reason: 'one too many' }), /storage is full/)
 })
+
+test('repair application refuses missing engineering policy and stale environments without executing the candidate', async t => {
+  const f = await fixture(t), host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  await host.icepak.probeEnvironment()
+  const base = host.status().active['icepak-pyaedt'].current
+  const context = host.repairContext(base)
+  const candidate = host.stageRepairCandidate({ schemaVersion: 1, basePackageDigest: base,
+    environmentDigest: context.validations[0].environmentDigest, version: '1.0.1', reason: 'Test application prerequisites',
+    files: [{ path: 'python/adapter/__main__.py', content: context.base ? host.repairContext(base, 'python/adapter/__main__.py').source.content.replaceAll('1.0.0','1.0.1') : '' }] })
+  await assert.rejects(host.applyRepairCandidate(candidate.id), /engineering-validation/)
+  assert.equal(host.status().active['icepak-pyaedt'].current, base)
+  assert.equal(host.store.list().revisions.some(r => r.digest === candidate.packageDigest), false)
+  host.setAutomaticRepairApply(true)
+  host.setAutomaticRepair(true)
+  await host.applyReadyRepairs()
+  assert.equal(host.status().repairApplications[0].state, 'pending')
+  assert.equal(host.repairContext(base).application.engineeringConfigured, false)
+  await assert.rejects(host.applyRepairCandidate('../policy.json'), /Invalid repair candidate/)
+})
+
+test('locally admitted repair runs host validation, persists its result and never treats staging as activation', async t => {
+  const f = await fixture(t)
+  let host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  await host.reconcile()
+  const base = host.status().active['report-reportlab'].current
+  const context = host.repairContext(base), path = 'python/adapter/__main__.py'
+  const candidate = host.stageRepairCandidate({ schemaVersion: 1, basePackageDigest: base,
+    environmentDigest: context.validations[0].environmentDigest, version: '1.0.1', reason: 'Test host validator lifecycle',
+    files: [{ path, content: host.repairContext(base,path).source.content.replaceAll('1.0.0','1.0.1') }] })
+  assert.equal(host.status().active['report-reportlab'].current, base)
+  let checked = 0
+  // Explicit host-validator substitute: tests admission/selection, not PDF engineering correctness.
+  host.validateRelease = async (kind, lease) => { checked++; assert.equal(kind,'report'); assert.equal(lease.revision.digest,candidate.packageDigest); return [{name:'host-test-fixture',passed:true,detail:'Test substitute'}] }
+  await host.applyRepairCandidate(candidate.id)
+  assert.equal(checked,1)
+  assert.equal(host.status().active['report-reportlab'].current,candidate.packageDigest)
+  assert.equal(host.status().repairApplications[0].state,'active')
+  await host.close(); host = new PluginHost(f.home,f.options)
+  await host.reconcile()
+  assert.equal(host.status().active['report-reportlab'].current,candidate.packageDigest)
+  await host.rollback('report-reportlab')
+  assert.equal(host.status().active['report-reportlab'].current,base)
+})
+
+test('failed repair validation retains the previous plugin and does not loop automatically', async t => {
+  const f = await fixture(t), host = new PluginHost(f.home, f.options)
+  t.after(() => host.close())
+  await host.reconcile()
+  const base = host.status().active['report-reportlab'].current
+  const context = host.repairContext(base), path = 'python/adapter/__main__.py'
+  const candidate = host.stageRepairCandidate({ schemaVersion:1, basePackageDigest:base,
+    environmentDigest:context.validations[0].environmentDigest, version:'1.0.1', reason:'Invalid fixture must not become active',
+    files:[{path, content:host.repairContext(base,path).source.content.replaceAll('1.0.0','1.0.1')}] })
+  let checked = 0
+  host.validateRelease = async () => { checked++; return [{name:'host-test-fixture',passed:false,detail:'Fixture regression'}] }
+  host.setAutomaticRepair(true); host.setAutomaticRepairApply(true)
+  await assert.rejects(host.applyReadyRepairs(), /尚未启用/)
+  await host.applyReadyRepairs()
+  assert.equal(checked,1)
+  assert.equal(host.status().active['report-reportlab'].current,base)
+  assert.equal(host.status().repairApplications.find(x=>x.candidateId===candidate.id).state,'failed')
+})
+
+test('PyAEDT import timeout becomes repair evidence without confusing solver timeout with import failure', async t => {
+  const f=await fixture(t), host=new PluginHost(f.home,f.options)
+  t.after(()=>host.close())
+  await writeFile(join(f.options.icepak.pluginRoot,'adapter','__main__.py'), `import sys,json,time
+r=json.loads(sys.stdin.readline())
+if r['method']=='probe_environment':
+ print(json.dumps({'id':r['id'],'event':'progress','stage':'pyaedt_preloading'}),flush=True)
+ time.sleep(60)
+else:
+ print(json.dumps({'id':r['id'],'ok':True,'result':{'pluginId':'icepak-pyaedt','pluginVersion':'1.0.0','protocolVersion':'1.0.0','status':'ok'}}))
+`)
+  host.setAutomaticRepair(true)
+  await assert.rejects(host.icepak.call('probe_environment',{}, {timeoutMs:1000}), /PYAEDT_IMPORT_TIMEOUT/)
+  const failures=host.status().executionFailures
+  assert.equal(failures.length,1)
+  assert.equal(failures[0].code,'PYAEDT_IMPORT_TIMEOUT')
+  assert.match(failures[0].detail,/pyaedt_preloading/)
+  assert.equal(host.repairJobInputs().targets.length,1)
+})
+
+test('candidate admission rejects changed environment and corrupted candidate bytes', async t => {
+  const f=await fixture(t)
+  let generation=0
+  const host=new PluginHost(f.home,{...f.options, inspect:async()=>({executable,environment:{...structuredClone(environment),versions:{...environment.versions,generation:String(generation)}}})})
+  t.after(()=>host.close())
+  await host.reconcile()
+  const base=host.status().active['report-reportlab'].current, path='python/adapter/__main__.py'
+  const candidate=host.stageRepairCandidate({schemaVersion:1,basePackageDigest:base,environmentDigest:host.repairContext(base).validations[0].environmentDigest,
+    version:'1.0.1',reason:'Test stale and tampered repair',files:[{path,content:host.repairContext(base,path).source.content.replaceAll('1.0.0','1.0.1')}]})
+  generation=1; await host.reconcile()
+  await assert.rejects(host.applyRepairCandidate(candidate.id),/修复环境已变化/)
+  assert.equal(host.store.list().revisions.some(r=>r.digest===candidate.packageDigest),false)
+  generation=0; await host.reconcile()
+  await writeFile(join(f.home,'repair-candidates',candidate.id,'registry','packages',candidate.packageDigest,path),'tampered')
+  await assert.rejects(host.applyRepairCandidate(candidate.id),/integrity|digest|changed/i)
+  assert.equal(host.status().active['report-reportlab'].current,base)
+})
