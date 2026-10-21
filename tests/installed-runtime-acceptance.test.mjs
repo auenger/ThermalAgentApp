@@ -13,9 +13,10 @@ async function fixture(t) {
     ...['accept-installed-runtime.mjs', 'verify-windows-runtime.mjs', 'probe-windows-plugin-isolation.mjs'].map(name => 'runtime-checks/' + name)]) {
     await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), 'fixture, not executable')
   }
+  await writeFile(join(root, 'app.asar.unpacked/node_modules/@deepseek-ai/dsh/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.2' }))
   const calls = [], published = []
   return { root, calls, published, options: { resources: root, platform: 'win32', arch: 'x64',
-    run(executable, args, options) { calls.push({ executable, args, options }); return args.length === 1 ? 'v22.22.0\n' : '0.1.5-rc.2\n' },
+    run(executable, args, options) { calls.push({ executable, args, options }); return args.length === 1 ? 'v22.22.0\n' : '0.2.1-rc.2\n' },
     pythonProbe(...args) { calls.push({ python: args }); return { platform: 'win32', bits: 64, isolatedEnvironments: true, python: '3.12.10' } },
     publish: report => published.push(report) } }
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 export const OFFLINE_PYTHON_PROBE = `
@@ -81,7 +81,7 @@ export function verifyWindowsRuntime(root = resolve(import.meta.dirname, '..')) 
   const dshVersion = execFileSync(paths.node, [paths.dsh, '--version'], {
     encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'pipe'],
   }).trim()
-  if (dshVersion !== '0.1.5-rc.2') throw new Error(`Bundled DSH version is unsupported: ${dshVersion}`)
+  if (dshVersion !== JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies['@deepseek-ai/dsh']) throw new Error(`Bundled DSH version is unsupported: ${dshVersion}`)
   execFileSync(paths.node, [join(root, 'scripts', 'smoke-dsh-agent-tools.mjs')], {
     cwd: root, timeout: 60_000, stdio: 'pipe',
   })

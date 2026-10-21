@@ -82,12 +82,16 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   const icepakMain = join(paths.icepakPluginRoot, 'thermal_icepak_plugin', '__main__.py')
   const reportMain = join(paths.reportPluginRoot, 'thermal_report_plugin', '__main__.py')
   const acceptanceFiles = [
+    join(unpacked, 'plugins', 'dsh-thermal', 'dist', 'client.js'),
+    join(unpacked, 'plugins', 'dsh-thermal', 'dist', 'launcher.mjs'),
+    join(unpacked, 'plugins', 'dsh-thermal', 'package.json'),
+    join(unpacked, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
     ...['accept-installed-runtime.mjs', 'verify-windows-runtime.mjs', 'probe-windows-plugin-isolation.mjs'].map(name => join(resources, 'runtime-checks', name)),
     join(resources, 'python', 'Lib', 'venv', '__main__.py'), join(resources, 'python', 'Lib', 'ensurepip', '__main__.py'),
   ]
   const nativeModules = [
     join(unpacked, 'node_modules', 'node-pty', 'prebuilds', 'win32-x64', 'conpty.node'),
-    join(unpacked, 'node_modules', '@img', 'sharp-win32-x64', 'lib', 'sharp-win32-x64-0.35.4.node'),
+    join(unpacked, 'node_modules', '@img', 'sharp-win32-x64', 'lib', 'sharp-win32-x64-0.35.5.node'),
     join(unpacked, 'node_modules', '@koromix', 'koffi-win32-x64', 'win32_x64', 'koffi.node'),
     join(unpacked, 'node_modules', '@vscode', 'ripgrep-win32-x64', 'bin', 'rg.exe'),
     join(unpacked, 'node_modules', 'node-addon-require-builtin-win32-x64-msvc', 'prebuilt', 'win32-x64-msvc-napi-v9.node'),

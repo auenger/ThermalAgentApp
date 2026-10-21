@@ -14,8 +14,21 @@ import {
   resolveDshCli,
 } from '@thermal-agent/core'
 import { LocalDatabase } from '@thermal-agent/sqlite-store'
+import { describeDshRuntime } from '../apps/core/dist/dsh-host.js'
 
 function unused() { throw new Error('not used') }
+
+test('DSH version diagnostics distinguish prereleases and use the selected runtime', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'Thermal DSH version '))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const cli = join(root, 'lib', 'bin.js')
+  for (const [version, releaseChannel] of [['0.1.5-rc.2', 'prerelease'], ['0.2.1', 'stable'], ['0.2.1+build-1', 'stable']]) {
+    await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }))
+    assert.deepEqual(describeDshRuntime(cli), { version, releaseChannel })
+  }
+  await writeFile(join(root, 'package.json'), '{broken')
+  assert.deepEqual(describeDshRuntime(cli), { releaseChannel: 'unknown' })
+})
 
 test('pinned DSH profile loads the Thermal Agent preset and controlled tool plugin', async t => {
   const root = await mkdtemp(join(tmpdir(), 'Thermal Agent profile '))
@@ -108,6 +121,17 @@ test('pinned DSH web Host reaches ready with its live profile', async t => {
   assert.deepEqual(await bridge.dshSessionRequest('stop-repair', { sessionId: repair.sessionId }), { stopped: true })
   assert.ok((await bridge.dshSessionRequest('list')).archivedSessionIds.includes(repair.sessionId))
   const ordinary = await bridge.dshSessionRequest('create')
+  const workspaceBefore = JSON.parse(await readFile(join(root, 'dsh', 'storages', 'workspace.json'), 'utf8'))
+  const workspaceIds = Object.keys(workspaceBefore.tables.workspaces)
+  assert.equal(workspaceIds.length, 1, 'DSH service should register the App workspace')
+  bridge.clearDshControl()
+  await host.restart()
+  const restartDeadline = Date.now() + 30_000
+  while (Date.now() < restartDeadline && host.getStatus().phase === 'starting') await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  assert.equal(host.getStatus().phase, 'ready', host.getStatus().detail)
+  assert.ok((await bridge.dshSessionRequest('list')).items.some(item => item.sessionId === ordinary.sessionId), 'restart must preserve sessions')
+  const workspaceAfter = JSON.parse(await readFile(join(root, 'dsh', 'storages', 'workspace.json'), 'utf8'))
+  assert.deepEqual(Object.keys(workspaceAfter.tables.workspaces), workspaceIds, 'workspace identity must be reused')
   await assert.rejects(bridge.dshSessionRequest('stop-repair', { sessionId: ordinary.sessionId }), /Not an owned repair session/)
   await assert.rejects(bridge.dshSessionRequest('run-repair', { sessionId: repair.sessionId, deadline: 0 }), /Invalid repair admission/)
 })

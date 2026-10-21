@@ -52,74 +52,31 @@ ipcMain.handle('thermal:dsh-open-session', async (event, value: unknown) => {
   const body = await response.json() as { sessions?: Array<{ sessionId: string }> }
   if (!response.ok || !body.sessions?.some(item => item.sessionId === value)) throw new Error('该会话不属于当前工作目录')
   const frame = await dshFrame()
-  await frame.executeJavaScript(`(() => {
-    document.documentElement.dataset.thermalSettings = 'false';
-    document.querySelector('[class*="VOzbGW_close"]')?.click();
-  })()`)
-  const deadline = Date.now() + 8_000
+  await callDshNavigation(frame, 'openSession', value)
+})
+
+async function callDshNavigation(frame: Awaited<ReturnType<typeof dshFrame>>, method: 'openSession' | 'openSettings', sessionId?: string): Promise<void> {
+  const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
-    const active = await frame.executeJavaScript(`(() => {
-      const id = ${JSON.stringify(value)};
-      try { if (JSON.parse(localStorage.getItem('dsh.sessions.current') || '{}').sessionId === id) return true; } catch {}
-      for (const element of document.querySelectorAll('[class*="bhn1Oq_root"]')) {
-        const key = Object.keys(element).find(name => name.startsWith('__reactFiber$'));
-        let fiber = key ? element[key] : null;
-        for (let depth = 0; fiber && depth < 30; depth++, fiber = fiber.return) {
-          const props = fiber.memoizedProps;
-          if (props && typeof props.open === 'function' && typeof props.useSessions === 'function') {
-            try { props.open(id); } catch { return false; }
-            return false;
-          }
-        }
-      }
-      return false;
+    const accepted = await frame.executeJavaScript(`(() => {
+      const api = window.thermalDsh;
+      if (!api || api.protocol !== 1) return false;
+      return api[${JSON.stringify(method)}](${JSON.stringify(sessionId)}) === true;
     })()`)
-    if (active) return
+    if (accepted) return
     await new Promise(resolveWait => setTimeout(resolveWait, 120))
   }
-  throw new Error('DSH 未能打开指定会话，请在对话面板中手动选择')
-})
+  throw new Error('DSH 客户端插件尚未就绪或版本不兼容，请重启 Agent 后重试')
+}
 
 ipcMain.handle('thermal:dsh-open-settings', async event => {
   assertDesktopSender(event.senderFrame?.url ?? '')
-  const frame = await dshFrame()
-  const deadline = Date.now() + 8_000
-  let opened = false
-  while (!opened && Date.now() < deadline) {
-    opened = await frame.executeJavaScript(`(() => {
-      if (Array.from(document.querySelectorAll('h2')).some(el => /Internal Testing Notice|Add an API key to get started|内测声明|添加 API 密钥/u.test(el.textContent || ''))) {
-        return 'onboarding';
-      }
-      document.documentElement.dataset.thermalSettings = 'true';
-      if (document.querySelector('[class*="VOzbGW_panel"]')) return 'opened';
-      const trigger = document.querySelector('button[aria-haspopup="dialog"][class*="VOzbGW_trigger"]');
-      if (!trigger) return 'waiting';
-      trigger.click();
-      return 'waiting';
-    })()`).then(result => {
-      if (result === 'onboarding') throw new Error('请先在 DSH 对话中完成首次使用提示或模型配置')
-      return result === 'opened'
-    })
-    if (!opened) await new Promise(resolveWait => setTimeout(resolveWait, 120))
-  }
-  if (!opened) throw new Error('DSH 原生设置未能打开，请在对话中手动打开设置')
-  const visible = await frame.executeJavaScript(`(() => {
-    const panel = document.querySelector('[class*="VOzbGW_panel"]');
-    return Boolean(panel && getComputedStyle(panel).visibility !== 'hidden' && panel.getBoundingClientRect().width > 0);
-  })()`)
-  if (!visible) throw new Error('DSH 设置面板已打开但不可见')
+  await callDshNavigation(await dshFrame(), 'openSettings')
 })
 
+// Retained for the current renderer preload contract; presentation belongs to DSH plugins.
 ipcMain.handle('thermal:dsh-style-frame', async event => {
   assertDesktopSender(event.senderFrame?.url ?? '')
-  const frame = await dshFrame()
-  await frame.executeJavaScript(`(() => {
-    if (document.getElementById('thermal-agent-dsh-shell')) return;
-    const style = document.createElement('style');
-    style.id = 'thermal-agent-dsh-shell';
-    style.textContent = '.pI_x6G_sidebarCol,.pI_x6G_rightbarCol{visibility:hidden!important;pointer-events:none!important}.pI_x6G_handle{display:none!important}.pI_x6G_frame{grid-template-columns:0px minmax(0,1fr) 0px!important}html[data-thermal-settings="true"] [class*="VOzbGW_overlay"]{background:var(--dsw-alias-bg-base)!important;visibility:visible!important;pointer-events:auto!important}html[data-thermal-settings="true"] [class*="VOzbGW_mask"]{display:none!important}html[data-thermal-settings="true"] [class*="VOzbGW_panel"]{width:100%!important;max-width:none!important;height:100%!important;border-radius:0!important;box-shadow:none!important}';
-    document.head.append(style);
-  })()`)
 })
 
 ipcMain.handle('thermal:set-title-bar-theme', (event, dark: unknown) => {

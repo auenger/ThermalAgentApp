@@ -1,10 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { prepareDshProfile } from './dsh-profile.js'
-import { bindDshWorkspace } from './dsh-workspace.js'
 import { terminateProcessTree } from '@thermal-agent/process-control'
 
 export interface DshStatus {
@@ -12,6 +11,8 @@ export interface DshStatus {
   url?: string
   detail?: string
   workspacePath?: string
+  version?: string
+  releaseChannel?: 'stable' | 'prerelease' | 'unknown'
 }
 
 export interface DshBridgeAddress { url: string; token: string }
@@ -35,6 +36,16 @@ export function resolveDshCli(override = process.env.THERMAL_AGENT_DSH_CLI): str
     if (existsSync(cli)) return cli
   } catch { /* dependency may not be installed yet */ }
   return undefined
+}
+
+/** Read the package owning the selected CLI, including an external runtime override. */
+export function describeDshRuntime(cli: string): Pick<DshStatus, 'version' | 'releaseChannel'> {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dirname(cli), '..', 'package.json'), 'utf8'))
+    if (manifest.name !== '@deepseek-ai/dsh' || typeof manifest.version !== 'string' ||
+      !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(manifest.version)) return { releaseChannel: 'unknown' }
+    return { version: manifest.version, releaseChannel: manifest.version.split('+')[0].includes('-') ? 'prerelease' : 'stable' }
+  } catch { return { releaseChannel: 'unknown' } }
 }
 
 async function availablePort(): Promise<number> {
@@ -62,13 +73,14 @@ export class DshHost {
     private readonly bridge: DshBridgeAddress,
     private readonly pluginPath: string,
     private readonly onStatus: (status: DshStatus) => void = () => undefined,
+    private readonly runtime?: { cli?: string; node?: string },
   ) {}
 
   getStatus(): DshStatus { return { ...this.state } }
 
   private update(status: DshStatus): void {
-    this.state = status
-    this.onStatus({ ...status })
+    this.state = { version: this.state.version, releaseChannel: this.state.releaseChannel, ...status }
+    this.onStatus({ ...this.state })
   }
 
   async start(): Promise<void> {
@@ -77,11 +89,12 @@ export class DshHost {
     const generation = ++this.generation
     this.stopping = false
     this.update({ phase: 'starting', detail: 'Starting DSH Host', workspacePath: this.workspace })
-    const cli = resolveDshCli()
+    const cli = resolveDshCli(this.runtime?.cli ?? process.env.THERMAL_AGENT_DSH_CLI)
     if (!cli) {
       this.update({ phase: 'unconfigured', detail: 'Pinned DSH runtime was not found' })
       return
     }
+    this.update({ ...this.state, ...describeDshRuntime(cli) })
     if (!existsSync(this.pluginPath)) {
       this.update({ phase: 'failed', detail: `Thermal DSH plugin is missing: ${this.pluginPath}` })
       return
@@ -90,22 +103,24 @@ export class DshHost {
     if (generation !== this.generation || this.closed) return
     mkdirSync(this.home, { recursive: true })
     mkdirSync(this.workspace, { recursive: true })
-    const workspaceId = bindDshWorkspace(this.home, this.workspace)
     const patch = prepareDshProfile(this.home, this.pluginPath)
-    const node = process.env.THERMAL_AGENT_NODE_BIN || process.execPath
+    const node = this.runtime?.node || process.env.THERMAL_AGENT_NODE_BIN || process.execPath
     const runAsNode = node === process.execPath && Boolean(process.versions.electron)
-    const child = spawn(node, ['--expose-internals', cli, 'web', '--patch', patch, '--no-open', '--host', '127.0.0.1', '--port', String(port)], {
+    const launcher = join(dirname(this.pluginPath), 'launcher.mjs')
+    const structured = existsSync(launcher)
+    const args = structured ? [launcher, patch, String(port)] : [cli, 'web', '--patch', patch, '--no-open', '--host', '127.0.0.1', '--port', String(port)]
+    const child = spawn(node, ['--expose-internals', ...args], {
       cwd: this.workspace,
       env: {
         ...process.env,
         ...(runAsNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
         DSH_HOME: this.home,
+        THERMAL_AGENT_DSH_CLI: cli,
         THERMAL_AGENT_BRIDGE_URL: this.bridge.url,
         THERMAL_AGENT_BRIDGE_TOKEN: this.bridge.token,
-        THERMAL_AGENT_WORKSPACE_ID: workspaceId,
         THERMAL_AGENT_WORKSPACE_DIR: realpathSync(this.workspace),
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       windowsHide: true,
     })
     this.child = child
@@ -116,10 +131,18 @@ export class DshHost {
       if (generation !== this.generation || this.child !== child || this.stopping) return
       stdoutTail = (stdoutTail + data).slice(-8_000)
       const url = parseDshReadyUrl(stdoutTail, port)
-      if (url && this.state.phase !== 'ready') this.update({ phase: 'ready', url, workspacePath: this.workspace })
+      if (!structured && url && this.state.phase !== 'ready') this.update({ phase: 'ready', url, workspacePath: this.workspace })
+    })
+    child.on('message', message => {
+      if (generation !== this.generation || this.child !== child || this.stopping || !message || typeof message !== 'object') return
+      const value = message as { type?: string; protocol?: number; url?: string }
+      if (value.type !== 'thermal-dsh-ready' || value.protocol !== 1 || typeof value.url !== 'string') return
+      const url = parseDshReadyUrl(`dsh web: ${value.url}`, port)
+      if (url) this.update({ phase: 'ready', url, workspacePath: this.workspace })
     })
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (data: string) => { stderrTail = (stderrTail + data).slice(-12_000) })
+    child.once('close', () => { if (this.child === child) this.child = undefined })
     child.once('error', error => {
       if (generation === this.generation && !this.stopping) this.update({ phase: 'failed', detail: error.message })
     })

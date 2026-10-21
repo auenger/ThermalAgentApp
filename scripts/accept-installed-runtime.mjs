@@ -45,7 +45,8 @@ export function inspectInstalledRuntime(options = {}) {
   check('bundled-dsh', () => {
     const bin = join(unpacked, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
     const version = command(node, [bin, '--version'])
-    if (version !== '0.1.5-rc.2') throw new Error(`Unsupported DSH version: ${version}`)
+    const manifest = JSON.parse(readFileSync(join(unpacked, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
+    if (manifest.name !== '@deepseek-ai/dsh' || typeof manifest.version !== 'string' || version !== manifest.version) throw new Error(`Unsupported DSH version: ${version}`)
     return { version, cliSha256: hash(bin) }
   })
   check('python-imports-and-independent-environment', () => {

@@ -415,6 +415,22 @@ async function route(
     writeJson(response, 200, { lan: lanPublisher.status(false) })
     return
   }
+  if (url.pathname === '/api/agent/runtime' || url.pathname === '/api/agent/runtime/stage' || url.pathname === '/api/agent/runtime/rollback') {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) throw new RequestError(403, 'LOCAL_ONLY', 'DSH runtime management is local-only')
+    if (request.method === 'GET' && url.pathname === '/api/agent/runtime') {
+      writeJson(response, 200, { runtime: await agentRuntime.runtimes.status() }); return
+    }
+    if (request.method !== 'POST') throw new RequestError(405, 'METHOD_NOT_ALLOWED', 'Use POST')
+    assertLocalWriteOrigin(request)
+    if (!agentRuntime.canManageRuntime()) throw new RequestError(409, 'DSH_STARTING', '请等待 DSH 启动完成后管理运行时')
+    if (url.pathname.endsWith('/stage')) {
+      const input = await readJsonBody(request, 4096) as { path?: unknown }
+      if (typeof input.path !== 'string' || !input.path.trim()) throw new RequestError(400, 'INVALID_PATH', '请提供运行时包目录')
+      await agentRuntime.runtimes.stage(input.path)
+    } else if (url.pathname.endsWith('/rollback')) await agentRuntime.runtimes.scheduleRollback()
+    else throw new RequestError(404, 'NOT_FOUND', 'Unknown runtime operation')
+    writeJson(response, 202, { runtime: await agentRuntime.runtimes.status() }); return
+  }
   if (request.method === 'GET' && url.pathname === '/api/agent/status') {
     const status = agentRuntime.getStatus()
     writeJson(response, 200, { agent: isLoopbackAddress(request.socket.remoteAddress) ? status : { ...status, url: undefined, workspacePath: undefined } })

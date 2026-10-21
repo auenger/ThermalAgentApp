@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const THERMAL_PRESET = [
@@ -61,15 +61,19 @@ export function prepareDshProfile(dshHome: string, pluginPath: string): string {
   chmodSync(repairComposition, 0o600)
   const patch = resolve(dshHome, 'thermal-agent.cordis.patch.yml')
   writeFileSync(patch, [
-    '- id: agent-presets',
+    '- id: agent-preset-registry',
     '  config:',
     '    default: thermal-agent',
-    '    includeShippedRoot: true',
-    '    roots:',
-    `      - path: ${JSON.stringify(presetRoot)}`,
-    '        trust: system',
-    '    includeUserRoot: true',
     '- insert:',
+    ...[['thermal-agent', composition], ['thermal-plugin-repair', repairComposition]].flatMap(([id, file]) => [
+      `    - id: preset-${id}`,
+      "      name: '@deepseek-ai/dsh-agent-preset'",
+      '      config:',
+      `        id: ${id}`,
+      `        name: ${id === 'thermal-agent' ? 'Thermal Agent' : 'Thermal Repair'}`,
+      '        plugins:',
+      ...readFileSync(file, 'utf8').trimEnd().split('\n').map(line => `          ${line}`),
+    ]),
     '    - id: thermal-session-control',
     `      name: ${JSON.stringify(resolve(pluginPath, '..', 'session-control.js'))}`,
     '    - id: thermal-agent-tools',

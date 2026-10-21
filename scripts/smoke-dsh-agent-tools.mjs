@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { boot, healProfilesModuleFallback, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
+import { boot, createRuntimeResolution, PluginPackages, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { prepareDshProfile } from '../apps/core/dist/dsh-profile.js'
@@ -13,6 +13,7 @@ process.env.DSH_HOME = home
 let ctx
 let handle
 let repairHandle
+let resolution
 
 try {
   const profileDir = join(home, 'profiles', 'spec')
@@ -23,7 +24,7 @@ try {
   writeFileSync(settings, '{}\n')
   const installAnchor = resolve('node_modules/@deepseek-ai/dsh/package.json')
   const patch = prepareDshProfile(home, resolve('plugins/dsh-thermal/dist/index.js'))
-  await healProfilesModuleFallback({ installAnchor, home })
+  resolution = await createRuntimeResolution({ installAnchor, home })
   const patches = [
     ...loadOverlayPatches('thermal-smoke', resolve('node_modules/@deepseek-ai/dsh-base/cordis.patch.yml')),
     ...loadOverlayPatches('thermal-smoke', resolve('node_modules/@deepseek-ai/dsh-web-app/cordis.patch.yml')),
@@ -46,11 +47,12 @@ try {
     ...loadOverlayPatches('thermal-smoke', patch),
     { id: 'thermal-session-control', disabled: true },
   ]
-  ctx = await boot('thermal-smoke', config, patches, bootContext => {
+  ctx = await boot('thermal-smoke', config, patches, async bootContext => {
     bootContext.provide('connection', {
       fetch: { register: () => () => {} },
       rpc: { intercept: () => () => {} },
     })
+    await bootContext.plugin(PluginPackages, { resolution })
     provideCmdline(bootContext, { args: [], exit: () => {} })
   })
   const presets = await ctx.agentPresets.list()

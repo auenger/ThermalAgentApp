@@ -2,13 +2,15 @@ import type { DynamicScriptService } from './dynamic-script-service.js'
 import { resolve } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { LocalDatabase } from '@thermal-agent/sqlite-store'
-import { DshHost, type DshStatus } from './dsh-host.js'
+import { DshRuntimeStore, type DshSelection } from './dsh-runtime-store.js'
+import { DshHost, describeDshRuntime, resolveDshCli, type DshStatus } from './dsh-host.js'
 import type { IcepakPluginPort } from './icepak-plugin-client.js'
 import { ThermalToolsBridge } from './thermal-tools-bridge.js'
 import type { PluginHost } from './plugin-host.js'
 import type { RepairJobTransport } from './plugin-repair-jobs.js'
 
 export class DshRuntime {
+  readonly runtimes: DshRuntimeStore
   private readonly bridge: ThermalToolsBridge
   private host?: DshHost
   private status: DshStatus = { phase: 'unconfigured', detail: 'DSH runtime has not started' }
@@ -33,8 +35,11 @@ export class DshRuntime {
     private readonly plugins?: PluginHost,
     dynamicScripts?: DynamicScriptService,
   ) {
+    this.runtimes = new DshRuntimeStore(home)
     this.bridge = new ThermalToolsBridge(home, database, icepak, nodeId, plugins, dynamicScripts)
   }
+
+  canManageRuntime(): boolean { return !this.startTask && !this.closing }
 
   getStatus(): DshStatus { return { ...this.status } }
 
@@ -105,13 +110,35 @@ export class DshRuntime {
     this.status = { phase: 'starting', detail: 'Starting Thermal Agent runtime' }
     try {
       const bridgeAddress = await this.bridge.start()
-      const dshHome = resolve(this.home, 'dsh')
-      const workspace = resolve(this.home, 'workspace')
-      const pluginPath = resolve(
-        process.env.THERMAL_AGENT_DSH_PLUGIN ?? 'plugins/dsh-thermal/dist/index.js',
-      )
-      this.host = new DshHost(dshHome, workspace, bridgeAddress, pluginPath, status => { this.status = status })
-      await this.host.start()
+      const bundledCli = resolveDshCli()
+      const bundledVersion = bundledCli ? describeDshRuntime(bundledCli).version : undefined
+      if (bundledVersion) await this.runtimes.backupBundledProfile(bundledVersion)
+      const bundledPlugin = resolve(process.env.THERMAL_AGENT_DSH_PLUGIN ?? 'plugins/dsh-thermal/dist/index.js')
+      const launch = async (selection: DshSelection) => {
+        const selected = await this.runtimes.launch(selection)
+        this.host = new DshHost(this.runtimes.profile(selection), resolve(this.home, 'workspace'), bridgeAddress,
+          selected.plugin ?? bundledPlugin, status => { this.status = status }, selected)
+        await this.host.start()
+      }
+      let current = await this.runtimes.current()
+      let candidate: DshSelection | undefined
+      try { ({ current, candidate } = await this.runtimes.prepare()) }
+      catch (error) { await this.runtimes.failed(error) }
+      if (candidate) {
+        try {
+          await launch(candidate)
+          const deadline = Date.now() + 60_000
+          while (Date.now() < deadline && this.status.phase === 'starting') await new Promise(resolveWait => setTimeout(resolveWait, 100))
+          if (this.status.phase !== 'ready') throw new Error(this.status.detail ?? 'New DSH runtime did not become ready')
+          await this.bridge.dshSessionRequest('list')
+          await this.runtimes.commit(current, candidate)
+        } catch (error) {
+          await this.host?.shutdown()
+          this.bridge.clearDshControl()
+          await this.runtimes.failed(error)
+          await launch(current)
+        }
+      } else await launch(current)
       if (this.plugins && !this.closing && !this.repairTimer) {
         this.repairTimer = setInterval(() => {
           if (this.status.phase === 'ready' && !this.closing && !this.repairSuspended) void this.plugins!.repairJobs.reconcile(() => this.plugins!.repairJobInputs(), this.repairTransport).then(() => this.plugins!.applyReadyRepairs()).catch(() => { /* Application failure stays in host evidence; no business replay. */ })

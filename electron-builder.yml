@@ -14,6 +14,7 @@ files:
   - apps/web/dist/**
   - packages/*/dist/**
   - plugins/dsh-thermal/dist/**
+  - plugins/dsh-thermal/package.json
   - plugins/icepak-pyaedt/python/**
   - plugins/report-reportlab/python/**
   - node_modules/**

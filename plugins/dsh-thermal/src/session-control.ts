@@ -12,12 +12,14 @@ export const inject = ['sessionController', 'workspaceRegistry', 'agents']
 export function apply(ctx: Context): void {
   const bridgeUrl = process.env.THERMAL_AGENT_BRIDGE_URL
   const token = process.env.THERMAL_AGENT_BRIDGE_TOKEN
-  const workspaceId = process.env.THERMAL_AGENT_WORKSPACE_ID
   const workspaceDir = process.env.THERMAL_AGENT_WORKSPACE_DIR
-  if (!bridgeUrl || new URL(bridgeUrl).hostname !== '127.0.0.1' || !token || !workspaceId || !workspaceDir) {
+  if (!bridgeUrl || new URL(bridgeUrl).hostname !== '127.0.0.1' || !token || !workspaceDir) {
     throw new Error('Thermal session control environment is incomplete')
   }
   ctx.effect(async () => {
+    // Let DSH own persistence and migrations instead of editing its storage JSON.
+    const workspace = await ctx.workspaceRegistry.create(workspaceDir)
+    const workspaceId = workspace.id
     const repairs = createRepairControl(ctx, workspaceId, workspaceDir)
     const server = createServer((request, response) => {
       const actual = Buffer.from(request.headers.authorization?.replace(/^Bearer /u, '') ?? '')
