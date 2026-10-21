@@ -18,6 +18,13 @@ files:
   - plugins/icepak-pyaedt/python/**
   - plugins/report-reportlab/python/**
   - node_modules/**
+  # This configuration packages Windows; keep filters with the explicit allowlist.
+  - '!node_modules/**/*darwin*/**'
+  - '!node_modules/**/*macos*/**'
+  - '!node_modules/**/*.dylib'
+  - '!node_modules/sherpa-onnx*/**'
+  - '!node_modules/@deepseek-ai/dsh-experimental-*voice*/**'
+  - '!node_modules/@deepseek-ai/dsh-experimental-*speech-to-text*/**'
 extraResources:
   - from: scripts
     to: runtime-checks

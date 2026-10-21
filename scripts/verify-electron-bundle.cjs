@@ -1,4 +1,4 @@
-const { existsSync, readFileSync, readdirSync } = require('node:fs')
+const { existsSync, readFileSync, readdirSync, writeFileSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const { join } = require('node:path')
@@ -16,6 +16,22 @@ function verifyViewerAssets(archivePath) {
     const name = files.find(p => pattern.test(p))
     if (!name || !extractFile(archivePath, name.slice(1)).length) throw new Error(`Packaged CAD viewer asset missing: ${pattern}`)
   }
+}
+
+function verifyExcludedWindowsResources(resources) {
+  const forbidden = /(?:^|\/)(?:[^/]*(?:darwin|macos)[^/]*|sherpa-onnx[^/]*|dsh-experimental-[^/]*(?:voice|speech-to-text)[^/]*)\/|\.dylib$/iu
+  const archive = join(resources, 'app.asar')
+  const entries = listPackage(archive).map(path => path.replaceAll('\\', '/'))
+  const walk = (directory, prefix = '') => {
+    if (!existsSync(directory)) return
+    for (const item of readdirSync(directory, { withFileTypes: true })) {
+      const path = `${prefix}/${item.name}`
+      if (forbidden.test(item.isDirectory() ? path + '/' : path)) throw new Error(`Excluded Windows resource was packaged: ${path}`)
+      if (item.isDirectory()) walk(join(directory, item.name), path)
+    }
+  }
+  for (const path of entries) if (forbidden.test(path)) throw new Error(`Excluded Windows resource was packaged: ${path}`)
+  walk(join(resources, 'app.asar.unpacked', 'node_modules'))
 }
 
 function verifyBundle(appOutDir) {
@@ -71,10 +87,17 @@ function verifyBundle(appOutDir) {
   const actual = createHash('sha256').update(readFileSync(required['CAD reference STEP'])).digest('hex')
   if (metadata.sha256 !== actual || metadata.cadKernelRoundtrip?.passed !== true) throw new Error('Packaged CAD sample hash or geometry roundtrip metadata is invalid')
   verifyViewerAssets(required['Electron application'])
+  verifyExcludedWindowsResources(resources)
 }
 
 exports.default = async function afterPack(context) {
   if (context.electronPlatformName !== 'win32') return
+  // DSH's plugin catalogue reads this unpacked manifest through plain Node.
+  // Do not advertise a shipped voice bundle after removing its files.
+  const dshManifest = join(context.appOutDir, 'resources', 'app.asar.unpacked', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
+  const metadata = JSON.parse(readFileSync(dshManifest, 'utf8'))
+  delete metadata.dependencies['@deepseek-ai/dsh-experimental-voice-input-bundle']
+  writeFileSync(dshManifest, JSON.stringify(metadata, null, 2) + '\n')
   verifyBundle(context.appOutDir)
   if (process.platform !== 'win32') {
     console.warn('Cross-build: Windows Node/Python execution checks are deferred to a Windows host.')

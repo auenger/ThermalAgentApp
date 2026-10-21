@@ -131,7 +131,17 @@ test('packaged desktop points plain Node and Python at unpacked resources', asyn
   assert.throws(() => verifyBundle(root), /offline ensurepip wheel/u)
   const wheel = join(resources, 'python', 'Lib', 'ensurepip', '_bundled', 'pip-25.0.1-py3-none-any.whl')
   await mkdir(join(wheel, '..'), { recursive: true }); await writeFile(wheel, 'fixture wheel; static presence check only')
+  const upstreamSourceNote = join(unpacked, 'node_modules', '@deepseek-ai', 'libreoffice-kit-win32-x64', 'sources', '0002-macos-main-thread-init.patch')
+  await mkdir(join(upstreamSourceNote, '..'), { recursive: true })
+  await writeFile(upstreamSourceNote, 'upstream cross-platform source patch, not a macOS dependency')
   assert.doesNotThrow(() => verifyBundle(root))
+  for (const name of ['@deepseek-ai/libreoffice-kit-darwin-x64', 'sherpa-onnx-win-x64', '@deepseek-ai/dsh-experimental-voice-input-bundle']) {
+    const forbidden = join(unpacked, 'node_modules', name)
+    await mkdir(forbidden, { recursive: true })
+    await writeFile(join(forbidden, 'package.json'), '{}')
+    assert.throws(() => verifyBundle(root), /Excluded Windows resource/u)
+    await rm(forbidden, { recursive: true })
+  }
   const wasm = (await readdir(join(archivedWeb, 'assets'))).find(name => name.endsWith('.wasm'))
   await rm(join(archivedWeb, 'assets', wasm))
   await createPackage(archiveInput, join(resources, 'app.asar'))
