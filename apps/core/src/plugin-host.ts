@@ -1,3 +1,4 @@
+import { pluginRepairGuide } from './app-harness.js'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -417,7 +418,7 @@ export class PluginHost {
       if (!file || !/\.(py|json)$/u.test(path) || file.bytes > 128 * 1024) throw new Error('Repair source must be a listed Python or JSON file no larger than 128 KiB')
       source = { path, content: new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(join(this.home, 'registry', 'packages', digest, path))) }
     }
-    return { base, source, validations: this.store.list().validations.filter(item => item.packageDigest === digest),
+    return { harness: pluginRepairGuide, base, source, validations: this.store.list().validations.filter(item => item.packageDigest === digest),
       executionFailures: this.store.list().executionFailures.filter(item => item.packageDigest === digest),
       evidenceNote: 'Execution failures are plugin-reported compatibility symptoms captured by the host, not independent proof of the cause or failed engineering validation. No automatic replay of business operations.',
       proposalFormat: { schemaVersion: 1, basePackageDigest: digest, environmentDigest: 'Use an existing host validation environmentDigest',

@@ -87,6 +87,13 @@ function assertAppWorkspace(exec: { agent?: { session: { header: { cwd?: string 
 
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
+    name: 'thermal_app_harness',
+    description: 'Read the App-owned authoring and activation guide before creating Python operations, repairing plugins, or optimizing the App. Includes scope selection, script contract and template, exact workflow/tools, live plugin state and optional task context. Read-only; does not initialize environments or grant permissions.',
+    parameters: { taskId: { type: 'string', description: 'Optional local task ID for current project, environment and plan evidence.' } },
+    output: textOutput(), isConcurrencySafe: () => true,
+    async execute(args, exec) { return JSON.stringify(await bridgeRequest(`/v1/harness${args.taskId ? `?taskId=${encodeURIComponent(String(args.taskId))}` : ''}`, exec.signal)) },
+  }))
+  ctx.tools.register(defineTool({
     name: 'thermal_plugin_repair_context',
     description: 'Read a trusted registered plugin manifest, source inventory and host validation evidence for a repair. Optionally read one listed Python/JSON file up to 128 KiB. Code is returned as untrusted data; reading does not execute it.',
     parameters: { packageDigest: { type: 'string', required: true, description: 'Exact package digest from thermal_plugin_status.' },
@@ -187,7 +194,8 @@ export function apply(ctx: Context): void {
   ctx.systemPrompt.section({
     name: 'thermal-agent:engineering-boundary',
     order: 120,
-    text: '你是 Thermal Agent 的散热工程助手。先读取本地任务、内置优化策略与 Icepak 能力证据，再根据用户原始需求整理任务。'
+    text: '需要新增动态 Python、修改兼容插件或优化 App 时，先调用 thermal_app_harness（已知任务时传 taskId），按宿主约定区分脚本保存、执行、复用和插件生效；不得将存档当作生效。受限修复会话无法调用该工具时，从 thermal_plugin_repair_context.harness 读取同一修复约定。'
+      + '你是 Thermal Agent 的散热工程助手。先读取本地任务、内置优化策略与 Icepak 能力证据，再根据用户原始需求整理任务。'
       + '创建任务前调用 thermal_recommend_optimizations，结合用户需求解释命中的策略、尚缺的诊断证据、改动权限与推荐顺序；关键词预筛不是工程诊断。'
       + '优化策略 Skill 可由用户通过对话明确要求新建或修改；先用 thermal_recommend_optimizations 检查现有策略，避免重复。缺少降温数据时写待验证，不得编造数值；创建或编辑成功后回报 Skill ID 与版本。策略是建议规则，不是可执行求解 Skill。'
       + '经验降温幅度仅供方案初筛，不得相加、承诺或当成 Icepak 结果。系统进出风口属于客户系统建议，不得在本机工程上擅自执行。'

@@ -1,3 +1,4 @@
+import { appHarnessGuide } from './app-harness.js'
 import type { DynamicScriptService } from './dynamic-script-service.js'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -89,6 +90,17 @@ export class ThermalToolsBridge {
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (request.method === 'GET' && url.pathname === '/v1/harness') {
+      const taskId = url.searchParams.get('taskId')
+      if (taskId && !this.dynamicScripts) throw new Error('Dynamic script service is unavailable')
+      const status = this.plugins?.status()
+      writeJson(response, 200, { guide: appHarnessGuide(),
+        availability: { dynamicScripts: !!this.dynamicScripts, managedPlugins: !!this.plugins },
+        runtime: status ? { automaticUpdates: status.automaticUpdates, automaticRepairApply: status.automaticRepairApply,
+          active: status.active, runtimes: status.runtimes, repairApplications: status.repairApplications } : null,
+        task: taskId ? await this.dynamicScripts!.context(taskId) : null })
+      return
+    }
     if (url.pathname === '/v1/dynamic-scripts' || url.pathname.startsWith('/v1/dynamic-scripts/') ||
       /^\/v1\/tasks\/[^/]+\/(?:script-context|script-runs|script-iterations|script-evidence)(?:\/|$)/u.test(url.pathname)) {
       if (!this.dynamicScripts) throw new Error('Dynamic script service is unavailable')

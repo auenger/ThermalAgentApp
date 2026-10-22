@@ -159,3 +159,28 @@ test('Core restart reuses the saved script with different parameters without res
   assert.deepEqual(report.runs.map(run => run.parameters.power), [15, 35])
   assert.equal(report.observations.nativeReadbacks, 0)
 })
+
+
+test('App harness reports live availability and task evidence without executing or granting actions', async t => {
+  const f = await fixture(t), task = f.task({ planConfirmed: false })
+  let snapshot = { automaticUpdates: false, automaticRepairApply: false, active: {}, runtimes: [], repairApplications: [] }
+  const host = { status: () => snapshot }
+  const bridge = new ThermalToolsBridge(f.home, f.app.database, f.port, f.app.nodeIdentity.nodeId, host, f.app.dynamicScripts)
+  const address = await bridge.start(); t.after(() => bridge.stop())
+  assert.equal((await fetch(`${address.url}/v1/harness`)).status, 401)
+  const get = path => fetch(`${address.url}${path}`, { headers: { Authorization: `Bearer ${address.token}` } })
+  const result = await (await get(`/v1/harness?taskId=${task.id}`)).json()
+  assert.equal(result.guide.schemaVersion, 1)
+  assert.deepEqual(result.availability, { dynamicScripts: true, managedPlugins: true })
+  assert.equal(result.task.planConfirmed, false)
+  assert.equal(result.task.source.sha256, f.original.sha256)
+  assert.equal(result.runtime.automaticRepairApply, false)
+  assert.deepEqual(f.app.dynamicScripts.library.runs(task.id), [])
+  snapshot = { ...snapshot, automaticRepairApply: true, active: { 'icepak-pyaedt': { current: 'a'.repeat(64) } } }
+  const refreshed = await (await get('/v1/harness')).json()
+  assert.equal(refreshed.runtime.automaticRepairApply, true)
+  assert.equal(refreshed.runtime.active['icepak-pyaedt'].current, 'a'.repeat(64))
+  assert.equal(refreshed.task, null)
+  const foreign = f.task({}, 'another-node')
+  assert.equal((await get(`/v1/harness?taskId=${foreign.id}`)).status, 409)
+})

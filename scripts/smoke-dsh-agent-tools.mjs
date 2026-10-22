@@ -73,6 +73,7 @@ try {
     'thermal_probe_icepak',
     'thermal_inspect_project',
     'thermal_plugin_status',
+    'thermal_app_harness',
     'thermal_plugin_repair_context',
     'thermal_stage_plugin_repair',
     'thermal_reconcile_plugins',
